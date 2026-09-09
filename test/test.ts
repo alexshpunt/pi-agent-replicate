@@ -5341,6 +5341,25 @@ describe("herdr.ts", () => {
 			]);
 		});
 
+		it("resolves moved caller IDs instead of trusting inherited environment", () => {
+			const keys = ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] as const;
+			const previous = keys.map((key) => process.env[key]);
+			try {
+				for (const key of keys) process.env[key] = "stale";
+				const pane = { pane_id: "w9:p2", tab_id: "w9:t2", workspace_id: "w9" };
+				assert.deepEqual(__herdrTest__.getHerdrCurrentPaneInfo((args) => {
+					assert.deepEqual(args, ["pane", "current", "--current"]);
+					return JSON.stringify({ result: { pane } });
+				}), pane);
+				assert.throws(() => __herdrTest__.getHerdrCurrentPaneInfo(() => "{}"));
+			} finally {
+				keys.forEach((key, index) => {
+					if (previous[index] === undefined) delete process.env[key];
+					else process.env[key] = previous[index];
+				});
+			}
+		});
+
 		it("targets the current workspace when creating a subagent tab", () => {
 			assert.deepEqual(
 				__herdrTest__.buildTabCreateArgs("reviewer", "/repo", "workspace-2"),

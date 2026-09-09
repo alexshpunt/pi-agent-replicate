@@ -142,6 +142,8 @@ pi install git:github.com/alexshpunt/pi-lpt-herdr-subagents@main
 
 Smoke-test delivery with an autonomous subagent instructed to return one exact marker. Success means the marker itself—not only a generic wake-up notice—automatically appears in the parent turn.
 
+The caller pane is resolved through `herdr pane current --current` before creating a child tab. Moving the parent pane between workspaces does not require restarting Pi; inherited pane IDs are not used as current workspace IDs.
+
 Subagent tabs, panes, and worktree workspaces are created without stealing keyboard focus. Launch commands target child panes by explicit ID, so focus and command delivery are independent. Note: the `interactive` option controls parent status notifications, not terminal focus.
 
 ## What's Included
