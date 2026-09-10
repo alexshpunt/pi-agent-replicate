@@ -29,13 +29,15 @@ The terminal path:
 3. writes one immutable result file and one durable inbox entry;
 4. materializes that inbox in the exact parent session once;
 5. records delivery before cleanup; and
-6. removes the child from active supervision as soon as cleanup allows.
+6. removes the child from active supervision as soon as delivery is recorded.
 
-The stable terminal delivery ID is the child ID prefixed with `terminal:`. Delivery uses an exclusive durable claim. A successful send is acknowledged once. A failed send remains retryable. Compaction, reload, restored watchers, and later parent tool calls cannot materialize an acknowledged delivery again.
+The stable terminal delivery ID is the child ID prefixed with `terminal:`. Delivery uses an exclusive durable claim. A successful send is acknowledged once. A send that throws remains retryable. A send that Pi only queued — the streaming parent has not written it to its session yet — is never repeated: the claim stays held until the parent session holds the record, so one result cannot become many copies. Compaction, reload, restored watchers, and later parent tool calls cannot materialize an acknowledged delivery again.
 
 Old pending `settled` inbox entries are acknowledged without being sent. This prevents an upgrade or restored session from exposing an intermediate response after the terminal-only rule is active.
 
-Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. If cleanup fails, the delivered child can remain visible as `cleanup pending`, but its result is not sent again.
+Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. A delivered child leaves the widget immediately; a rejected Herdr close retries a few times with backoff and then stops with a delivery-log record. Its result is not sent again.
+
+Recovery is bounded to three attempts, counted per child across crash and stale causes. The budget is final: an exhausted child is not killed, resumed, or re-delivered on later watchdog passes.
 
 ## Descendants and exact-parent binding
 

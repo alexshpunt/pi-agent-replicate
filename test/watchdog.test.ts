@@ -9,6 +9,7 @@ import {
   consumeRecoveryAttempt,
   DEFAULT_QUIET_THRESHOLD_MS,
   resolveQuietThreshold,
+  shouldStartStaleRecovery,
 } from "../pi-extension/subagents/watchdog.ts";
 
 function activity(overrides: Partial<SubagentActivityState> = {}): SubagentActivityState {
@@ -124,6 +125,36 @@ test("shares and persists one three-attempt budget across crash and stale recove
   assert.equal(exhausted.exhausted, true);
   assert.match(exhausted.reason, /mixed crash and stale/);
   assert.equal(readFileSync(logPath, "utf8").trim().split("\n").length, 3);
+});
+
+test("stops stale supervision once the recovery budget is exhausted", () => {
+  const available = {
+    interactive: false,
+    pendingTerminalDelivery: false,
+    recoveryAttemptActive: false,
+    recoveryExhausted: false,
+  };
+  assert.equal(shouldStartStaleRecovery(available), true, "a quiet autonomous child stays supervised");
+  assert.equal(
+    shouldStartStaleRecovery({ ...available, recoveryExhausted: true }),
+    false,
+    "an exhausted budget must not start another stale recovery pass",
+  );
+  assert.equal(
+    shouldStartStaleRecovery({ ...available, pendingTerminalDelivery: true }),
+    false,
+    "a queued terminal delivery owns the next step",
+  );
+  assert.equal(
+    shouldStartStaleRecovery({ ...available, recoveryAttemptActive: true }),
+    false,
+    "one recovery pass runs at a time",
+  );
+  assert.equal(
+    shouldStartStaleRecovery({ ...available, interactive: true }),
+    false,
+    "an interactive child is never killed by the watchdog",
+  );
 });
 
 test("fails closed when the durable recovery ledger is corrupt", () => {

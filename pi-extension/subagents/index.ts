@@ -51,6 +51,7 @@ import {
 	classifyStaleness,
 	consumeRecoveryAttempt,
 	resolveQuietThreshold,
+	shouldStartStaleRecovery,
 	type RecoveryCause,
 } from "./watchdog.ts";
 import {
@@ -792,7 +793,13 @@ interface RunningSubagent {
   ignorePriorSentinelEpoch?: number;
   recoveryState?: { cause: RecoveryCause; attempt: number; label: string };
   recoveryFailureReason?: string;
+  /** The recovery budget is spent; the watchdog must not recover this child again. */
+  recoveryExhausted?: boolean;
   cleanupPending?: boolean;
+  cleanupAttempts?: number;
+  cleanupRetryAt?: number;
+  /** Delivered and finished: the row leaves the widget while the pane is cleaned up. */
+  retired?: boolean;
   cancellationAttempt?: Promise<boolean>;
 	worktree?: WorktreeLaunch;
 
@@ -824,9 +831,21 @@ interface WorkflowCancelHooks {
 	waitExit?: typeof waitForProcessesExit;
 }
 
+/**
+ * One result this process already queued for the parent but has not seen the
+ * parent session persist yet. The durable claim stays ours while the copy is
+ * only queued, so no observer can queue a second copy of the same result.
+ */
+interface InflightDelivery {
+	rootDir: string;
+	nodeId: string;
+	token: string;
+}
+
 interface SubagentRuntime {
 	runningSubagents: Map<string, RunningSubagent>;
 	resultDeliveryQueue: ResultDeliveryQueue;
+	inflightDeliveries: Map<string, InflightDelivery>;
 	pendingWorkflow?: PendingWorkflow;
 	activeWorkflow?: WorkflowOwner;
 	workflowOutcomes: Map<string, WorkflowTerminalOutcome>;
@@ -841,6 +860,7 @@ function createSubagentRuntime(): SubagentRuntime {
 	return {
 		runningSubagents: new Map<string, RunningSubagent>(),
 		resultDeliveryQueue: createResultDeliveryQueue(),
+		inflightDeliveries: new Map<string, InflightDelivery>(),
 		workflowOutcomes: new Map<string, WorkflowTerminalOutcome>(),
 		workflowStartupScanned: false,
 	};
@@ -852,6 +872,9 @@ const runtime: SubagentRuntime =
 	((globalThis as any)[RUNTIME_KEY] = createSubagentRuntime());
 if (!runtime.resultDeliveryQueue) {
 	runtime.resultDeliveryQueue = createResultDeliveryQueue();
+}
+if (!runtime.inflightDeliveries) {
+	runtime.inflightDeliveries = new Map<string, InflightDelivery>();
 }
 if (!runtime.workflowOutcomes) {
 	runtime.workflowOutcomes = new Map<string, WorkflowTerminalOutcome>();
@@ -885,6 +908,36 @@ function recordDeliveryFailure(
 }
 
 
+/**
+ * Publish the durable acknowledgement for one restored inbox and drop its
+ * in-process record. A copy that was queued for the parent also waits until the
+ * parent session holds it; until then the claim stays ours, because the copy is
+ * only queued inside Pi and nobody may queue a second one for the same result.
+ */
+function acknowledgeRestoredInboxDelivery(input: {
+	rootDir: string;
+	nodeId: string;
+	deliveryId: string;
+	token: string;
+	sessionFile: string;
+	/** Set for a sent copy: the acknowledgement waits for the parent record. */
+	requiresParentRecord?: boolean;
+	settledActivitySequence?: number;
+}): void {
+	if (input.requiresParentRecord && !sessionContainsDelivery(input.sessionFile, input.deliveryId)) return;
+	if (!completeLineageInboxMaterialization(input.rootDir, input.deliveryId, input.nodeId, input.token)) return;
+	runtime.inflightDeliveries.delete(input.deliveryId);
+	if (input.settledActivitySequence !== undefined) {
+		appendLineageEvent(
+			input.rootDir,
+			`settled-delivered:${input.nodeId}:${input.settledActivitySequence}`,
+			"settled_delivered",
+			input.nodeId,
+			{ resultId: input.deliveryId, activitySequence: input.settledActivitySequence },
+		);
+	}
+}
+
 /** Materialize inbox records left by a crash into this exact session once. */
 async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void> {
 	const manager = ctx.sessionManager;
@@ -901,53 +954,84 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 	const roots = discoverLineageRoots(manager.getSessionDir(), sessionFile);
 	for (const rootDir of roots) {
 		for (const inbox of pendingLineageInboxes(rootDir, sessionId, sessionFile)) {
-      const resultContent = inbox.payload.resultContent;
-      if (typeof resultContent !== "string") continue;
-      const kind = inbox.payload.kind ?? "terminal";
-      const suppressIntermediate = kind === "settled";
-      const claim = claimLineageInboxMaterialization({
-        rootDir,
-        deliveryId: inbox.deliveryId,
-        nodeId: inbox.nodeId,
-        hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
-      });
-      if (claim.status !== "acquired") continue;
-      try {
-        if (!suppressIntermediate) {
-          const childSessionFile = reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
-          sendSubagentResult(runtime.pi, resultContent, {
-            kind,
-            childId: inbox.nodeId,
-            sessionFile: childSessionFile,
-            deliveryId: inbox.deliveryId,
-            resultContent,
-          });
-          await waitForSessionDeliveryEvidence(sessionFile, inbox.deliveryId);
-        }
-        if (!completeLineageInboxMaterialization(rootDir, inbox.deliveryId, inbox.nodeId, claim.token)) {
-          throw new Error("Unable to publish inbox materialization acknowledgement");
-        }
+			const resultContent = inbox.payload.resultContent;
+			if (typeof resultContent !== "string") continue;
+			const kind = inbox.payload.kind ?? "terminal";
+			const activitySequence = typeof inbox.payload.activitySequence === "number"
+				? inbox.payload.activitySequence
+				: undefined;
 
-        if (kind === "settled" && typeof inbox.payload.activitySequence === "number") {
-          appendLineageEvent(
-            rootDir,
-            `settled-delivered:${inbox.nodeId}:${inbox.payload.activitySequence}`,
-            "settled_delivered",
-            inbox.nodeId,
-            { resultId: inbox.deliveryId, activitySequence: inbox.payload.activitySequence },
-          );
-        }
-      } catch {
-        releaseLineageInboxMaterialization({
-          rootDir,
-          deliveryId: inbox.deliveryId,
-          nodeId: inbox.nodeId,
-          token: claim.token,
-          hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
-        });
-      }
+			// This process already queued this exact result. The parent has not
+			// persisted it yet, so just finish the record when it does. Sending
+			// again here is what delivered one result many times.
+			const inflight = runtime.inflightDeliveries.get(inbox.deliveryId);
+			if (inflight) {
+				acknowledgeRestoredInboxDelivery({
+					rootDir,
+					nodeId: inbox.nodeId,
+					deliveryId: inbox.deliveryId,
+					token: inflight.token,
+					sessionFile,
+					requiresParentRecord: true,
+					settledActivitySequence: activitySequence,
+				});
+				continue;
 			}
+
+			const claim = claimLineageInboxMaterialization({
+				rootDir,
+				deliveryId: inbox.deliveryId,
+				nodeId: inbox.nodeId,
+				hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
+			});
+			// Another observer owns this delivery, or it is already acknowledged.
+			if (claim.status !== "acquired") continue;
+
+			// Intermediate settled turns are acknowledged without being sent.
+			if (kind === "settled") {
+				acknowledgeRestoredInboxDelivery({
+					rootDir,
+					nodeId: inbox.nodeId,
+					deliveryId: inbox.deliveryId,
+					token: claim.token,
+					sessionFile,
+					settledActivitySequence: activitySequence,
+				});
+				continue;
+			}
+
+			const childSessionFile = reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
+			try {
+				sendSubagentResult(runtime.pi, resultContent, {
+					kind,
+					childId: inbox.nodeId,
+					sessionFile: childSessionFile,
+					deliveryId: inbox.deliveryId,
+					resultContent,
+				});
+			} catch {
+				// Nothing was queued, so the claim stays retryable.
+				releaseLineageInboxMaterialization({
+					rootDir,
+					deliveryId: inbox.deliveryId,
+					nodeId: inbox.nodeId,
+					token: claim.token,
+					hasExactSessionEvidence: () => sessionContainsDelivery(sessionFile, inbox.deliveryId),
+				});
+				continue;
+			}
+			runtime.inflightDeliveries.set(inbox.deliveryId, { rootDir, nodeId: inbox.nodeId, token: claim.token });
+			acknowledgeRestoredInboxDelivery({
+				rootDir,
+				nodeId: inbox.nodeId,
+				deliveryId: inbox.deliveryId,
+				token: claim.token,
+				sessionFile,
+				requiresParentRecord: true,
+				settledActivitySequence: activitySequence,
+			});
 		}
+	}
 }
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 function startRecoveredWatcher(running: RunningSubagent): void {
@@ -1066,6 +1150,9 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
           : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
+        // A drained node is finished: its result was delivered in an earlier
+        // process, so it must not take a widget row while its pane is closed.
+        ...(drained ? { retired: true } : {}),
       };
       runningSubagents.set(running.id, running);
       if (running.tabId) rememberPaneTab(running.surface, running.tabId);
@@ -1254,10 +1341,15 @@ function renderSubagentWidgetLines(
 	width: number,
 ): string[] {
 	const now = Date.now();
-	const rendered = agents.map((agent) => ({
-		agent,
-		projection: projectLifecycle(ensureLifecycle(agent), now),
-	}));
+	// A retired child is delivered and finished. Its row is gone even while the
+	// pane is still being closed.
+	const rendered = agents
+		.filter((agent) => !agent.retired)
+		.map((agent) => ({
+			agent,
+			projection: projectLifecycle(ensureLifecycle(agent), now),
+		}));
+	if (rendered.length === 0) return [];
 	const activeCount = rendered.filter(
 		({ projection }) =>
 			projection.kind === "active" ||
@@ -1265,7 +1357,7 @@ function renderSubagentWidgetLines(
 			projection.kind === "running" ||
 			projection.kind === "blocked",
 	).length;
-	const openCount = agents.length - activeCount;
+	const openCount = rendered.length - activeCount;
 	const info =
 		activeCount > 0
 			? openCount > 0
@@ -1308,7 +1400,8 @@ function updateWidget() {
 	const latestCtx = runtime.latestCtx;
 	if (!latestCtx?.hasUI) return;
 
-	if (runningSubagents.size === 0) {
+	const visible = Array.from(runningSubagents.values()).filter((agent) => !agent.retired);
+	if (visible.length === 0) {
 		latestCtx.ui.setWidget("subagent-status", undefined);
 		if (widgetInterval) {
 			clearInterval(widgetInterval);
@@ -1324,10 +1417,7 @@ function updateWidget() {
 			return {
 				invalidate() {},
 				render(width: number) {
-					return renderSubagentWidgetLines(
-						Array.from(runningSubagents.values()),
-						width,
-					);
+					return renderSubagentWidgetLines(visible, width);
 				},
 			};
 		},
@@ -1590,19 +1680,6 @@ function sessionContainsDelivery(sessionFile: string, deliveryId: string): boole
   try { return readFileSync(sessionFile, "utf8").includes(deliveryId); } catch { return false; }
 }
 
-async function waitForSessionDeliveryEvidence(
-  sessionFile: string,
-  deliveryId: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (sessionContainsDelivery(sessionFile, deliveryId)) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`Parent session did not persist delivery ${deliveryId}`);
-}
-
 /** Wait for durable descendant delivery before releasing a terminal result. */
 async function waitForDescendantDrain(
   running: Pick<RunningSubagent, "lineage" | "id">,
@@ -1772,7 +1849,13 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
             nodeId: running.id,
             hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
           });
-          if (claim.status === "busy") throw new Error("Terminal inbox materialization is claimed by another observer");
+          if (claim.status === "busy") {
+            // Another observer owns this delivery, or this process already
+            // queued the copy. That is not a delivery failure, so retry quietly
+            // instead of projecting an error and feeding the widget a lie.
+            pending.queued = false;
+            return;
+          }
           if (claim.status === "acquired") {
             try {
               await pending.finalize();
@@ -1797,17 +1880,66 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
       }
       const delivered = !running.lineage || appendLineageEvent(running.lineage.rootDir, `terminal-delivered:${running.id}`, "terminal_delivered", running.id, { deliveryId });
       if (!delivered && !reduceLineage(running.lineage!.rootDir).nodes.get(running.id)?.terminalDelivered) throw new Error("Unable to publish terminal delivery evidence");
-      running.pendingTerminalDelivery = undefined;
       running.lifecycle = markDelivery(running.lifecycle, "delivered");
-      const cleaned = tryCleanupSubagentSurface(running);
-      running.cleanupPending = !cleaned;
-      if (cleaned) runningSubagents.delete(running.id);
-      updateWidget();
+      retireDeliveredSubagent(running);
     },
   }).catch((error) => {
     if (running.pendingTerminalDelivery === pending) pending.queued = false;
     recordDeliveryFailure(running, `terminal:${running.id}`, error, "terminal-delivery");
   });
+}
+
+/** Surface cleanup delays after a delivered result, in order, then give up. */
+const CLEANUP_RETRY_DELAYS_MS = [2_000, 15_000, 60_000];
+
+/**
+ * Retire one delivered child. The result is durable, so its row leaves the
+ * widget now and the pane is closed in the background. A rejected Herdr close
+ * retries a few times with backoff instead of running once per status tick.
+ */
+function retireDeliveredSubagent(running: RunningSubagent): void {
+  running.retired = true;
+  running.pendingTerminalDelivery = undefined;
+  const cleaned = tryCleanupSubagentSurface(running);
+  running.cleanupPending = !cleaned;
+  if (cleaned) {
+    runningSubagents.delete(running.id);
+  } else {
+    running.cleanupAttempts = 1;
+    running.cleanupRetryAt = Date.now() + CLEANUP_RETRY_DELAYS_MS[0];
+  }
+  updateWidget();
+}
+
+/** Retry one retired child's surface cleanup without observing it again. */
+function retryRetiredSubagentCleanup(running: RunningSubagent, now: number): void {
+  if ((running.cleanupRetryAt ?? 0) > now) return;
+  if (tryCleanupSubagentSurface(running)) {
+    runningSubagents.delete(running.id);
+    updateWidget();
+    return;
+  }
+  const attempts = (running.cleanupAttempts ?? 0) + 1;
+  if (attempts > CLEANUP_RETRY_DELAYS_MS.length) {
+    // Herdr keeps refusing the close. Keep the durable record and stop retrying
+    // so one rejected surface cannot run forever.
+    if (running.lineage) {
+      try {
+        recoveryDeliveryLog(running).record("cleanup-abandoned", {
+          childId: running.id,
+          surface: running.surface,
+          phase: "cleanup",
+        });
+      } catch {
+        // The durable record is best effort.
+      }
+    }
+    runningSubagents.delete(running.id);
+    updateWidget();
+    return;
+  }
+  running.cleanupAttempts = attempts;
+  running.cleanupRetryAt = now + CLEANUP_RETRY_DELAYS_MS[attempts - 1];
 }
 
 function queueTerminalDelivery(
@@ -1826,6 +1958,10 @@ function observeRunningSubagent(
 	running: RunningSubagent,
 	observedAt = Date.now(),
 ) {
+	if (running.retired) {
+		retryRetiredSubagentCleanup(running, observedAt);
+		return;
+	}
 	ensureLifecycle(running);
 
 	const activityFile = running.activityFile;
@@ -1856,10 +1992,7 @@ function observeRunningSubagent(
 	observeSettledInterruptBoundary(running);
   if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
 	attemptPendingTerminalDelivery(running);
-	if (running.cleanupPending && tryCleanupSubagentSurface(running)) {
-		runningSubagents.delete(running.id);
-		updateWidget();
-	}
+	if (running.cleanupPending) retryRetiredSubagentCleanup(running, observedAt);
 }
 
 function resolveInterruptTarget(params: {
@@ -1869,7 +2002,7 @@ function resolveInterruptTarget(params: {
 	const requestedId = params.id?.trim();
 	if (requestedId) {
 		const running = runningSubagents.get(requestedId);
-		return running
+		return running && !running.retired
 			? { running }
 			: { error: `No running subagent with id "${requestedId}".` };
 	}
@@ -1880,7 +2013,7 @@ function resolveInterruptTarget(params: {
 	}
 
 	const matches = Array.from(runningSubagents.values()).filter(
-		(running) => running.name === requestedName,
+		(running) => !running.retired && running.name === requestedName,
 	);
 	if (matches.length === 1) return { running: matches[0] };
 	if (matches.length === 0) {
@@ -2261,7 +2394,13 @@ function deliverRecoveryFailure(running: RunningSubagent, reason: string): void 
 }
 
 async function superviseStaleSubagent(running: RunningSubagent, now: number): Promise<void> {
-	if (running.interactive || running.pendingTerminalDelivery || running.recoveryAttempt) return;
+	if (running.retired) return;
+	if (!shouldStartStaleRecovery({
+		interactive: running.interactive,
+		pendingTerminalDelivery: Boolean(running.pendingTerminalDelivery),
+		recoveryAttemptActive: Boolean(running.recoveryAttempt),
+		recoveryExhausted: Boolean(running.recoveryExhausted),
+	})) return;
 	let descendants: ReturnType<typeof ownedDescendantWatchdogState>;
 	try {
 		descendants = ownedDescendantWatchdogState(running);
@@ -2439,6 +2578,8 @@ export const __test__ = {
 	resolveWorkflowReviewNode,
 	terminalAssistantIdentityFor,
 	observeRunningSubagent,
+	restorePendingLineageInboxes,
+	attemptRecovery,
 
 	startRecoveredWatcher,
 	startRecoveredWorkflowWatcher,
@@ -2688,7 +2829,9 @@ async function deliverHelpRequest(
 			nodeId: running.id,
 			hasExactSessionEvidence: () => sessionContainsDelivery(running.lineage!.parentSessionFile!, deliveryId),
 		});
-		if (claim.status === "busy") throw new Error("Help-request inbox materialization is claimed by another observer");
+		// Another observer owns this help request and will deliver it, so the
+		// child continues without recording a false delivery failure.
+		if (claim.status === "busy") return;
 		if (claim.status === "materialized") return;
 		try {
 			sendSubagentResult(runtime.pi, durable.payload, details);
@@ -2748,6 +2891,13 @@ async function attemptRecovery(
 			? `recovery failed (${budget.attempt}/${3})`
 			: `recovering ${cause} (${budget.attempt}/${3})`,
 	};
+	if (budget.exhausted) {
+		// The budget is spent. Killing or resuming again would repeat the same
+		// failed attempt once per status tick forever.
+		running.recoveryExhausted = true;
+		running.recoveryFailureReason = budget.reason;
+		return { recovered: false, exhausted: true, reason: budget.reason };
+	}
 	running.supervisionEpoch = (running.supervisionEpoch ?? 0) + 1;
 
 	if (cause === "stale") {
@@ -2770,11 +2920,6 @@ async function attemptRecovery(
 		}
 	}
 	updateWidget();
-
-	if (budget.exhausted) {
-		running.recoveryFailureReason = budget.reason;
-		return { recovered: false, exhausted: true, reason: budget.reason };
-	}
 
 	let reusableSurface: string | undefined;
 	if (cause === "crash") {

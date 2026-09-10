@@ -94,6 +94,25 @@ function appendRecoveryRecord(logPath: string, record: Record<string, unknown>):
   }
 }
 
+/**
+ * Decide whether the parent watchdog may supervise one child as stale.
+ *
+ * An exhausted recovery budget is final: the child cannot be resumed again, so
+ * another stale pass would only repeat the same kill attempt forever.
+ */
+export function shouldStartStaleRecovery(input: {
+  interactive: boolean;
+  pendingTerminalDelivery: boolean;
+  recoveryAttemptActive: boolean;
+  recoveryExhausted: boolean;
+}): boolean {
+  if (input.interactive) return false;
+  if (input.pendingTerminalDelivery) return false;
+  if (input.recoveryAttemptActive) return false;
+  if (input.recoveryExhausted) return false;
+  return true;
+}
+
 /** Consume one durable attempt from the shared crash-and-stale recovery budget. */
 export function consumeRecoveryAttempt(input: {
   logPath: string;
