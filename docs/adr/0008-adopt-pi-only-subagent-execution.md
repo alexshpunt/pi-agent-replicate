@@ -19,4 +19,4 @@ The Claude terminal path duplicates launch, completion, transcript, cleanup, sta
 
 ## Consequences
 
-This is an immediate pre-1.0 breaking change; no deprecation adapter remains. The agent/workflow/skill/runtime taxonomy in ADR-0002 remains accepted, but its external CLI adapter rules no longer apply. Shipped-behavior documentation and `CONTEXT.md` now describe the Pi-only contract.
+This is an immediate breaking change with no deprecation adapter. Custom roles that request an external CLI fail closed before Herdr creates resources.

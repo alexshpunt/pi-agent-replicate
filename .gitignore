@@ -10,3 +10,4 @@ config.json
 
 # Local project task artifacts (journal, prep files)
 .lpt/
+.tmp/

@@ -65,8 +65,6 @@ export interface LaunchChildOptions {
     readonly name: string;
     readonly task: string;
     readonly agent?: string;
-    readonly model?: string;
-    readonly thinking?: ThinkingLevel;
     readonly skills?: string;
     readonly tools: readonly string[];
     readonly cwd?: string;

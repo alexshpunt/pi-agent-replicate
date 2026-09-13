@@ -1,86 +1,40 @@
 # Repository instructions for agents
 
-These instructions apply to humans and coding agents changing `pi-lpt-herdr-subagents`.
+## Purpose
 
-## What this package is
+This package launches asynchronous Pi child agents only in Herdr. Ordinary children use dedicated panes. Writing children may opt into isolated Herdr-managed Git worktrees.
 
-`pi-lpt-herdr-subagents` (Pi LPT Herdr Subagents) is the LPT fork of the Pi Herdr Agents extension that launches asynchronous Pi child agents and approved read-only review workflows exclusively in Herdr. Ordinary runs use dedicated Herdr panes/tabs. Writing tasks may opt into one isolated Herdr-managed Git worktree per branch. Legacy role definitions that request an external CLI fail before Herdr creates resources.
+Read `README.md`, `CONTEXT.md`, `docs/public-subagent-tree-api.md`, and `docs/worktree-subagents.md` before changing their contracts.
 
-The extension is fire-and-forget: `subagent` returns an acknowledgement, and completion is delivered to the parent automatically. Never add polling guidance that tells callers to sleep, tail sessions, or repeatedly check status.
+## Public surface
 
-## Read these first
+Keep exactly five model-facing tools: `subagent`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, and `subagents_list`. Do not add user commands, bundled roles, review workflows, or orchestration skills.
 
-- [`README.md`](./README.md) — canonical installation, API, configuration, lifecycle, and agent-authoring reference
-- [`docs/README.md`](docs/README.md) — map of shipped contracts, active design, ADRs, and background research
-- [`CONTEXT.md`](CONTEXT.md) — workflow domain language and prototype evidence; read it before changing workflow design
-- [`docs/adr/0003-installable-role-packs.md`](docs/adr/0003-installable-role-packs.md) — installable role-pack discovery, precedence, and collision contract
-- [`docs/worktree-subagents.md`](docs/worktree-subagents.md) — canonical worktree operating, review, recovery, and cleanup guide
-- [`RELEASING.md`](RELEASING.md) — release checks and publishing procedure
-- [`docs/public-subagent-tree-api.md`](docs/public-subagent-tree-api.md) — public tree handle and settled-lifecycle contract
-- [`docs/adr/0010-public-subagent-tree-registry.md`](docs/adr/0010-public-subagent-tree-registry.md) — process-local registry and branch ownership decision
+Launch calls cannot select `model` or `thinking`. Runtime comes independently from custom role frontmatter, then the parent. Keep project, global, and installable role-pack discovery.
 
-Bundled role prompts live in [`agents/`](agents/). The native `/skill:orchestrate` workflow authoring skill lives at [`skills/orchestrate/SKILL.md`](skills/orchestrate/SKILL.md). The `/plan` orchestration prompt lives at [`pi-extension/subagents/plan-skill.md`](pi-extension/subagents/plan-skill.md).
+The extension is fire-and-forget. Never add polling guidance.
 
 ## Code map
 
-- `pi-extension/subagents/index.ts` — public tools/commands, agent discovery, launch/watch lifecycle, completion delivery, worktree manifests and handoffs
-- `pi-extension/subagents/herdr.ts` — Herdr CLI argument construction and response parsing
-- `pi-extension/subagents/terminal.ts` — terminal adapter used by the lifecycle
-- `pi-extension/subagents/lifecycle.ts`, `status.ts`, `activity.ts` — process/turn state and widget projection
-- `pi-extension/subagents/completion.ts`, `session.ts`, `subagent-done.ts` — child completion, transcript handling, `caller_ping`, and `subagent_done`
-- `pi-extension/subagents/workflow.ts`, `workflow-worker.js` — workflow preparation, ownership, journal, lifecycle, and Worker execution
-- `index.ts` — public package-root subagent tree API source (TypeScript)
-- `index.js`, `index.d.ts` — shipped runtime and type mirror of `index.ts`; there is no build step, so all three must be edited together
-- `CONTEXT.md` — domain glossary and validated prototype evidence for active design
-- `docs/adr/` — hard-to-reverse architectural decisions
-- `docs/research/` — evidence and alternatives, never the shipped contract
-- `test/test.ts` — unit tests for public subagent extension seams
-- `test/workflow.test.ts` — unit tests for workflow preparation, execution, and cancellation
-- `test/package-skill.test.js` — bundled skill and package manifest contract test
-- `test/integration/` — real Herdr and Pi lifecycle tests using the deterministic provider by default
+- `pi-extension/subagents/index.ts` — tools, discovery, launch/watch lifecycle, and delivery.
+- `pi-extension/subagents/launch.ts` — Pi and worktree launch transaction.
+- `pi-extension/subagents/lineage.ts` — durable recursive ownership.
+- `pi-extension/subagents/runtime-routing.ts` — role-to-parent runtime resolution.
+- `pi-extension/subagents/completion.ts`, `session.ts`, `subagent-done.ts` — completion evidence.
+- `index.ts`, `index.js`, `index.d.ts` — package-root API; edit all three together.
+- `test/` — unit and isolated Herdr integration coverage.
 
-## Worktree contract
+TypeScript modules under `pi-extension/subagents` that have JavaScript mirrors must stay aligned.
 
-Preserve these invariants when changing worktree behavior:
+## Worktree rules
 
-1. `worktree: { branch, base? }` is opt-in per `subagent` call.
-2. `cwd` selects the source repository; the child starts at the created worktree root.
-3. `base` resolves to an exact commit before creation and defaults to committed `HEAD`.
-4. Parent uncommitted/untracked files are not copied.
-5. An ownership manifest is written before Herdr resource creation.
-6. Herdr creates the workspace without stealing focus; launch targets the returned root pane explicitly.
-7. Successful, failed, and help-requesting runs retain their worktree workspace.
-8. Completion reports reviewable Git state; inspection failures are unknown, never guessed clean or conflict-free.
-9. The extension does not push, create PRs, merge, cherry-pick, switch the parent checkout, or remove worktrees/branches automatically.
-10. Ordinary non-worktree subagent behavior remains unchanged.
+Preserve the guarantees in `docs/worktree-subagents.md`: exact committed base, no parent dirty-file copy, manifest before Herdr creation, retained workspace, truthful Git inspection, and no automatic integration or cleanup.
 
-Read [`docs/worktree-subagents.md`](docs/worktree-subagents.md) before changing any of these semantics.
+Use ordinary panes for read-only work and unique worktree branches for independent writing. Keep overlapping writing tasks sequential.
 
-## Orchestration guidance
+## Documentation
 
-- Use ordinary panes for read-only scouts and reviewers.
-- Use unique worktree branches for independent parallel writing tasks.
-- Keep overlapping or dependent writing tasks sequential unless the dependency is committed and used as the next exact base.
-- Tell worktree workers whether to commit. A good default is: edit, test, commit, report the SHA, and do not push/merge/remove.
-- The parent owns review, integration, publication, and cleanup.
-- Do not use `subagent_resume` as if it reattached worktree ownership; v1 resumes into an ordinary pane.
-
-## Documentation synchronization
-
-When behavior changes, update every affected surface in the same commit:
-
-- public tool parameters, role-pack protocol, or lifecycle → `README.md`
-- role-pack discovery, precedence, or collision policy → `docs/adr/0003-installable-role-packs.md`
-- worktree behavior, handoff, recovery, or cleanup → `docs/worktree-subagents.md`
-- agent operating expectations → relevant files in `agents/`
-- `/plan` orchestration policy → `pi-extension/subagents/plan-skill.md`
-- contributor/release verification → this file, `.pi/skills/run-integration-tests/SKILL.md`, or `RELEASING.md`
-- domain terminology → `CONTEXT.md`
-- hard-to-reverse workflow trade-offs → the relevant ADR; do not create an ADR for every design question
-- active orchestrated-review design → `docs/orchestrated-review-workflow-plan.md`
-- architectural evidence and alternatives only → research docs, clearly marked when later decisions supersede them
-
-Do not copy the full worktree guide into every role prompt. Keep canonical detail in the guide and add only the role-specific rule an agent needs while running.
+Update every affected active contract with behavior changes. Keep durable intent in `CONTEXT.md` or an ADR; keep evidence and alternatives in research docs. Do not revive documentation for removed surfaces.
 
 ## Verification
 
@@ -93,38 +47,17 @@ npm pack --dry-run
 git diff --check
 ```
 
-Run LSP diagnostics on every changed TypeScript file; lint and tests do not catch every TypeScript error.
-
-`npm run lint` covers only `pi-extension` and `test`, so it never checks the root public API files. When `index.ts`, `index.js`, or `index.d.ts` change, also run:
+Run diagnostics on every changed TypeScript file. If root `index.ts`, `index.js`, or `index.d.ts` changes, also run:
 
 ```bash
 npx tsc --noEmit index.ts
 node --check index.js
 ```
 
-and keep the packed runtime-import and TypeScript/JavaScript parity regression in `test/public-subagent-tree-api.test.ts` green.
+For lifecycle or Herdr changes, run `npm run test:integration` through the isolated runner. Never point tests at the user's persistent Herdr server.
 
-For Herdr or lifecycle changes, run the deterministic suite from inside Herdr. Every integration test run must use a separate test-owned headless Herdr server so it cannot inspect, mutate, close, or clean the user's persistent server. The shipped `npm run test:integration` and `npm run test:integration:live` settings enforce this through `test/integration/run-isolated.ts`, with private socket, config, state, home, workspace, and worktree paths. The runner clears inherited Herdr and subagent identity, fails closed if its private endpoint cannot be bootstrapped safely, and removes only resources owned by that run. Never invoke integration test files directly with `node --test`, point tests at the persistent Herdr socket, or add fallback to the user server. Concurrent runs have separate endpoints; no shared Herdr test slot needs manual coordination.
-When a test reports that a `pi-integ-*` worktree path already exists, first check whether the same test already created that worktree and the deterministic provider dispatched the tool twice after asynchronous completion. Deterministic providers must make each requested tool call one-shot after its started result appears. Remove only verified test-owned residue after confirming that no workspace or process owns it.
-
-```bash
-npm run test:integration
-```
-
-Use `PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 npm run test:integration:live` only for optional provider-compatibility smoke coverage. Do not use skipped Herdr tests as passing evidence.
-
-Before committing:
-
-- inspect `git status` and the final diff;
-- confirm the package preview includes `CHANGELOG.md`, `skills/orchestrate/SKILL.md`, and `pi-extension/subagents/workflow-worker.js`, while excluding plans, journals, sessions, prototypes, generated evidence, and local config;
-- run `npm pack --dry-run` when package contents or documentation paths changed;
-- confirm that no generated plans, journals, sessions, provider configuration, test scripts, or review artifacts are staged; and
-- confirm that no accidental empty directory exists at the repository root:
-
-```bash
-test -z "$(find . -mindepth 1 -maxdepth 1 -type d -empty -print)"
-```
+Before committing, inspect status and diff, check package contents, remove generated artifacts, and confirm no accidental empty root directory exists.
 
 ## Release safety
 
-Do not bump `package.json` merely to land documentation or implementation work. A version change on `main` triggers the release workflow. Never commit npm credentials, generated review artifacts, session artifacts, or local `config.json`.
+Do not bump `package.json` unless the user explicitly requests a release. Never commit credentials, local config, sessions, plans, journals, or generated review artifacts.

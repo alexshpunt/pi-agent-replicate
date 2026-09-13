@@ -20,9 +20,9 @@ export function isThinkingLevel(value: string): value is ThinkingLevel {
 }
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type RuntimeSource = "request" | "agent" | "parent";
+export type RuntimeSource = "agent" | "parent";
 
-export interface RuntimeRequest {
+export interface RoleRuntime {
   model?: string;
   thinking?: ThinkingLevel;
 }
@@ -62,8 +62,6 @@ export interface ResolvedRuntimePlan {
   thinking: ThinkingLevel;
   modelSource: RuntimeSource;
   thinkingSource: RuntimeSource;
-  requestedModel?: string;
-  requestedThinking?: ThinkingLevel;
   thinkingAdjustment?: {
     from: ThinkingLevel;
     to: ThinkingLevel;
@@ -128,9 +126,7 @@ export function wrapPiModelRegistry(registry: {
       for (const raw of source) {
         const candidate = toRoutingModel(raw);
         if (!candidate) continue;
-        if (direct.length === 0 && registry.hasConfiguredAuth && !registry.hasConfiguredAuth(raw)) {
-          continue;
-        }
+        if (direct.length === 0 && registry.hasConfiguredAuth && !registry.hasConfiguredAuth(raw)) continue;
         const ref = `${candidate.provider}/${candidate.id}`;
         if (seen.has(ref)) continue;
         seen.add(ref);
@@ -177,89 +173,51 @@ function formatSupported(model: RoutingModel): string {
   return levels.length > 0 ? levels.join(", ") : "(none)";
 }
 
-function selectField(
-  requestValue: string | undefined,
-  agentValue: string | undefined,
-): { value?: string; source: RuntimeSource } {
-  if (requestValue != null && requestValue !== "") {
-    return { value: requestValue, source: "request" };
-  }
-  if (agentValue != null && agentValue !== "") {
-    return { value: agentValue, source: "agent" };
-  }
-  return { source: "parent" };
-}
-
-export function parseModelFallbacks(reference: string): string[] {
-  const candidates = reference.split(",").map((candidate) => candidate.trim());
-  if (candidates.some((candidate) => candidate === "")) {
-    throw new RuntimeResolutionError(
-      `model fallback list ${JSON.stringify(reference)} cannot contain an empty candidate`,
-    );
-  }
-  return candidates;
-}
-
+/** Resolve a subagent runtime from role frontmatter, then the parent runtime. */
 export function resolveRuntimePlan(
-  request: RuntimeRequest,
-  agentDefaults: RuntimeRequest,
+  role: RoleRuntime,
   parent: ParentRuntime,
   registry: ModelRegistryAdapter,
 ): ResolvedRuntimePlan {
-  const modelSelection = selectField(request.model, agentDefaults.model);
   let provider = parent.provider;
   let modelId = parent.modelId;
   let selectedModel = registry.find(provider, modelId);
+  const modelSource: RuntimeSource = role.model ? "agent" : "parent";
 
-  if (modelSelection.value) {
-    const parsed = parseExactModelRef(modelSelection.value);
-    if (!parsed) {
+  if (role.model) {
+    const parsed = parseExactModelRef(role.model);
+    if (!parsed || role.model !== `${parsed.provider}/${parsed.modelId}`) {
       throw new RuntimeResolutionError(
-        `model ${JSON.stringify(modelSelection.value)} must be an exact authenticated provider/model-id`,
+        `role model ${JSON.stringify(role.model)} must be one exact authenticated provider/model-id`,
       );
     }
     const found = registry.find(parsed.provider, parsed.modelId);
-    if (!found) {
-      const alternatives = registry.available().map((model) => `${model.provider}/${model.id}`);
-      throw new RuntimeResolutionError(
-        `unknown model ${JSON.stringify(modelSelection.value)}; exact registry match required. Available: ${alternatives.join(", ") || "(none)"}`,
-      );
-    }
+    if (!found) throw new RuntimeResolutionError(`unknown role model ${JSON.stringify(role.model)}`);
     if (!registry.hasConfiguredAuth(found)) {
-      throw new RuntimeResolutionError(
-        `model ${JSON.stringify(modelSelection.value)} has no configured authentication`,
-      );
+      throw new RuntimeResolutionError(`role model ${JSON.stringify(role.model)} has no configured authentication`);
     }
     provider = found.provider;
     modelId = found.id;
     selectedModel = found;
   }
 
-  const thinkingSelection = selectField(request.thinking, agentDefaults.thinking);
-  const preferredThinking = thinkingSelection.value ?? parent.thinking;
-  if (!isThinkingLevel(preferredThinking)) {
-    throw new RuntimeResolutionError(
-      `thinking ${JSON.stringify(preferredThinking)} must be one of: ${THINKING_LEVELS.join(", ")}`,
-    );
-  }
-
+  const thinkingSource: RuntimeSource = role.thinking ? "agent" : "parent";
+  const preferredThinking = role.thinking ?? parent.thinking;
   let thinking = preferredThinking;
   let thinkingAdjustment: ResolvedRuntimePlan["thinkingAdjustment"];
-  if (thinkingSelection.source !== "parent") {
+
+  if (role.thinking) {
     if (!selectedModel) {
-      throw new RuntimeResolutionError(
-        `model capability information is unavailable; cannot validate explicit thinking ${JSON.stringify(preferredThinking)}`,
-      );
+      throw new RuntimeResolutionError("model capability information is unavailable; cannot validate role thinking");
     }
     const supported = getSupportedThinkingLevels(asPiModel(selectedModel));
     if (!supported.includes(preferredThinking as ModelThinkingLevel)) {
       throw new RuntimeResolutionError(
-        `thinking ${JSON.stringify(preferredThinking)} is not supported by ${JSON.stringify(`${provider}/${modelId}`)}; supported: ${formatSupported(selectedModel)}`,
+        `role thinking ${JSON.stringify(preferredThinking)} is not supported by ${JSON.stringify(`${provider}/${modelId}`)}; supported: ${formatSupported(selectedModel)}`,
       );
     }
   } else if (selectedModel) {
-    const clamped = clampThinkingLevel(asPiModel(selectedModel), preferredThinking);
-    thinking = clamped as ThinkingLevel;
+    thinking = clampThinkingLevel(asPiModel(selectedModel), preferredThinking) as ThinkingLevel;
     if (thinking !== preferredThinking) {
       thinkingAdjustment = {
         from: preferredThinking,
@@ -274,74 +232,8 @@ export function resolveRuntimePlan(
     modelId,
     model: `${provider}/${modelId}`,
     thinking,
-    modelSource: modelSelection.source,
-    thinkingSource: thinkingSelection.source,
-    ...(modelSelection.value ? { requestedModel: modelSelection.value } : {}),
-    ...(thinkingSelection.value ? { requestedThinking: preferredThinking } : {}),
+    modelSource,
+    thinkingSource,
     ...(thinkingAdjustment ? { thinkingAdjustment } : {}),
   };
-}
-
-/** Resolve every configured fallback before launching the first child. */
-export function resolveRuntimePlans(
-  request: RuntimeRequest,
-  agentDefaults: RuntimeRequest,
-  parent: ParentRuntime,
-  registry: ModelRegistryAdapter,
-): ResolvedRuntimePlan[] {
-  const selection = selectField(request.model, agentDefaults.model);
-  if (!selection.value) {
-    return [resolveRuntimePlan(request, agentDefaults, parent, registry)];
-  }
-
-  return parseModelFallbacks(selection.value).map((model) =>
-    resolveRuntimePlan(
-      selection.source === "request" ? { ...request, model } : { ...request, model: undefined },
-      selection.source === "agent"
-        ? { ...agentDefaults, model }
-        : agentDefaults,
-      parent,
-      registry,
-    ),
-  );
-}
-
-function formatTokenCount(value: number | undefined): string | undefined {
-  if (!value || value <= 0) return undefined;
-  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}m`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-  return String(value);
-}
-
-export function buildAuthenticatedModelCatalog(
-  registry: ModelRegistryAdapter,
-  limit = 24,
-): string {
-  const models = registry.available().sort((a, b) =>
-    `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
-  );
-  const visibleModels = models.slice(0, limit);
-  const lines = [
-    "Authenticated subagent models (use exact provider/model-id only):",
-  ];
-  for (const model of visibleModels) {
-    const supportedThinking = getSupportedThinkingLevels(asPiModel(model));
-    const facts = [
-      model.reasoning
-        ? `reasoning (${supportedThinking.join("/") || "no thinking levels"})`
-        : "non-reasoning",
-      model.input?.includes("image") ? "text+image" : "text",
-      formatTokenCount(model.contextWindow) ? `${formatTokenCount(model.contextWindow)} context` : undefined,
-      formatTokenCount(model.maxTokens) ? `${formatTokenCount(model.maxTokens)} max output` : undefined,
-    ].filter(Boolean);
-    lines.push(`- ${model.provider}/${model.id} — ${facts.join(", ")}`);
-  }
-  if (models.length === 0) lines.push("- none discovered; inherit the parent runtime");
-  if (models.length > visibleModels.length) {
-    lines.push(`- … ${models.length - visibleModels.length} more authenticated models omitted`);
-  }
-  lines.push(
-    "Default: inherit the parent model and thinking. Override thinking first; override model only when task capability, speed, cost, modality, or context warrants it.",
-  );
-  return lines.join("\n");
 }

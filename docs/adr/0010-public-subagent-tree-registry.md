@@ -13,4 +13,4 @@ Nested Pi children receive only a package-owned context-file path outside model 
 
 ## Consequences
 
-The API is intentionally for installed Pi extensions inside Herdr and does not promise arbitrary Node use or full process restart recovery. A process crash can leave retained evidence for inspection, but the filesystem protocol is not a restartable workflow engine. Clean and explicit-empty roots may complete while descendant error or abort panes remain open and are reported in bounded lifecycle rows.
+The API is intentionally for installed Pi extensions inside Herdr and does not promise arbitrary Node use or full process restart recovery. A process crash can leave retained evidence for inspection, but the filesystem protocol is not a general job engine. Clean and explicit-empty roots may complete while descendant error or abort panes remain open and are reported in bounded lifecycle rows.

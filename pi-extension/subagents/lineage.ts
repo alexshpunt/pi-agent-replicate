@@ -22,8 +22,7 @@ export interface LineageRegistration {
   parentNodeId?: string;
   parentSessionId?: string;
   parentSessionFile?: string;
-  parentWorkflowRunId?: string;
-  launchKind: "fresh" | "resume" | "worktree" | "fork" | "workflow";
+  launchKind: "fresh" | "resume" | "worktree" | "fork";
 }
 
 export interface LineageNodeState {
@@ -31,7 +30,6 @@ export interface LineageNodeState {
   parentNodeId?: string;
   parentSessionId?: string;
   parentSessionFile?: string;
-  parentWorkflowRunId?: string;
   launchKind?: string;
   name?: string;
   task?: string;
@@ -119,7 +117,6 @@ export function registerLineage(options: {
   parentNodeId?: string;
   parentSessionId?: string;
   parentSessionFile?: string;
-  parentWorkflowRunId?: string;
   launchKind?: LineageRegistration["launchKind"];
   inheritedRootDir?: string;
   inheritedRootId?: string;
@@ -146,7 +143,6 @@ export function registerLineage(options: {
     ...(options.parentNodeId ? { parentNodeId: options.parentNodeId } : {}),
     ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
     ...(options.parentSessionFile ? { parentSessionFile: options.parentSessionFile } : {}),
-    ...(options.parentWorkflowRunId ? { parentWorkflowRunId: options.parentWorkflowRunId } : {}),
     launchKind: options.launchKind ?? "fresh",
   };
   appendLineageEvent(rootDir, `launch:${options.nodeId}`, "launch", options.nodeId, {
@@ -154,7 +150,6 @@ export function registerLineage(options: {
     parentNodeId: registration.parentNodeId,
     parentSessionId: registration.parentSessionId,
     parentSessionFile: registration.parentSessionFile,
-    parentWorkflowRunId: registration.parentWorkflowRunId,
     launchKind: registration.launchKind,
   });
   return registration;
@@ -253,7 +248,6 @@ export function reduceLineage(rootDir: string): LineageState {
       if (!node.parentNodeId && typeof event.parentNodeId === "string") node.parentNodeId = event.parentNodeId;
       if (!node.parentSessionId && typeof event.parentSessionId === "string") node.parentSessionId = event.parentSessionId;
       if (!node.parentSessionFile && typeof event.parentSessionFile === "string") node.parentSessionFile = event.parentSessionFile;
-      if (!node.parentWorkflowRunId && typeof event.parentWorkflowRunId === "string") node.parentWorkflowRunId = event.parentWorkflowRunId;
       if (!node.launchKind && typeof event.launchKind === "string") node.launchKind = event.launchKind;
     } else if (event.type === "launch_metadata") {
       // Metadata may be rewritten by a resume. Prefer the latest recorded run;
@@ -379,10 +373,10 @@ export function appendLineageInbox(
   rootDir: string,
   nodeId: string,
   deliveryId: string,
-  sink: { sessionId?: string; sessionFile?: string; workflowRunId?: string },
+  sink: { sessionId?: string; sessionFile?: string },
   payload: Record<string, unknown> = {},
 ): boolean {
-  if (!sink.workflowRunId && (!sink.sessionId || !sink.sessionFile)) return false;
+  if (!sink.sessionId || !sink.sessionFile) return false;
   const eventId = `inbox:${deliveryId}`;
   const file = join(eventDir(rootDir), `${safeId(eventId)}.json`);
   try {
@@ -402,7 +396,6 @@ export interface LineageInboxRecord {
   deliveryId: string;
   sessionId?: string;
   sessionFile?: string;
-  workflowRunId?: string;
   payload: Record<string, unknown>;
   activitySequence?: number;
 }
@@ -562,15 +555,14 @@ function readLineageInboxes(rootDir: string): { record: LineageInboxRecord; mate
       if (value.type === "inbox_materialized" && typeof value.deliveryId === "string") materialized.add(value.deliveryId);
       if (value.type !== "inbox" || typeof value.deliveryId !== "string") continue;
       const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
-      records.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined, sessionFile: typeof value.sessionFile === "string" ? value.sessionFile : undefined, workflowRunId: typeof value.workflowRunId === "string" ? value.workflowRunId : undefined, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
+      records.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined, sessionFile: typeof value.sessionFile === "string" ? value.sessionFile : undefined, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
     } catch {}
   }
   return records.map((record) => ({ record, materialized: materialized.has(record.deliveryId) }));
 }
 
 function sameMaterializationSink(left: LineageInboxRecord, right: LineageInboxRecord): boolean {
-  return left.workflowRunId ? left.workflowRunId === right.workflowRunId :
-    Boolean(left.sessionId && left.sessionFile && left.sessionId === right.sessionId && left.sessionFile === right.sessionFile);
+  return Boolean(left.sessionId && left.sessionFile && left.sessionId === right.sessionId && left.sessionFile === right.sessionFile);
 }
 
 function pendingBefore(rootDir: string, deliveryId: string): boolean {

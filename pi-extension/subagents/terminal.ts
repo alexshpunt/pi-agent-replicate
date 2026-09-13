@@ -8,7 +8,6 @@ import {
 	createHerdrSurfaceInWorkspace,
 	createHerdrSurfaceSplit,
 	createHerdrWorktree,
-	focusHerdrWorkspace,
 	getHerdrPaneProcessInfo,
 	getHerdrSurfaceTabId,
 	rememberHerdrSurfaceTab,
@@ -108,10 +107,6 @@ export function renameCurrentWorkspace(title: string): void {
 	renameHerdrWorkspace(title);
 }
 
-export function focusWorkspace(workspaceId: string): void {
-	assertTerminalAvailable();
-	focusHerdrWorkspace(workspaceId);
-}
 
 export function runInPane(paneId: PaneId, command: string): void {
 	assertTerminalAvailable();

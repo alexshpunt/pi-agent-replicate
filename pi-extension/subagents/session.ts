@@ -1,24 +1,9 @@
-import { createRequire } from "node:module";
-const requirePackage = createRequire(import.meta.url);
-
-function loadCodingAgent(): any {
-  let directory = dirname(new URL(import.meta.url).pathname);
-  for (;;) {
-    const candidate = join(directory, "node_modules/@earendil-works/pi-coding-agent/dist/index.js");
-    if (existsSync(candidate)) return requirePackage(candidate);
-    const parent = dirname(directory);
-    if (parent === directory) break;
-    directory = parent;
-  }
-  throw new Error("Unable to locate @earendil-works/pi-coding-agent runtime");
-}
 import {
 	appendFileSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
-	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -58,11 +43,6 @@ export function seedStandaloneSessionFile(params: { childSessionFile: string; ch
 	mkdirSync(dirname(params.childSessionFile), { recursive: true });
 	writeFileSync(params.childSessionFile, `${JSON.stringify(header)}\n`, "utf8");
 }
-export interface WorktreeSessionFork {
-	sessionFile: string;
-	sourceSessionFile: string;
-	handoffMessage: string;
-}
 
 function getForkContentLines(parentSessionFile: string): string[] {
 	const raw = readFileSync(parentSessionFile, "utf8");
@@ -90,17 +70,6 @@ function getForkContentLines(parentSessionFile: string): string[] {
 	});
 }
 
-export function createBtwSessionSnapshot(
-	parentSessionFile: string,
-	leafId: string,
-): string {
-	const detached = loadCodingAgent().SessionManager.open(parentSessionFile);
-	const childSessionFile = detached.createBranchedSession(leafId);
-	if (!childSessionFile || !existsSync(childSessionFile)) {
-		throw new Error("Pi did not persist the BTW child session");
-	}
-	return childSessionFile;
-}
 
 export function seedSubagentSessionFile(params: {
 	mode: SeededSubagentSessionMode;
@@ -129,51 +98,6 @@ export function seedSubagentSessionFile(params: {
  * Pi's native branched-session writer supplies compaction and label fidelity;
  * the temporary source-directory file is rewritten with the target cwd.
  */
-export function createWorktreeSessionFork(params: {
-	parentSessionFile: string;
-	leafId: string;
-	childSessionFile: string;
-	childCwd: string;
-	handoffMessage: string;
-}): WorktreeSessionFork {
-	const source = loadCodingAgent().SessionManager.open(params.parentSessionFile);
-	const temporaryFile = source.createBranchedSession(params.leafId);
-	if (!temporaryFile || !existsSync(temporaryFile)) {
-		throw new Error("Pi did not persist the worktree session fork");
-	}
-
-	try {
-		const lines = readFileSync(temporaryFile, "utf8")
-			.split("\n")
-			.filter((line) => line.trim());
-		const header = JSON.parse(lines[0]) as Record<string, unknown>;
-		header.cwd = params.childCwd;
-		header.parentSession = params.parentSessionFile;
-		mkdirSync(dirname(params.childSessionFile), { recursive: true });
-		writeFileSync(
-			params.childSessionFile,
-			[JSON.stringify(header), ...lines.slice(1)].join("\n") + "\n",
-			"utf8",
-		);
-	} finally {
-		rmSync(temporaryFile, { force: true });
-	}
-
-	loadCodingAgent().SessionManager.open(params.childSessionFile).appendCustomMessageEntry(
-		"pi-herdr-worktree-handoff",
-		params.handoffMessage,
-		true,
-		{
-			sourceSessionFile: params.parentSessionFile,
-			childCwd: params.childCwd,
-		},
-	);
-	return {
-		sessionFile: params.childSessionFile,
-		sourceSessionFile: params.parentSessionFile,
-		handoffMessage: params.handoffMessage,
-	};
-}
 
 function parseEntry(line: string): SessionEntry {
 	try {
@@ -365,7 +289,7 @@ export interface FinalAssistantMessage {
 	stopReason?: string;
 }
 
-/** Inspect only the final assistant message for workflow completion evidence. */
+/** Inspect only the final assistant message for completion evidence. */
 export function inspectFinalAssistantMessage(
 	entries: SessionEntry[],
 ): FinalAssistantMessage {

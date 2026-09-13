@@ -61,7 +61,6 @@ export function registerLineage(options) {
         ...(options.parentNodeId ? { parentNodeId: options.parentNodeId } : {}),
         ...(options.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
         ...(options.parentSessionFile ? { parentSessionFile: options.parentSessionFile } : {}),
-        ...(options.parentWorkflowRunId ? { parentWorkflowRunId: options.parentWorkflowRunId } : {}),
         launchKind: options.launchKind ?? "fresh",
     };
     appendLineageEvent(rootDir, `launch:${options.nodeId}`, "launch", options.nodeId, {
@@ -69,7 +68,6 @@ export function registerLineage(options) {
         parentNodeId: registration.parentNodeId,
         parentSessionId: registration.parentSessionId,
         parentSessionFile: registration.parentSessionFile,
-        parentWorkflowRunId: registration.parentWorkflowRunId,
         launchKind: registration.launchKind,
     });
     return registration;
@@ -177,8 +175,6 @@ export function reduceLineage(rootDir) {
                 node.parentSessionId = event.parentSessionId;
             if (!node.parentSessionFile && typeof event.parentSessionFile === "string")
                 node.parentSessionFile = event.parentSessionFile;
-            if (!node.parentWorkflowRunId && typeof event.parentWorkflowRunId === "string")
-                node.parentWorkflowRunId = event.parentWorkflowRunId;
             if (!node.launchKind && typeof event.launchKind === "string")
                 node.launchKind = event.launchKind;
         }
@@ -327,7 +323,7 @@ export function hasUndrainedDescendants(state, nodeId) {
 }
 /** Record the once-only durable sink entry used by the drain boundary. */
 export function appendLineageInbox(rootDir, nodeId, deliveryId, sink, payload = {}) {
-    if (!sink.workflowRunId && (!sink.sessionId || !sink.sessionFile))
+    if (!sink.sessionId || !sink.sessionFile)
         return false;
     const eventId = `inbox:${deliveryId}`;
     const file = join(eventDir(rootDir), `${safeId(eventId)}.json`);
@@ -495,15 +491,14 @@ function readLineageInboxes(rootDir) {
             if (value.type !== "inbox" || typeof value.deliveryId !== "string")
                 continue;
             const payload = value.payload && typeof value.payload === "object" ? value.payload : {};
-            records.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined, sessionFile: typeof value.sessionFile === "string" ? value.sessionFile : undefined, workflowRunId: typeof value.workflowRunId === "string" ? value.workflowRunId : undefined, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
+            records.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined, sessionFile: typeof value.sessionFile === "string" ? value.sessionFile : undefined, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
         }
         catch { }
     }
     return records.map((record) => ({ record, materialized: materialized.has(record.deliveryId) }));
 }
 function sameMaterializationSink(left, right) {
-    return left.workflowRunId ? left.workflowRunId === right.workflowRunId :
-        Boolean(left.sessionId && left.sessionFile && left.sessionId === right.sessionId && left.sessionFile === right.sessionFile);
+    return Boolean(left.sessionId && left.sessionFile && left.sessionId === right.sessionId && left.sessionFile === right.sessionFile);
 }
 function pendingBefore(rootDir, deliveryId) {
     const entries = readLineageInboxes(rootDir);

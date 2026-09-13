@@ -7,97 +7,19 @@ import { describe, it } from "node:test";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const skill = readFileSync(
-	join(root, "skills", "orchestrate", "SKILL.md"),
-	"utf8",
-);
-const packageFiles = new Set(
-	JSON.parse(
-		execFileSync("npm", ["pack", "--dry-run", "--json"], {
-			cwd: root,
-			encoding: "utf8",
-		}),
-	)[0].files.map(({ path }) => path),
-);
+const packageFiles = new Set(JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: root, encoding: "utf8" }))[0].files.map(({ path }) => path));
 
-describe("production package manifest", () => {
-	it("declares the public npm identity and publish metadata", () => {
-		assert.equal(manifest.name, "pi-lpt-herdr-subagents");
-		assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-		assert.equal(manifest.license, "MIT");
-		assert.equal(manifest.publishConfig?.access, "public");
-		assert.equal(
-			manifest.repository?.url,
-			"git+https://github.com/alexshpunt/pi-lpt-herdr-subagents.git",
-		);
-		assert.equal(
-			manifest.bugs?.url,
-			"https://github.com/alexshpunt/pi-lpt-herdr-subagents/issues",
-		);
-		assert.equal(
-			manifest.homepage,
-			"https://github.com/alexshpunt/pi-lpt-herdr-subagents#readme",
-		);
-		assert.equal(manifest.author?.name, "Giuseppe Rodriguez");
-		assert.equal(manifest.author?.url, "https://github.com/giuseppecrj");
-		assert.ok(manifest.keywords?.includes("pi-package"));
-	});
-});
-
-describe("bundled orchestration skill", () => {
-	it("is exposed with the extension in the installed package", () => {
-		assert.deepEqual(manifest.pi?.skills, ["./skills"]);
-		assert.deepEqual(manifest.pi?.extensions, [
-			"./pi-extension/subagents/index.ts",
-		]);
-		assert.match(skill, /^---\nname: orchestrate\ndescription: .+\n---/);
-		for (const path of [
-			"README.md",
-			"AGENTS.md",
-			"CONTEXT.md",
-			"RELEASING.md",
-			"skills/orchestrate/SKILL.md",
-			"agents/built-in/adversarial-reviewer.md",
-			"agents/built-in/planner.md",
-			"agents/built-in/poteto.md",
-			"agents/built-in/reviewer.md",
-			"agents/built-in/scout.md",
-			"agents/built-in/visual-tester.md",
-			"agents/built-in/worker.md",
-			"pi-extension/subagents/plan-skill.md",
-			"pi-extension/subagents/workflow-worker.js",
-		]) {
-			assert.equal(packageFiles.has(path), true, `missing package file: ${path}`);
-		}
-		for (const path of packageFiles) {
-			assert.doesNotMatch(path, /(^|\/)(?:claude\.ts|plugin)(?:\/|$)/);
-		}
-		assert.equal(packageFiles.has("agents/claude-reviewer.md"), false);
-		for (const path of packageFiles) {
-			assert.doesNotMatch(
-				path,
-				/(^|\/)(?:\.pi|test|prototypes?|sessions|\.reviews)(?:\/|$)|(^|\/)(?:run\.jsonl|config\.json)$/,
-			);
-		}
-	});
-
-	it("keeps the approved review contract in the bundled skill", () => {
-		for (const phrase of [
-			"local paths, URLs, tickets",
-			"Materialize the",
-			"Parent-only preflight",
-			".pi/plans/<run>/workflow.js",
-			"Promise.all",
-			"retryable === true",
-			"final reviewer success/failure envelope",
-			"herdr_workflow",
-			"unmodified",
-			"APPROVE <8 lowercase hex characters>",
-			"Do not poll",
-			"security boundary",
-		]) {
-			assert.ok(skill.includes(phrase), `missing skill contract: ${phrase}`);
-		}
-		assert.doesNotMatch(skill, /subagent\s*\(\s*\{/);
-	});
+describe("minimal production package", () => {
+  it("ships the extension and public API without workflows, skills, or built-in roles", () => {
+    assert.deepEqual(manifest.pi?.extensions, ["./pi-extension/subagents/index.ts"]);
+    assert.equal(manifest.pi?.skills, undefined);
+    for (const path of ["README.md", "AGENTS.md", "CONTEXT.md", "RELEASING.md", "index.js", "index.d.ts", "pi-extension/subagents/index.ts"]) {
+      assert.equal(packageFiles.has(path), true, `missing package file: ${path}`);
+    }
+    for (const path of packageFiles) {
+      assert.doesNotMatch(path, /(^|\/)(?:skills|agents\/built-in)(?:\/|$)/);
+      assert.doesNotMatch(path, /(?:workflow-worker\.js|plan-skill\.md|model-config\.(?:js|ts))$/);
+      assert.doesNotMatch(path, /(^|\/)(?:\.pi|test|prototypes?|sessions|\.reviews|\.tmp)(?:\/|$)|(^|\/)(?:run\.jsonl|config\.json)$/);
+    }
+  });
 });

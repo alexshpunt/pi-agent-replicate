@@ -37,7 +37,6 @@ import {
 	cleanupTestEnv,
 	createTrackedSurface,
 	closePane,
-	focusSurface,
 	startPi,
 	waitForScreen,
 	waitForFile,
@@ -54,28 +53,6 @@ import {
 } from "./harness.ts";
 const backends = getAvailableBackends();
 
-function getWorkspaceActiveTab(workspaceId: string): string | null {
-	const workspaces = JSON.parse(
-		execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" }),
-	).result.workspaces as Array<{
-		active_tab_id?: string;
-		workspace_id: string;
-	}>;
-	return (
-		workspaces.find((workspace) => workspace.workspace_id === workspaceId)
-			?.active_tab_id ?? null
-	);
-}
-
-function getPaneTab(paneId: string): string | null {
-	return (
-		JSON.parse(
-			execFileSync("herdr", ["pane", "get", paneId], {
-				encoding: "utf8",
-			}),
-		).result.pane?.tab_id ?? null
-	);
-}
 
 interface IntegrationResultDetails {
 	kind?: unknown;
@@ -87,6 +64,7 @@ interface IntegrationResultDetails {
 
 	resultPath?: unknown;
 	errorMessage?: unknown;
+	name?: unknown;
 }
 
 interface IntegrationSessionEntry {
@@ -221,8 +199,8 @@ async function waitForPaneTextCount(
 }
 
 interface PaneSessionRecord {
-	sessionId?: unknown;
-	sessionFile?: unknown;
+	sessionId: string;
+	sessionFile: string;
 }
 
 async function waitForReplacementSession(
@@ -418,53 +396,6 @@ async function waitForAgentGone(paneId: string, workspaceId: string, timeout = P
 	}
 	throw new Error(`Timeout waiting for agent pane to close ${paneId}`);
 }
-function listBtwPanes(workspaceId: string): string[] {
-
-	const tabs = JSON.parse(
-		execFileSync("herdr", ["tab", "list", "--workspace", workspaceId], {
-			encoding: "utf8",
-		}),
-	).result.tabs as Array<{ label?: string; tab_id: string }>;
-	const btwTabIds = new Set(
-		tabs.filter((tab) => tab.label === "BTW").map((tab) => tab.tab_id),
-	);
-	const panes = JSON.parse(
-		execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], {
-			encoding: "utf8",
-		}),
-	).result.panes as Array<{ pane_id: string; tab_id: string }>;
-	return panes
-		.filter((pane) => btwTabIds.has(pane.tab_id))
-		.map((pane) => pane.pane_id);
-}
-
-async function waitForBtwPane(
-	workspaceId: string,
-	previousPane?: string,
-	timeout = PI_TIMEOUT,
-): Promise<string> {
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < timeout) {
-		const panes = listBtwPanes(workspaceId);
-		if (panes.length === 1 && panes[0] !== previousPane) return panes[0];
-		await sleep(500);
-	}
-	throw new Error(`Timeout waiting for BTW pane in workspace ${workspaceId}`);
-}
-
-async function waitForNoBtwPane(
-	workspaceId: string,
-	timeout = PI_TIMEOUT,
-): Promise<void> {
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < timeout) {
-		if (listBtwPanes(workspaceId).length === 0) return;
-		await sleep(500);
-	}
-	throw new Error(
-		`Timeout waiting for BTW pane cleanup in workspace ${workspaceId}`,
-	);
-}
 
 if (backends.length === 0) {
 	console.log(
@@ -494,74 +425,6 @@ for (const backend of backends) {
 
 		// ── Basic spawn + completion ──
 
-		it("opens, replaces, and closes a context-aware BTW pane without steering the parent", async () => {
-			const id = uniqueId();
-			const contextMarker = `SECRET_${id}`;
-			const expectedAnswer = new RegExp(`BTW_CONFIRMED_(?:SECRET_)?${id}`);
-			const parentSession = join(env.dir, `btw-parent-${id}.jsonl`);
-			const surface = createTrackedSurface(env, `btw-parent-${id}`);
-			await waitForPaneReady(surface);
-			const parentTab = getPaneTab(surface);
-			assert.ok(parentTab, "parent pane must belong to a Herdr tab");
-
-			startPi(surface, env.dir, `Reply with only ${contextMarker}.`, {
-				extraArgs: `--session ${shellQuote(parentSession)}`,
-			});
-			await waitForScreen(surface, new RegExp(contextMarker), PI_TIMEOUT);
-			await waitForFile(parentSession, PI_TIMEOUT, new RegExp(contextMarker));
-			const parentBefore = readFileSync(parentSession, "utf8");
-
-			focusSurface(backend, surface);
-			assert.equal(getWorkspaceActiveTab(env.workspaceId), parentTab);
-
-			runInPane(surface, "/btw Say FIRST and wait for another question");
-			const firstBtwPane = await waitForBtwPane(env.workspaceId);
-			assert.equal(
-				getWorkspaceActiveTab(env.workspaceId),
-				parentTab,
-				"opening BTW must not change the workspace's active tab",
-			);
-
-			runInPane(
-				surface,
-				"/btw Read the previous assistant answer. Reply with BTW_CONFIRMED_ followed by its secret code, with no spaces.",
-			);
-			const secondBtwPane = await waitForBtwPane(env.workspaceId, firstBtwPane);
-			assert.notEqual(
-				secondBtwPane,
-				firstBtwPane,
-				"second /btw should replace the first pane",
-			);
-			assert.equal(
-				getWorkspaceActiveTab(env.workspaceId),
-				parentTab,
-				"replacing BTW must not change the workspace's active tab",
-			);
-
-			try {
-				await waitForScreen(secondBtwPane, expectedAnswer, PI_TIMEOUT);
-			} catch (error) {
-				let childScreen = "<pane unavailable>";
-				try {
-					childScreen = readPane(secondBtwPane, 200);
-				} catch {
-					// Keep the original wait error when diagnostic screen capture fails.
-				}
-				throw new Error(
-					`${error instanceof Error ? error.message : String(error)}\n` +
-						`Parent screen:\n${readPane(surface, 200)}\n` +
-						`Child screen:\n${childScreen}`,
-				);
-			}
-			assert.equal(
-				readFileSync(parentSession, "utf8"),
-				parentBefore,
-				"BTW must not alter parent history",
-			);
-
-			runInPane(surface, "/btw-close");
-			await waitForNoBtwPane(env.workspaceId);
-		});
 
 		it("keeps a real child active during manual compaction until the terminal hook", async () => {
 			const id = uniqueId();

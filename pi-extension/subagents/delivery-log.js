@@ -9,7 +9,6 @@ const ALLOWED_FIELDS = [
     "error",
     "waitedSince",
     "waitedMs",
-    "workflowRunId",
     "attempt",
     "cause",
     "reason",

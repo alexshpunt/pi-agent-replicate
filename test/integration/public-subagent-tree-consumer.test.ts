@@ -41,7 +41,6 @@ const forbiddenTools = [
 	"subagent_interrupt",
 	"subagent_resume",
 	"subagents_list",
-	"herdr_workflow",
 	"caller_ping",
 	"subagent_done",
 ];
@@ -888,7 +887,7 @@ for (const backend of getAvailableBackends()) {
 					`        return { content: [{ type: "text", text: "open-error tree launched" }], details: { treeId: tree.treeId } };`,
 				].join("\n"),
 				nestedToolBody: [
-					`      const failedChild = await activeTree.launchChild({ parentId: activeTree.ownerId, name: ${JSON.stringify(`Open-error-${id}`)}, agent: ${JSON.stringify(role)}, model: "pi-integration/fallback-fail", task: ${JSON.stringify(`Return exactly OPEN_ERROR_${id}`)}, tools: ["read"] });`,
+					`      const failedChild = await activeTree.launchChild({ parentId: activeTree.ownerId, name: ${JSON.stringify(`Open-error-${id}`)}, agent: ${JSON.stringify(role)}, task: ${JSON.stringify(`Return exactly OPEN_ERROR_${id}`)}, tools: ["read"] });`,
 					`      write(files.nestedError, { ownerId: activeTree.ownerId, failedNodeId: failedChild.nodeId, failedParentId: failedChild.parentId });`,
 					`      void failedChild.result.then((result) => write(files.nestedErrorResult, result));`,
 					`      return { content: [{ type: "text", text: "failed descendant launched" }], details: { nodeId: failedChild.nodeId } };`,
@@ -973,7 +972,7 @@ for (const backend of getAvailableBackends()) {
 					`        activeTree = tree;`,
 					`        write(files.credentials, { callerId: tree.callerId, treeId: tree.treeId, ownershipToken: tree.ownershipToken });`,
 					`        bind(tree, "create");`,
-					`        const rootChild = await tree.launchChild({ parentId: tree.callerId, name: ${JSON.stringify(rootName)}, agent: ${JSON.stringify(role)}, model: "pi-integration/fallback-fail", task: ${JSON.stringify(`Return exactly ${marker}`)}, tools: ["read"] });`,
+					`        const rootChild = await tree.launchChild({ parentId: tree.callerId, name: ${JSON.stringify(rootName)}, agent: ${JSON.stringify(role)}, task: ${JSON.stringify(`Return exactly ${marker}`)}, tools: ["read"] });`,
 					`        void Promise.all([tree.result, rootChild.result]).then(([terminal, rootResult]) => write(files.complete, { terminal, rootResult }));`,
 					`        return { content: [{ type: "text", text: "root failure tree launched" }], details: { treeId: tree.treeId } };`,
 				].join("\n"),

@@ -42,7 +42,7 @@ Use this optional live-provider smoke test only when checking provider compatibi
 PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 npm run test:integration:live
 ```
 
-Report passing, failing, and skipped tests. Do not claim full verification when Herdr-dependent tests were skipped. For package changes, explicitly inspect the dry-run contents for `skills/orchestrate/SKILL.md` and `pi-extension/subagents/workflow-worker.js`, and confirm that plans, journals, sessions, prototypes, generated evidence, and local config are absent.
+Report passing, failing, and skipped tests. Do not claim full verification when Herdr-dependent tests were skipped. For package changes, inspect the dry-run contents for the package-root API and `pi-extension/subagents/`. Confirm that plans, journals, sessions, prototypes, generated evidence, local config, bundled roles, and orchestration skills are absent.
 
 ## Postflight
 

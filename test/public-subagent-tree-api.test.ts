@@ -14,7 +14,7 @@ const modelFacingTools = [
 	"subagent_interrupt",
 	"subagent_resume",
 	"subagents_list",
-	"herdr_workflow",
+	"subagent_cancel",
 	"caller_ping",
 	"subagent_done",
 ];
@@ -395,8 +395,6 @@ describe("public subagent tree package boundary", () => {
 				`    name: "typed-router",`,
 				`    task: "Return one answer",`,
 				`    agent: "router",`,
-				`    model: "pi-integration/test",`,
-				`    thinking: "low",`,
 				`    cwd: ".",`,
 				`    worktree: { branch: "ale-46/typed-router", base: "main" },`,
 				`    tools: ["read", "bash"],`,
@@ -531,9 +529,7 @@ describe("public subagent tree package boundary", () => {
 		for (const required of [
 			"README.md",
 			"CHANGELOG.md",
-			"skills/orchestrate/SKILL.md",
 			"pi-extension/subagents/index.ts",
-			"pi-extension/subagents/workflow-worker.js",
 		]) {
 			assert.equal(packageFiles.has(required), true, `missing package file: ${required}`);
 		}

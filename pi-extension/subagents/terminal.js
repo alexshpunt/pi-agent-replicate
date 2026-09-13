@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { closeHerdrSurface, createHerdrSurface, createHerdrSurfaceInWorkspace, createHerdrSurfaceSplit, createHerdrWorktree, focusHerdrWorkspace, getHerdrPaneProcessInfo, getHerdrSurfaceTabId, rememberHerdrSurfaceTab, waitForHerdrPiReady, waitForHerdrShellReady, isHerdrAvailable, isProcessAlive, readHerdrScreen, readHerdrScreenAsync, inspectHerdrPane, renameHerdrTab, renameHerdrWorkspace, sendHerdrCommand, sendHerdrEscape, waitForHerdrPaneAbsence, waitForProcessesExit, } from "./herdr.js";
+import { closeHerdrSurface, createHerdrSurface, createHerdrSurfaceInWorkspace, createHerdrSurfaceSplit, createHerdrWorktree, getHerdrPaneProcessInfo, getHerdrSurfaceTabId, rememberHerdrSurfaceTab, waitForHerdrPiReady, waitForHerdrShellReady, isHerdrAvailable, isProcessAlive, readHerdrScreen, readHerdrScreenAsync, inspectHerdrPane, renameHerdrTab, renameHerdrWorkspace, sendHerdrCommand, sendHerdrEscape, waitForHerdrPaneAbsence, waitForProcessesExit, } from "./herdr.js";
 const SETUP_HINT = "Start pi inside herdr (`herdr`, then run `pi`).";
 export function isTerminalAvailable() {
     return isHerdrAvailable();
@@ -51,10 +51,6 @@ export function renameCurrentTab(title) {
 export function renameCurrentWorkspace(title) {
     assertTerminalAvailable();
     renameHerdrWorkspace(title);
-}
-export function focusWorkspace(workspaceId) {
-    assertTerminalAvailable();
-    focusHerdrWorkspace(workspaceId);
 }
 export function runInPane(paneId, command) {
     assertTerminalAvailable();

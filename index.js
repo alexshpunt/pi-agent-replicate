@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { discoverAgentCatalog, effectiveRoleTools, resolveAgent } from "./pi-extension/subagents/role-catalog.js";
-import { loadModelConfig, resolveModelDefault } from "./pi-extension/subagents/model-config.js";
 import { resolveRuntimePlan, wrapPiModelRegistry } from "./pi-extension/subagents/runtime-routing.js";
 const TREE_REGISTRY = Symbol.for("pi-lpt-herdr-subagents/public-tree/v2");
 const PROCESS_ID = Symbol.for("pi-lpt-herdr-subagents/public-tree/process");
@@ -612,17 +611,13 @@ async function launch(s, o) {
     const thinking = s.pi.getThinkingLevel();
     if (typeof thinking !== "string") throw new SubagentTreeValidationError(`Unsupported thinking level: ${thinking}`);
     const registryAdapter = wrapPiModelRegistry(s.ctx.modelRegistry);
-    const modelConfig = loadModelConfig();
     const plan = resolveRuntimePlan({
-        model: o.model,
-        thinking: o.thinking
-    }, {
-        model: resolveModelDefault(o.agent, role?.model, modelConfig),
+        model: role?.model,
         thinking: role?.thinking
     }, {
         provider: s.ctx.model.provider,
         modelId: s.ctx.model.id,
-        thinking: thinking
+        thinking
     }, registryAdapter);
     if (o.parentId === s.meta.callerId) claimRoot(s);
     const id = randomUUID(), childMetadata = identityMetadata(consumerMetadata, s.meta, s.ownerId, id, o.parentId), node = {

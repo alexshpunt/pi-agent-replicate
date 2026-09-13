@@ -114,8 +114,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
 	createLifecycle,
@@ -685,9 +684,6 @@ function failureRecords(path: string, deliveryId: string): any[] {
 			JSON.stringify(record).includes(deliveryId),
 		);
 }
-function recordField(record: any, name: string): unknown {
-	return record?.[name] ?? record?.fields?.[name];
-}
 
 // Resolved against this file, not the process cwd: `npm test` runs from the
 // repository root, but a focused run may not.
@@ -750,7 +746,6 @@ function swallowedCatches(body: string): string[] {
 /** The approved list of adapter sites that used to swallow a delivery failure. */
 const FORMER_SWALLOW_SITES = [
 	{ fn: "startRecoveredWatcher", label: "recovered subagent watcher" },
-	{ fn: "startRecoveredWorkflowWatcher", label: "recovered workflow watcher" },
 	{ fn: "attemptPendingTerminalDelivery", label: "terminal delivery catch" },
 ];
 
@@ -1139,101 +1134,6 @@ describe("TS-06 loud failures at the real adapter catches", () => {
 		}
 	});
 
-	it("TS-06 records a recovered workflow watcher send failure", async () => {
-		const startRecoveredWorkflowWatcher = requireExport<any>(
-			__test__ as any,
-			"startRecoveredWorkflowWatcher",
-			"pi-extension/subagents/index.ts",
-		);
-		const sessionsDir = tempDir("pi-ts06-recovered-workflow-");
-		const parentSessionFile = join(sessionsDir, "parent.jsonl");
-		writeFileSync(parentSessionFile, "", "utf8");
-		const sessionFile = join(sessionsDir, "recovered-workflow-child.jsonl");
-		writeSessionFile(sessionFile, { id: "workflow-child", cwd: sessionsDir });
-		writeFileSync(
-			`${sessionFile}.exit`,
-			JSON.stringify({ type: "done", summary: "recovered workflow answer" }),
-			"utf8",
-		);
-
-		const repoDir = tempDir("pi-ts06-workflow-repo-");
-		execFileSync("git", ["init", "-q", repoDir], { stdio: "ignore" });
-		const runId = "recovered-workflow-run";
-		const journalDir = join(repoDir, ".pi", "plans", runId);
-		mkdirSync(journalDir, { recursive: true });
-		writeFileSync(
-			join(journalDir, "run.jsonl"),
-			[
-				JSON.stringify({
-					type: "approved",
-					preparingSession: { id: "parent-session", file: parentSessionFile },
-				}),
-				JSON.stringify({ type: "started", coordinatorPid: 999_999_999 }),
-			].join("\n") + "\n",
-			"utf8",
-		);
-		const lineage = registerLineage({
-			artifactDir: sessionsDir,
-			nodeId: "workflow-child",
-			parentSessionId: "parent-session",
-			parentSessionFile,
-			parentWorkflowRunId: runId,
-			launchKind: "workflow",
-		});
-
-		const runtimeHarness = installAdapterRuntime(sessionsDir, parentSessionFile);
-		const running: any = {
-			id: "workflow-child",
-			name: "reviewer",
-			task: "review",
-			surface: "missing-surface",
-			startTime: 0,
-			sessionFile,
-			interactive: false,
-			runtimePlan: undefined,
-			lifecycle: createLifecycle(0),
-		};
-		(__test__.runningSubagents as Map<string, unknown>).set(running.id, running);
-
-		const hostErrors: unknown[] = [];
-		const onHostError = (error: unknown) => hostErrors.push(error);
-		process.on("unhandledRejection", onHostError);
-		process.on("uncaughtException", onHostError);
-		try {
-			startRecoveredWorkflowWatcher(running, lineage.rootDir, runId, { cwd: repoDir } as any);
-			const logPath = join(sessionsDir, "subagent-delivery.log");
-			for (let turn = 0; turn < 200; turn += 1) {
-				const widgetText = renderedWidgetText(runtimeHarness.widgets);
-				if (
-					runtimeHarness.sends.length > 0 &&
-					failureRecords(logPath, "terminal:workflow-child").length === 1 &&
-					countOccurrences(widgetText, "delivery-failed") === 1
-				) break;
-				await tick();
-			}
-
-			const deliveryId = "terminal:workflow-child";
-			assert.equal(runtimeHarness.sends.length, 1, "the recovered workflow attempted one parent delivery");
-			const failures = failureRecords(logPath, deliveryId);
-			assert.equal(failures.length, 1, "one exact recovered workflow failure is durable");
-			assert.equal(recordField(failures[0], "deliveryId"), deliveryId, "failure names the exact delivery");
-			assert.ok(JSON.stringify(failures[0]).includes(runId), "failure names the exact workflow run");
-			const phase = recordField(failures[0], "phase");
-			assert.equal(typeof phase, "string", "failure carries an explicit phase");
-			assert.match(String(phase), /steer|send/i, "failure names the send phase");
-			const widgetText = renderedWidgetText(runtimeHarness.widgets);
-			assert.equal(
-				countOccurrences(widgetText, "delivery-failed"),
-				1,
-				"the recovered workflow projects one delivery-failed widget row",
-			);
-			assert.ok(widgetText.includes(deliveryId), "the failed widget row names the exact delivery");
-			assert.deepEqual(hostErrors, [], "the recovered workflow failure stays inside the Pi host");
-		} finally {
-			process.off("unhandledRejection", onHostError);
-			process.off("uncaughtException", onHostError);
-		}
-	});
 
 	it("TS-06 leaves no silent catch on the approved adapter failure points", () => {
 

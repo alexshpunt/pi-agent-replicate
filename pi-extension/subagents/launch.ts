@@ -28,7 +28,6 @@ import type { ResolvedRuntimePlan } from "./runtime-routing.ts";
 import { HerdrWorktreeCreateError } from "./herdr.ts";
 import {
 	captureSessionBaseline,
-	createWorktreeSessionFork,
 	seedStandaloneSessionFile,
 	seedSubagentSessionFile,
 } from "./session.ts";
@@ -42,9 +41,7 @@ import {
 	createSubagentWorktree,
 	runScriptInPane,
 	shellQuote,
-	waitForPiReady,
 	waitForShellReady,
-	focusWorkspace,
 	type HerdrWorktreeSurface,
 } from "./terminal.ts";
 
@@ -61,8 +58,6 @@ export interface WorktreeLaunch {
 	baseSha: string;
 	manifestFile: string;
 	sessionFile?: string;
-	sourceSessionFile?: string;
-	handoffMessage?: string;
 }
 
 export interface WorktreeHandoff extends WorktreeLaunch {
@@ -84,7 +79,6 @@ export interface FreshPiLaunchRequest {
 	cwd?: string;
 	worktree?: { branch: string; base?: string };
 	fork?: boolean;
-	handoff?: { leafId: string };
 	surface?: string;
 	parent: {
 		cwd: string;
@@ -94,7 +88,8 @@ export interface FreshPiLaunchRequest {
 		sessionDir: string;
 		agentDir?: string;
 	};
-	runtimePlan: ResolvedRuntimePlan;	lineage?: LineageRegistration;
+	runtimePlan: ResolvedRuntimePlan;
+	lineage?: LineageRegistration;
 
 	behavior: {
 		tools?: string;
@@ -174,12 +169,6 @@ export interface PiLaunchOperations {
 		command: string,
 		options: { scriptPath: string; scriptPreamble: string },
 	): string;
-	waitForPiReady?(
-		surface: string,
-		sessionFile: string,
-		cwd: string,
-	): Promise<void>;
-	focusWorkspace?(workspaceId: string): void;
 }
 
 const defaultOperations: PiLaunchOperations = {
@@ -190,8 +179,6 @@ const defaultOperations: PiLaunchOperations = {
 	createWorktree: createSubagentWorktree,
 	waitForShellReady,
 	runScript: runScriptInPane,
-	waitForPiReady,
-	focusWorkspace,
 };
 
 interface ResolvedLaunch {
@@ -240,33 +227,6 @@ export async function launchPiSubagent(
 		: launchFreshPiSubagent(request, operations);
 }
 
-export async function launchPiWorktreeHandoff(
-	request: FreshPiLaunchRequest,
-	operations: PiLaunchOperations = defaultOperations,
-): Promise<{ running: PiRunningChild; focusError?: string }> {
-	if (!request.worktree || !request.handoff) {
-		throw new Error("A worktree handoff requires a worktree and active leaf");
-	}
-	const running = await launchPiSubagent(request, operations);
-	if (!running.worktree) {
-		throw new Error("Worktree handoff did not create a managed worktree");
-	}
-	try {
-		operations.focusWorkspace?.(running.worktree.workspaceId);
-	} catch (error) {
-		const focusError = errorMessage(error);
-		writeWorktreeManifest(running.worktree.manifestFile, {
-			state: "running",
-			focusError,
-		});
-		return {
-			running,
-			focusError,
-		};
-	}
-	return { running };
-}
-
 async function launchFreshPiSubagent(
 	request: FreshPiLaunchRequest,
 	operations: PiLaunchOperations,
@@ -290,12 +250,9 @@ async function launchFreshPiSubagent(
 	try {
 		surface = prepareLaunchSurface(resolved, operations);
 		const session = prepareChildSession(resolved, surface);
-		const handoffArtifacts = request.handoff
-			? prepareTaskArtifacts(resolved, session)
-			: undefined;
 		await confirmShellReady(session, operations, signal);
 		if (signal.aborted) throw new Error("subagent launch aborted");
-		const artifacts = handoffArtifacts ?? prepareTaskArtifacts(resolved, session);
+		const artifacts = prepareTaskArtifacts(resolved, session);
 		const sessionBaseline = captureSessionBaseline(artifacts.sessionFile);
 		if (resolved.lineage) {
 			appendLineageEvent(resolved.lineage.rootDir, `metadata:${resolved.id}:${resolved.startTime}`, "launch_metadata", resolved.id, {
@@ -317,11 +274,6 @@ async function launchFreshPiSubagent(
 		}
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(resolved, artifacts, command, operations);
-		if (request.handoff) {
-			if (!operations.waitForPiReady) throw new Error("Pi startup confirmation is unavailable");
-			await operations.waitForPiReady(artifacts.surface, artifacts.sessionFile, artifacts.targetCwd);
-			if (artifacts.worktree) persistWorktreeResult(artifacts.worktree, "running");
-		}
 		return createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline);
 	} catch (error) {
 		abort.abort();
@@ -498,53 +450,12 @@ async function confirmShellReady(
 	await operations.waitForShellReady(session.surface, { signal });
 }
 
-function buildWorktreeHandoffMessage(
-	request: FreshPiLaunchRequest,
-	worktree: WorktreeLaunch,
-	sessionFile: string,
-): string {
-	const task = request.task.slice(0, 2000);
-	return [
-		"Worktree handoff context:",
-		`Branch: ${worktree.branch}`,
-		`Base commit: ${worktree.baseSha}`,
-		`Worktree: ${worktree.path}`,
-		`Source session: ${request.parent.sessionFile}`,
-		`Fork session: ${sessionFile}`,
-		"",
-		"Requested task:",
-		task || "Continue the current work in this worktree.",
-	].join("\n");
-}
-
 function prepareTaskArtifacts(
 	resolved: ResolvedLaunch,
 	session: PreparedSession,
 ): PreparedArtifacts {
 	const { request } = resolved;
-	if (request.handoff) {
-		if (!session.worktree) {
-			throw new Error("A worktree handoff requires a managed worktree");
-		}
-		const handoffMessage = buildWorktreeHandoffMessage(
-			request,
-			session.worktree,
-			session.sessionFile,
-		);
-		createWorktreeSessionFork({
-			parentSessionFile: request.parent.sessionFile,
-			leafId: request.handoff.leafId,
-			childSessionFile: session.sessionFile,
-			childCwd: session.targetCwd,
-			handoffMessage,
-		});
-		session.worktree.sourceSessionFile = request.parent.sessionFile;
-		session.worktree.handoffMessage = handoffMessage;
-		writeWorktreeManifest(session.worktree.manifestFile, {
-			sourceSessionFile: request.parent.sessionFile,
-			handoffMessage,
-		});
-	} else if (resolved.sessionMode !== "standalone") {
+	if (resolved.sessionMode !== "standalone") {
 		seedSubagentSessionFile({
 			mode: resolved.sessionMode,
 			parentSessionFile: request.parent.sessionFile,
@@ -566,13 +477,11 @@ function prepareTaskArtifacts(
 	const summaryInstruction = request.behavior.autoExit
 		? "Your FINAL assistant message should summarize what you accomplished."
 		: "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
-	const fullTask = request.handoff
+	const fullTask = resolved.sessionMode === "fork"
 		? request.task
-		: resolved.sessionMode === "fork"
-			? request.task
-			: `${roleBlock}\n\n${modeHint}\n\n${request.task}\n\n${summaryInstruction}`;
+		: `${roleBlock}\n\n${modeHint}\n\n${request.task}\n\n${summaryInstruction}`;
 	let taskArg = fullTask;
-	if (resolved.taskDelivery === "artifact" && !request.handoff) {
+	if (resolved.taskDelivery === "artifact") {
 		const artifactPath = join(
 			resolved.artifactDir,
 			`context/${safeName(request.name) || "subagent"}-${timestampForFile(false)}.md`,
@@ -603,9 +512,7 @@ function buildPiCommand(
 		"pi",
 		"--session",
 		shellQuote(artifacts.sessionFile),
-		...(request.handoff
-			? []
-			: ["-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts"))]),
+		"-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
 		...(process.env.HERDR_ENV === "1" && existsSync(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))
 			? ["-e", shellQuote(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))]
 			: []),
@@ -628,15 +535,13 @@ function buildPiCommand(
 		request.behavior.includeControlTools ?? true,
 	);
 	if (toolAllowlist) parts.push("--tools", shellQuote(toolAllowlist));
-	if (!request.handoff) {
-		parts.push(shellQuote(artifacts.taskArg));
-	}
+	parts.push(shellQuote(artifacts.taskArg));
 
 	const env: string[] = [];
 	for (const [key, value] of Object.entries(request.environment ?? {})) {
 		if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env.push(`${key}=${shellQuote(value)}`);
 	}
-	if (resolved.lineage && !request.handoff) {
+	if (resolved.lineage) {
 		env.push("PI_SUBAGENT_LAUNCHER_PID=$$");
 		for (const [key, value] of Object.entries(lineageEnvironment(resolved.lineage))) {
 			env.push(`${key}=${shellQuote(value)}`);
@@ -649,13 +554,12 @@ function buildPiCommand(
 			`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`,
 		);
 	}
-	if (!request.handoff) {
-		if (request.behavior.deniedTools.length > 0) {
+	if (request.behavior.deniedTools.length > 0) {
 			env.push(
 				`PI_DENY_TOOLS=${shellQuote(request.behavior.deniedTools.join(","))}`,
 			);
-		}
-		env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
+	}
+	env.push(`PI_SUBAGENT_NAME=${shellQuote(request.name)}`);
 		if (request.agent)
 			env.push(`PI_SUBAGENT_AGENT=${shellQuote(request.agent)}`);
 		env.push(
@@ -669,14 +573,11 @@ function buildPiCommand(
       `PI_SUBAGENT_SETTLED_EVENTS_FILE=${shellQuote(artifacts.settledEventsFile)}`,
     );
 		env.push(`PI_SUBAGENT_SURFACE=${shellQuote(artifacts.surface)}`);
-	}
 
 	const piCommand =
 		`cd ${shellQuote(artifacts.targetCwd)} && ` +
 		`${env.join(" ")} ${parts.join(" ")}`;
-	return request.handoff
-		? piCommand
-		: `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
+	return `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
 }
 
 function startPiProcess(
@@ -690,7 +591,7 @@ function startPiProcess(
 		"subagent-scripts",
 		`${safeName(resolved.request.name) || "subagent"}-${resolved.id}.sh`,
 	);
-	if (artifacts.worktree && !resolved.request.handoff) {
+	if (artifacts.worktree) {
 		persistWorktreeResult(artifacts.worktree, "running");
 	}
 	return operations.runScript(artifacts.surface, command, {

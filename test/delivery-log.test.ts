@@ -130,7 +130,6 @@ describe("TS-06 persistent delivery log", () => {
 			error: "steer failed",
 			waitedSince: now - 1000,
 			waitedMs: 1000,
-			workflowRunId: "workflow-1",
 			answer,
 			resultContent: answer,
 			content: answer,
@@ -158,7 +157,6 @@ describe("TS-06 persistent delivery log", () => {
 				"version",
 				"waitedMs",
 				"waitedSince",
-				"workflowRunId",
 			].sort(),
 			"the durable record has no caller-defined fields",
 		);
