@@ -853,6 +853,8 @@ for (const backend of getAvailableBackends()) {
 			installPackedConsumer(env);
 
 			const id = `open-${Date.now()}`;
+			const failedRole = `tree-open-error-${id}`;
+			writeRole(env, failedRole, "model: pi-integration/fallback-fail\ntools: read\nauto-exit: true");
 			const role = `tree-open-${id}`;
 			writeRole(env, role, [
 				"model: pi-integration/test",
@@ -887,7 +889,7 @@ for (const backend of getAvailableBackends()) {
 					`        return { content: [{ type: "text", text: "open-error tree launched" }], details: { treeId: tree.treeId } };`,
 				].join("\n"),
 				nestedToolBody: [
-					`      const failedChild = await activeTree.launchChild({ parentId: activeTree.ownerId, name: ${JSON.stringify(`Open-error-${id}`)}, agent: ${JSON.stringify(role)}, task: ${JSON.stringify(`Return exactly OPEN_ERROR_${id}`)}, tools: ["read"] });`,
+					`      const failedChild = await activeTree.launchChild({ parentId: activeTree.ownerId, name: ${JSON.stringify(`Open-error-${id}`)}, agent: ${JSON.stringify(failedRole)}, task: ${JSON.stringify(`Return exactly OPEN_ERROR_${id}`)}, tools: ["read"] });`,
 					`      write(files.nestedError, { ownerId: activeTree.ownerId, failedNodeId: failedChild.nodeId, failedParentId: failedChild.parentId });`,
 					`      void failedChild.result.then((result) => write(files.nestedErrorResult, result));`,
 					`      return { content: [{ type: "text", text: "failed descendant launched" }], details: { nodeId: failedChild.nodeId } };`,

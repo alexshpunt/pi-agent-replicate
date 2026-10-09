@@ -41,6 +41,8 @@ Launching accepts the same `cwd` and `worktree` options as the model-facing tool
 
 ## Reattach and fork
 
+Internal Pi launches carry their child lifecycle binding in the session, so moving a child does not depend on copying a `.lineage.json` sidecar. This does not replace a consumer's explicit callback reattachment described below; automatic model-facing result delivery and consumer callback delivery are separate contracts.
+
 A consumer calls `attachSubagentTree` from every fresh `session_start` with the current `pi`, `ctx`, and caller credentials, then calls `bindFinalCallback()` on the returned handle. For `/reload`, `/new`, and `/resume`, this replaces the stale session references. For `/fork`, pass `forkLineage: { previousSessionFile }`. The API checks the previous binding and the new session header's `parentSession` before replacing the active context. A failed check leaves the old context untouched.
 
 The attached handle rebuilds its read-only `children` map. Each child keeps the same awaitable result identity, including answers that settled while the consumer was unbound. Only the original caller branch may call `bindFinalCallback`; callback bindings are versioned, and a successful callback is delivered once. A callback failure remains pending for a later binding.

@@ -13,6 +13,8 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readSessionBinding, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
+import type { WorktreeLaunch } from "./launch.ts";
 
 /** Durable launch registration and recursive ownership projection. */
 export interface LineageRegistration {
@@ -31,6 +33,8 @@ export interface LineageNodeState {
   parentSessionId?: string;
   parentSessionFile?: string;
   launchKind?: string;
+  /** Original review target; moving the session does not make it an ordinary pane. */
+  worktree?: WorktreeLaunch;
   name?: string;
   task?: string;
   agent?: string;
@@ -268,6 +272,10 @@ export function reduceLineage(rootDir: string): LineageState {
       if (typeof event.autoExit === "boolean") node.autoExit = event.autoExit;
       if (typeof event.workspaceId === "string") node.workspaceId = event.workspaceId;
       if (typeof event.cwd === "string") node.cwd = event.cwd;
+      if (event.worktree && typeof event.worktree === "object" &&
+        ["path", "workspaceId", "paneId", "branch", "baseRef", "baseSha", "manifestFile"].every((key) => typeof (event.worktree as Record<string, unknown>)[key] === "string")) {
+        node.worktree = event.worktree as WorktreeLaunch;
+      }
     } else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
       const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
       prior.intent = true;
@@ -697,7 +705,7 @@ export function pendingLineageInboxes(rootDir: string, sessionId: string, sessio
       const value = JSON.parse(readFileSync(join(rootDir, "events", file), "utf8"));
       if (!validEvent(value, file, rootDir.split(/[\\/]/).pop())) continue;
       if (value.type === "inbox_materialized" && typeof value.deliveryId === "string") materialized.add(value.deliveryId);
-      else if (value.type === "inbox" && value.sessionId === sessionId && value.sessionFile === sessionFile && typeof value.deliveryId === "string") {
+      else if (value.type === "inbox" && value.sessionId === sessionId && typeof value.deliveryId === "string") {
         const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
         inboxes.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId, sessionFile, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
       }
@@ -709,6 +717,8 @@ export function pendingLineageInboxes(rootDir: string, sessionId: string, sessio
 
 /** Read the authoritative lineage pointer attached to a child session. */
 export function readLineageAttachment(sessionFile: string): LineageRegistration | undefined {
+  const embedded = readSessionBinding(sessionFile)?.child?.lineage;
+  if (embedded && existsSync(join(embedded.rootDir, "events"))) return embedded;
   try {
     const value = JSON.parse(readFileSync(`${sessionFile}.lineage.json`, "utf8")) as Partial<LineageRegistration>;
     if (typeof value.rootDir !== "string" || typeof value.rootId !== "string" || typeof value.nodeId !== "string") return undefined;
@@ -725,6 +735,12 @@ export function discoverLineageRoots(sessionDir: string, sessionFile?: string): 
   if (sessionFile) {
     const attachment = readLineageAttachment(sessionFile);
     if (attachment) result.add(attachment.rootDir);
+    try {
+      const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]);
+      if (header.type === "session" && typeof header.id === "string") {
+        for (const rootDir of sessionLineageRoots(sessionBindingStore(sessionFile), header.id)) result.add(rootDir);
+      }
+    } catch { /* An unreadable session cannot supply a durable key. */ }
   }
   try {
     for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {

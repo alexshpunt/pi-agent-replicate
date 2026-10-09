@@ -33,6 +33,8 @@ Roles come from project, global, or installed role-pack agent directories. Proje
 
 A launch is fire-and-forget. The tool returns an acknowledgement, then completion is delivered automatically. Parents do not poll. Nested ownership is durable, and an owner remains responsible until its descendants drain.
 
+Session identity, not a file path or pane ID, owns delivery. A binding entry inside each session carries its durable store and child lifecycle settings. Teleport preserves that entry and session ID. The ownership index and lineage inboxes survive Pi and Herdr process replacement. Reopening the exact parent replays pending answers and starts a turn; a closed parent is never opened automatically. New-ID forks cannot claim the original answers. A delivery is acknowledged only after its exact result entry is saved, not merely queued. A pane can be cleaned up only while its recorded shell incarnation still owns it.
+
 `caller_ping` reports nonterminal help. Interactive children can use `subagent_done` to settle explicitly. Resume, interrupt, cancel, and list operate on retained child state.
 
 ## Worktrees

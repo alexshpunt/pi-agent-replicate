@@ -71,7 +71,7 @@ function terminalExitCode(screen) {
     return match ? Number.parseInt(match[1], 10) : null;
 }
 function completionArtifact(options) {
-    return consumeExitSidecar(options.sessionFile);
+    return consumeExitSidecar(options.resolveSessionFile?.() ?? options.sessionFile);
 }
 async function waitForDisappearanceArtifacts(signal, options) {
     const immediate = completionArtifact(options);
@@ -108,7 +108,7 @@ export async function waitForCompletion(signal, options) {
     for (;;) {
         if (signal.aborted)
             throw new Error(ABORT_MESSAGE);
-        const sidecarResult = consumeExitSidecar(options.sessionFile);
+        const sidecarResult = completionArtifact(options);
         if (sidecarResult)
             return sidecarResult;
         try {

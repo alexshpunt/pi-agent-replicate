@@ -23,6 +23,8 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { writeBindingFile } from "../../pi-extension/subagents/session-binding.ts";
 import { TEST_MODEL as FIXTURE_MODEL, TEST_PROVIDER_URL } from "./fake-provider.ts";
 import {
   isTerminalAvailable,
@@ -151,8 +153,13 @@ export interface TestEnv {
   backend: MuxBackend;
   /** Dedicated workspace owned by this test environment. */
   workspaceId: string;
+  /** All workspace incarnations owned by this test across server replacement. */
+  workspaceIds: string[];
   /** Parent workspace restored after cleanup. */
   previousWorkspaceId: string | undefined;
+  /** Exact caller surface restored after cleanup. */
+  previousPaneId: string | undefined;
+  previousTabId: string | undefined;
   /** Agent configuration restored after cleanup. */
   previousAgentDir: string | undefined;
   /** Surfaces created directly by the harness. */
@@ -209,6 +216,14 @@ function createTestWorkspace(cwd: string): string {
 
 
 
+function bindTestWorkspace(workspaceId: string): void {
+  const panes = workspacePaneIds(workspaceId);
+  if (panes?.length !== 1) throw new Error(`Expected one root pane in test workspace ${workspaceId}`);
+  const pane = JSON.parse(execFileSync("herdr", ["pane", "get", panes[0]], { encoding: "utf8" })).result.pane;
+  process.env.HERDR_WORKSPACE_ID = workspaceId;
+  process.env.HERDR_PANE_ID = pane.pane_id;
+  process.env.HERDR_TAB_ID = pane.tab_id;
+}
 /**
  * Create an isolated test environment with test agent definitions.
  * The temp dir has `.pi/agents/` containing copies of all test agents.
@@ -218,12 +233,13 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
   const agentsDir = join(dir, ".pi", "agents");
   const agentDir = join(dir, ".pi", "agent");
   const previousWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+  const previousPaneId = process.env.HERDR_PANE_ID;
+  const previousTabId = process.env.HERDR_TAB_ID;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   if (!previousWorkspaceId) throw new Error("HERDR_WORKSPACE_ID is required for integration tests");
   const workspaceId = createTestWorkspace(dir);
-  // Herdr creates subagent tabs in the workspace identified by this env var.
-  // Point the harness at its dedicated workspace without changing the parent's pane.
-  process.env.HERDR_WORKSPACE_ID = workspaceId;
+  // Herdr resolves --current by pane identity, not a workspace-only override.
+  bindTestWorkspace(workspaceId);
   mkdirSync(agentsDir, { recursive: true });
   if (USE_TEST_PROVIDER) {
     mkdirSync(join(agentDir, "extensions"), { recursive: true });
@@ -237,6 +253,15 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
       `import { existsSync, mkdirSync, writeFileSync } from "node:fs";\n` +
       `import { join } from "node:path";\n` +
       `export default function(pi) {\n` +
+
+      `  const queuedResultMarker = process.env.PI_INTEG_QUEUE_RESULT_MARKER;\n` +
+      `  if (queuedResultMarker) {\n` +
+      `    const send = pi.sendMessage.bind(pi);\n` +
+      `    pi.sendMessage = (message, options) => {\n` +
+      `      if (message.customType === 'subagent_result') { writeFileSync(queuedResultMarker, message.details.deliveryId); return; }\n` +
+      `      return send(message, options);\n` +
+      `    };\n` +
+      `  }\n` +
       `  if (!(process.env.PI_DENY_TOOLS || '').split(',').includes('subagent')) extension(pi);\n` +
       `  pi.on('session_start', (_event, ctx) => {\n` +
       `    const paneId = process.env.HERDR_PANE_ID;\n` +
@@ -293,7 +318,10 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
     dir,
     backend,
     workspaceId,
+    workspaceIds: [workspaceId],
     previousWorkspaceId,
+    previousPaneId,
+    previousTabId,
     previousAgentDir,
     surfaces: [],
     tempFiles: [],
@@ -436,7 +464,7 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
         await waitForPaneAbsence(surface, { timeoutMs: CLEANUP_TIMEOUT, intervalMs: 50 });
       } catch {}
     }
-    await waitForWorkspaceTeardown(env.workspaceId);
+    for (const workspaceId of env.workspaceIds) await waitForWorkspaceTeardown(workspaceId);
     await waitForProcessCwdRelease(env.dir);
   } catch (error) {
     cleanupError = error;
@@ -445,6 +473,10 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
       process.env.HERDR_WORKSPACE_ID = env.previousWorkspaceId;
     } else {
       delete process.env.HERDR_WORKSPACE_ID;
+    }
+    for (const [key, value] of [["HERDR_PANE_ID", env.previousPaneId], ["HERDR_TAB_ID", env.previousTabId]] as const) {
+      if (value) process.env[key] = value;
+      else delete process.env[key];
     }
     if (env.previousAgentDir) {
       process.env.PI_CODING_AGENT_DIR = env.previousAgentDir;
@@ -493,6 +525,27 @@ export function untrackSurface(env: TestEnv, surface: string): void {
   env.surfaces = env.surfaces.filter((s) => s !== surface);
 }
 
+/** Ask the runner to replace only its test-owned Herdr process and endpoint. */
+export async function restartIsolatedHerdr(env: TestEnv): Promise<void> {
+  const runDir = process.env.PI_INTEGRATION_HERDR_RUN_DIR;
+  const socket = process.env.PI_INTEGRATION_HERDR_SOCKET;
+  if (!runDir || !socket || process.env.HERDR_SOCKET_PATH !== socket) throw new Error("Restart requires the isolated runner");
+  const id = randomUUID();
+  writeBindingFile(join(runDir, "restart-request.json"), { id });
+  const deadline = Date.now() + PI_TIMEOUT;
+  let response: { id?: string; pid?: number; error?: string } | undefined;
+  while (Date.now() < deadline) {
+    try { response = JSON.parse(readFileSync(join(runDir, "restart-response.json"), "utf8")); } catch {}
+    if (response?.id === id) break;
+    await sleep(50);
+  }
+  if (response?.id !== id || response.error || !response.pid) throw new Error(response?.error ?? "Isolated restart timed out");
+  await waitForWorkspaceTeardown(env.workspaceId);
+  env.workspaceId = createTestWorkspace(env.dir);
+  env.workspaceIds.push(env.workspaceId);
+  bindTestWorkspace(env.workspaceId);
+  env.surfaces = [];
+}
 // ── Pi session management ──
 
 /**
@@ -510,12 +563,13 @@ export function startPi(
     model?: string;
     extraArgs?: string;
     extensionSource?: string;
+    agentDir?: string;
     environment?: Record<string, string>;
   },
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
-  const agentDir = USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "";
+  const agentDir = opts?.agentDir ?? (USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "");
   const extensionSource = opts?.extensionSource ?? (USE_TEST_PROVIDER
     ? join(agentDir, "extensions", "subagents-under-test.ts")
     : EXTENSION_SOURCE);

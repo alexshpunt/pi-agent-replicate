@@ -18,6 +18,7 @@ import {
 } from "../pi-extension/subagents/launch.ts";
 
 import { registerLineage } from "../pi-extension/subagents/lineage.ts";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "subagent-launch-test-"));
@@ -32,6 +33,7 @@ function fixture() {
 		`${JSON.stringify({ type: "session", version: 3, id: "parent", cwd: project })}\n`,
 	);
 
+	seedSessionBinding(parentSessionFile, { version: 1, storeDir: join(agentDir, "subagent-sessions") });
 	const request: FreshPiLaunchRequest = {
 		kind: "fresh",
 		id: "child-1",
@@ -176,7 +178,7 @@ describe("Pi launch", () => {
 	it("resumes a session through the launch transaction", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "child.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 			process.env.PI_CODING_AGENT_DIR = join(root, "isolated-agent");
 			try {
@@ -269,7 +271,7 @@ describe("Pi launch", () => {
 	it("closes a replacement pane when resume setup fails before metadata", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "failed-resume.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const events: string[] = [];
 
 			await assert.rejects(
@@ -316,7 +318,7 @@ describe("Pi launch", () => {
 	it("keeps the durable child identity and can reuse its pane during recovery", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "recovered.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const lineage = registerLineage({
 				artifactDir: join(root, "artifacts"),
 				nodeId: "durable-child",
@@ -358,7 +360,7 @@ describe("Pi launch", () => {
 	it("clears inherited auto-exit state when a resumed session is interactive", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "interactive.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
 			process.env.PI_SUBAGENT_AUTO_EXIT = "1";
 			try {

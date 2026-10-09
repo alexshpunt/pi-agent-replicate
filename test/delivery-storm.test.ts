@@ -19,6 +19,7 @@
  *   really holds the result.
  */
 import assert from "node:assert/strict";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -55,6 +56,7 @@ function installParentHarness(
 	sessionsDir: string,
 	parentSessionFile: string,
 ): ParentHarness {
+	seedSessionBinding(parentSessionFile, { version: 1, storeDir: join(sessionsDir, "bindings") });
 	const widgets: any[] = [];
 	const sends: any[] = [];
 	const handlers = new Map<string, (...args: any[]) => unknown>();
@@ -189,6 +191,16 @@ describe("one queued result stays one queued result", () => {
 		);
 	});
 
+	it("does not treat a delivery ID quoted in a user message as a saved result", async () => {
+		const sessionsDir = tempDir("pi-delivery-quoted-id-");
+		const parentSessionFile = writeSessionFile(join(sessionsDir, "parent.jsonl"), { id: PARENT_SESSION_ID, cwd: sessionsDir });
+		const harness = installParentHarness(sessionsDir, parentSessionFile);
+		const rootDir = publishQueuedResult({ sessionsDir, parentSessionFile });
+		writeFileSync(parentSessionFile, JSON.stringify({ type: "message", message: { role: "user", content: DELIVERY_ID } }) + "\n", { flag: "a" });
+		await __test__.restorePendingLineageInboxes(harness.ctx);
+		assert.equal(harness.sends.length, 1);
+		assert.equal(isLineageInboxMaterialized(rootDir, DELIVERY_ID), false);
+	});
 	it("does not project another observer's queued copy as a delivery failure", async () => {
 		const sessionsDir = tempDir("pi-delivery-busy-");
 		const parentSessionFile = writeSessionFile(join(sessionsDir, "parent.jsonl"), {

@@ -24,6 +24,8 @@ export interface CompletionOptions {
     observedAt: number,
   ) => void;
   sessionFile?: string;
+  /** Resolve the current file after a same-session process handoff. */
+  resolveSessionFile?: () => string;
   onTick?: (elapsedSeconds: number) => void;
 }
 
@@ -106,7 +108,7 @@ function terminalExitCode(screen: string): number | null {
 }
 
 function completionArtifact(options: CompletionOptions): CompletionResult | null {
-  return consumeExitSidecar(options.sessionFile);
+  return consumeExitSidecar(options.resolveSessionFile?.() ?? options.sessionFile);
 }
 
 async function waitForDisappearanceArtifacts(
@@ -152,7 +154,7 @@ export async function waitForCompletion(
   for (;;) {
     if (signal.aborted) throw new Error(ABORT_MESSAGE);
 
-    const sidecarResult = consumeExitSidecar(options.sessionFile);
+    const sidecarResult = completionArtifact(options);
     if (sidecarResult) return sidecarResult;
 
     try {

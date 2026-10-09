@@ -206,6 +206,12 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
 
+	if (names.has("teleport") && lastRole !== "tool" && /Call the teleport tool/i.test(user)) {
+		const action = quotedValue(user, "action");
+		const target = quotedValue(user, "target");
+		if (action) return { toolCalls: [{ name: "teleport", arguments: { action, ...(target ? { target } : {}) } }] };
+	}
+
 	if (/previous process became (?:stale|unavailable)/i.test(user)) {
 		if (/subagent-resume\/crash-/i.test(user)) return { text: "QUIET_RECOVERY_COMPLETE" };
 		if (/subagent-resume\/stale-/i.test(user)) return { holdQuiet: true };

@@ -35,6 +35,8 @@ import {
 import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } from "./completion.ts";
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
+import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
+import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
 import { createDeliveryLog } from "./delivery-log.ts";
@@ -123,7 +125,6 @@ import {
   latestDescendantDeliveryAt,
   lineageIntegrityError,
   pendingLineageInboxes,
-  readLineageAttachment,
   reduceLineage,
   type LineageRegistration,
   type LineageNodeState,
@@ -418,7 +419,7 @@ function finalizeSubagentSurface(
 		return handoff;
 	}
 
-	if (!closeOrdinaryPane) return undefined;
+	if (!closeOrdinaryPane || running.lineage?.launchKind === "worktree" || !childPaneOwned(running)) return undefined;
 	try {
 		closePane(running.surface);
 	} catch (error) {
@@ -699,6 +700,8 @@ interface SubagentRuntime {
 	inflightDeliveries: Map<string, InflightDelivery>;
 	pi?: ExtensionAPI;
 	latestCtx?: ExtensionContext;
+	/** Do not queue into a source session after Teleport takes its snapshot. */
+	handoffPending?: boolean;
 }
 
 function createSubagentRuntime(): SubagentRuntime {
@@ -775,6 +778,7 @@ function acknowledgeRestoredInboxDelivery(input: {
 
 /** Materialize inbox records left by a crash into this exact session once. */
 async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void> {
+	if (runtime.handoffPending) return;
 	const manager = ctx.sessionManager;
 	if (
 		!manager ||
@@ -835,9 +839,10 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 				continue;
 			}
 
-			const childSessionFile = reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
+			const childSessionFile = childSessionLocation(rootDir, inbox.nodeId)?.sessionFile ?? reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
 			try {
 				sendSubagentResult(runtime.pi, resultContent, {
+					...inbox.payload,
 					kind,
 					childId: inbox.nodeId,
 					sessionFile: childSessionFile,
@@ -901,7 +906,6 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
   const sessionId = manager.getSessionId();
   const sessionFile = manager.getSessionFile();
   if (!sessionFile) return;
-  const attachment = readLineageAttachment(sessionFile);
   const roots = discoverLineageRoots(manager.getSessionDir(), sessionFile);
   try {
     for (const run of readdirSync(join(ctx.cwd, ".pi", "plans"), { withFileTypes: true })) {
@@ -916,9 +920,8 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
     const integrity = lineageIntegrityError(state);
     if (integrity) throw new Error(integrity);
     for (const node of state.nodes.values()) {
-      const isAttachedNode = attachment?.rootDir === rootDir && attachment.nodeId === node.nodeId;
       const cancellationPending = !!node.cancellation?.intent && !node.terminal;
-      if (!isAttachedNode && (node.parentSessionId !== sessionId || node.parentSessionFile !== sessionFile)) continue;
+      if (node.parentSessionId !== sessionId) continue;
       if (!node.sessionFile || !node.surface) continue;
       if (!cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
       const drained = node.terminal && node.terminalDelivered;
@@ -953,6 +956,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         ...(node.workspaceId && node.cwd
           ? { recoveryWorkspace: { id: node.workspaceId, cwd: node.cwd } }
           : {}),
+        ...(node.worktree ? { worktree: node.worktree } : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
         // A drained node is finished: its result was delivered in an earlier
@@ -960,6 +964,8 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         ...(drained ? { retired: true } : {}),
       };
       runningSubagents.set(running.id, running);
+      refreshChildLocation(running);
+      if (running.lineage) running.lineage.parentSessionFile = sessionFile;
       if (running.tabId) rememberPaneTab(running.surface, running.tabId);
       if (cancellationPending) {
         void attemptPendingCancellation(running);
@@ -1468,18 +1474,56 @@ function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	}
 }
 
+/** Follow a child whose new Pi incarnation registered before the source pane closed. */
+function refreshChildLocation(running: RunningSubagent): void {
+  if (!running.lineage) return;
+  const location = childSessionLocation(running.lineage.rootDir, running.id);
+  if (!location) return;
+  running.sessionFile = location.sessionFile;
+  if (running.sessionBaseline) running.sessionBaseline.sessionFile = location.sessionFile;
+  if (location.paneId) running.surface = location.paneId;
+  if (location.tabId) { running.tabId = location.tabId; rememberPaneTab(running.surface, location.tabId); }
+  if (location.workspaceId) running.recoveryWorkspace = { id: location.workspaceId, cwd: location.cwd };
+}
+
+function childMovePending(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  return Boolean(location?.moveDeadline && location.moveDeadline > Date.now());
+}
+/** Never operate on a pane ID reused by a restarted Herdr server. */
+function childPaneOwned(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  if (!location) return true; // Legacy launches have no incarnation record.
+  try { return sessionOwnsPane(location, running.surface, getPaneProcessInfo(running.surface).shellPid); }
+  catch { return false; }
+}
 function exactParentSessionActive(running: RunningSubagent): boolean {
   const lineage = running.lineage;
   if (!lineage) return true;
   if (!lineage.parentSessionId || !lineage.parentSessionFile) return false;
   const ctx = runtime.latestCtx;
-  if (!ctx) return false;
-  try { return ctx.sessionManager.getSessionId() === lineage.parentSessionId && ctx.sessionManager.getSessionFile() === lineage.parentSessionFile; }
+  if (!ctx || runtime.handoffPending) return false;
+  try {
+    if (ctx.sessionManager.getSessionId() !== lineage.parentSessionId) return false;
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return false;
+    const location = parentSessionLocation(sessionBindingStore(file), lineage.parentSessionId);
+    if (location && (location.pid !== process.pid || !sessionLocationAlive(location))) return false;
+    lineage.parentSessionFile = file;
+    return true;
+  }
   catch { return false; }
 }
 
 function sessionContainsDelivery(sessionFile: string, deliveryId: string): boolean {
-  try { return readFileSync(sessionFile, "utf8").includes(deliveryId); } catch { return false; }
+  try {
+    return readFileSync(sessionFile, "utf8").split("\n").some((line) => {
+      try {
+        const entry = JSON.parse(line);
+        return entry.type === "custom_message" && entry.customType === "subagent_result" && entry.details?.deliveryId === deliveryId;
+      } catch { return false; }
+    });
+  } catch { return false; }
 }
 
 /** Wait for durable descendant delivery before releasing a terminal result. */
@@ -1660,9 +1704,11 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
           if (claim.status === "acquired") {
             try {
               await pending.finalize();
-              if (!completeLineageInboxMaterialization(running.lineage.rootDir, deliveryId, running.id, claim.token)) {
-                throw new Error("Unable to publish terminal materialization acknowledgement");
-              }
+              runtime.inflightDeliveries.set(deliveryId, { rootDir: running.lineage.rootDir, nodeId: running.id, token: claim.token });
+              acknowledgeRestoredInboxDelivery({
+                rootDir: running.lineage.rootDir, nodeId: running.id, deliveryId,
+                token: claim.token, sessionFile: running.lineage.parentSessionFile!, requiresParentRecord: true,
+              });
             } catch (error) {
               releaseLineageInboxMaterialization({
                 rootDir: running.lineage.rootDir,
@@ -1759,6 +1805,7 @@ function observeRunningSubagent(
 	running: RunningSubagent,
 	observedAt = Date.now(),
 ) {
+	refreshChildLocation(running);
 	if (running.retired) {
 		retryRetiredSubagentCleanup(running, observedAt);
 		return;
@@ -2515,7 +2562,7 @@ async function attemptRecovery(
 	}
 	running.supervisionEpoch = (running.supervisionEpoch ?? 0) + 1;
 
-	if (cause === "stale") {
+	if (cause === "stale" && childPaneOwned(running)) {
 		recoveryDeliveryLog(running).record("recovery-kill", {
 			childId: running.id,
 			attempt: budget.attempt,
@@ -2539,8 +2586,10 @@ async function attemptRecovery(
 	let reusableSurface: string | undefined;
 	if (cause === "crash") {
 		try {
-			getPaneProcessInfo(running.surface);
-			reusableSurface = running.surface;
+			if (childPaneOwned(running)) {
+				getPaneProcessInfo(running.surface);
+				reusableSurface = running.surface;
+			}
 		} catch {
 			reusableSurface = undefined;
 		}
@@ -2610,7 +2659,8 @@ async function watchSubagent(
 	running: RunningSubagent,
 	signal: AbortSignal,
 ): Promise<SubagentResult> {
-	const { name, task, surface, startTime, sessionFile } = running;
+	const { name, task, startTime } = running;
+	let sessionFile = running.sessionFile;
 
 	const supervisionEpoch = running.supervisionEpoch ?? 0;
 	let recoveryFailed = false;
@@ -2623,8 +2673,13 @@ async function watchSubagent(
 			result = await waitForCompletion(signal, {
 				intervalMs: 1000,
 				sessionFile,
-				readTerminalTail: () => readPaneAsync(surface, 5),
-				inspectPane: async () => inspectPane(surface),
+				resolveSessionFile: () => { refreshChildLocation(running); return running.sessionFile; },
+				readTerminalTail: () => { refreshChildLocation(running); return !childMovePending(running) && childPaneOwned(running) ? readPaneAsync(running.surface, 5) : Promise.resolve(""); },
+				inspectPane: async () => {
+					refreshChildLocation(running);
+					if (childMovePending(running)) return { kind: "unavailable" as const, error: "Waiting for the Teleport replacement to bind" };
+					return childPaneOwned(running) ? inspectPane(running.surface) : { kind: "missing" as const, error: "Original child pane incarnation is gone" };
+				},
 				onPaneInspection: (inspection: PaneInspection, observedAt: number) => {
 					ensureLifecycle(running);
 					running.lifecycle = observePaneInspection(
@@ -2638,6 +2693,7 @@ async function watchSubagent(
 					observeRunningSubagent(running);
 				},
 			});
+			sessionFile = running.sessionFile;
 			if (supervisionEpoch !== (running.supervisionEpoch ?? 0)) {
 				return {
 					name,
@@ -2652,8 +2708,12 @@ async function watchSubagent(
 			if (!result.ping) {
 				observeRunningSubagent(running);
 				if (result.paneDisappeared) {
-					cancelledByUser = await recordManualTabCancellation(running);
-					break;
+					const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+					if (!location || (!location.moveDeadline && sessionServerAlive(location) !== false)) {
+						cancelledByUser = await recordManualTabCancellation(running);
+						break;
+					}
+					result = { ...result, reason: "sentinel" as const, exitCode: 1, paneDisappeared: undefined };
 				}
 
 				if (
@@ -2844,6 +2904,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 	// subagents whose watchers survived a reload.
 	pi.on("session_start", (_event, ctx) => {
 		runtime.latestCtx = ctx;
+		runtime.handoffPending = false;
+		const binding = bindSessionRuntime(pi, ctx);
+		if (binding?.child && !hasChildLifecycle(pi)) subagentLifecycle(pi, ctx);
 		restoreLineageRuntime(ctx);
 		void restorePendingLineageInboxes(ctx);
 		if (runningSubagents.size > 0) {
@@ -2861,6 +2924,24 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		}, 0);
 	});
 
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "teleport" || !["jump", "back"].includes(String(event.input.action))) return;
+		runtime.handoffPending = true;
+		const file = ctx.sessionManager.getSessionFile();
+		const binding = file && readSessionBinding(file);
+		if (binding) beginChildSessionMove(binding);
+	});
+	pi.on("tool_result", (event, ctx) => {
+		if (event.toolName !== "teleport" || !event.isError) return;
+		runtime.handoffPending = false;
+		bindSessionRuntime(pi, ctx);
+	});
+	pi.on("message_end", (event, ctx) => {
+		const message = event.message as { customType?: string };
+		if (message.customType !== "pi-agent-teleport-failure") return;
+		runtime.handoffPending = false;
+		bindSessionRuntime(pi, ctx);
+	});
 	// Clean up on session shutdown
 	pi.on("session_shutdown", async (event, _ctx) => {
 		runtime.latestCtx = undefined;
@@ -2922,6 +3003,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 						"A named role is required. Use subagents_list to discover roles.",
 					);
 				}
+				bindSessionRuntime(pi, ctx);
 
 				// Self-spawn stays denied unless the current role opts in explicitly.
 				const currentAgent = process.env.PI_SUBAGENT_AGENT;
@@ -3423,6 +3505,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			},
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				bindSessionRuntime(pi, ctx);
 				const name = params.name ?? "Resume";
 				const id = Math.random().toString(16).slice(2, 10);
 

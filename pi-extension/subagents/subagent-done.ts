@@ -11,8 +11,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, writeBindingFile } from "./session-binding.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const lifecycleKey = Symbol.for("pi-herdr-subagents.child-lifecycle");
+const lifecycles: WeakSet<object> = (globalThis as any)[lifecycleKey] ??= new WeakSet<object>();
+
+/** Avoid installing a child lifecycle twice when both extensions load. */
+export function hasChildLifecycle(pi: ExtensionAPI): boolean { return lifecycles.has(pi.events); }
 import { dirname, join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
@@ -304,7 +312,15 @@ export function buildSkillInitialization(
   };
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
+  if (hasChildLifecycle(pi)) return;
+  lifecycles.add(pi.events);
+  const unsubscribers: Array<() => void> = [];
+  const on: ExtensionAPI["on"] = ((event: any, handler: any) => {
+    const unsubscribe = (pi.on as (event: any, handler: any) => unknown)(event, handler);
+    if (typeof unsubscribe === "function") unsubscribers.push(unsubscribe as () => void);
+    return unsubscribe;
+  }) as ExtensionAPI["on"];
   let toolNames: string[] = [];
   let denied: string[] = [];
   let expanded = false;
@@ -404,35 +420,39 @@ export default function (pi: ExtensionAPI) {
   let interruptRequested = false;
 
   let agentStarted = false;
+  let movePending = false;
   let intervened = false;
   const mechanicalInterruptPath = process.env.PI_SUBAGENT_SESSION
     ? `${process.env.PI_SUBAGENT_SESSION}.mechanical-interrupt`
     : undefined;
   // Show widget + status bar on session start
-  pi.on("session_start", (_event, ctx) => {
+  const start = (ctx: ExtensionContext) => {
+    bindSessionRuntime(pi, ctx);
     recorder.sessionStart();
-    const tools = pi.getAllTools();
-    toolNames = tools.map((t) => t.name).sort();
+    toolNames = pi.getAllTools().map((tool) => tool.name).sort();
     denied = parseDeniedTools(deniedToolsValue);
-
+    const allow = process.env.PI_SUBAGENT_TOOLS?.split(",").filter(Boolean);
+    pi.setActiveTools(pi.getActiveTools().filter((name) => !denied.includes(name) && (!allow?.length || allow.includes(name))));
     renderWidget(ctx, null);
-  });
+  };
+  on("session_start", (_event, ctx) => start(ctx));
+  if (initialContext) start(initialContext);
 
-  pi.on("session_before_compact", (event) => {
+  on("session_before_compact", (event) => {
     recorder.compactionStart({
       reason: event.reason,
       willRetry: event.willRetry,
     });
   });
 
-  pi.on("session_compact", (event) => {
+  on("session_compact", (event) => {
     recorder.compactionSucceeded({
       reason: event.reason,
       willRetry: event.willRetry,
     });
   });
 
-  pi.on("session_compact_failed", (event) => {
+  on("session_compact_failed", (event) => {
     recorder.compactionFailed({
       reason: event.reason,
       willRetry: event.willRetry,
@@ -441,13 +461,13 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("input", () => {
+  on("input", () => {
     resumeInputSeen = true;
     if (shouldMarkUserTookOver(agentStarted)) intervened = true;
     recorder.input();
   });
 
-  pi.on("before_agent_start", (event, ctx) => {
+  on("before_agent_start", (event, ctx) => {
     settledChildResultId =
       settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
@@ -465,7 +485,7 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
-  pi.on("agent_start", () => {
+  on("agent_start", () => {
     agentStarted = true;
     recorder.agentStart();
   });
@@ -487,7 +507,7 @@ export default function (pi: ExtensionAPI) {
       try {
         // Publish completion only after descendants drain so the parent can
         // observe this owner's settled turns before its terminal result.
-        writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload));
+        writeBindingFile(`${sessionFile}.exit`, { ...payload, summary: payload.summary ?? newestAssistantEntry(latestAgentEndMessages)?.text });
       } catch {
         // Best effort — the wrapper sentinel remains available after shutdown.
       }
@@ -495,7 +515,7 @@ export default function (pi: ExtensionAPI) {
     ctx.shutdown();
   };
 
-  pi.on("agent_end", (event) => {
+  on("agent_end", (event) => {
     latestAgentEndMessages = (event as any).messages as any[] | undefined;
     const eventTurnIndex = (event as any).turnIndex;
     if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
@@ -510,7 +530,7 @@ export default function (pi: ExtensionAPI) {
   });
 
 
-  pi.on("agent_settled", (_event, ctx) => {
+  on("agent_settled", (_event, ctx) => {
     const outcome = classifyAutoExitOutcome(
       latestAgentEndMessages,
       interruptRequested,
@@ -524,7 +544,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (!resumeTurnStarted || (process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen)) return;
 
-    if (intervened) return;
+    if (intervened || movePending) return;
 
 
     const observedSettledChildId = settledChildResultId;
@@ -565,62 +585,77 @@ export default function (pi: ExtensionAPI) {
     void finishAfterDrain(ctx, { type: "done" });
   });
 
-  pi.on("turn_start", (event) => {
+  on("turn_start", (event) => {
     latestTurnIndex = (event as any).turnIndex;
     recorder.turnStart(latestTurnIndex);
   });
 
-  pi.on("turn_end", (event) => {
+  on("turn_end", (event) => {
     recorder.turnEnd((event as any).turnIndex);
   });
 
-  pi.on("before_provider_request", () => {
+  on("before_provider_request", () => {
     recorder.beforeProviderRequest();
   });
 
-  pi.on("after_provider_response", () => {
+  on("after_provider_response", () => {
     recorder.afterProviderResponse();
   });
 
-  pi.on("message_start", (event) => {
+  on("message_start", (event) => {
     settledChildResultId =
       settledChildIdFromMessage((event as any).message) ?? settledChildResultId;
   });
 
-  pi.on("message_update", (event) => {
+  on("message_update", (event) => {
     recorder.messageUpdate((event as any).assistantMessageEvent?.type);
   });
 
-  pi.on("tool_execution_start", (event) => {
+  on("tool_execution_start", (event) => {
     recorder.toolExecutionStart(
       (event as any).toolCallId,
       (event as any).toolName,
     );
   });
 
-  pi.on("tool_call", (event) => {
+  on("tool_call", (event, ctx) => {
+    if (event.toolName === "teleport" && ["jump", "back"].includes(String(event.input.action))) {
+      movePending = true;
+      const file = ctx.sessionManager.getSessionFile();
+      const binding = file && readSessionBinding(file);
+      if (binding) beginChildSessionMove(binding);
+    }
     recorder.toolCall((event as any).toolCallId, (event as any).toolName);
   });
 
-  pi.on("tool_execution_update", (event) => {
+  on("tool_execution_update", (event) => {
     recorder.toolExecutionUpdate(
       (event as any).toolCallId,
       (event as any).toolName,
     );
   });
 
-  pi.on("tool_result", (event) => {
+  on("tool_result", (event, ctx) => {
+    if (event.toolName === "teleport" && event.isError) { movePending = false; bindSessionRuntime(pi, ctx); }
     recorder.toolResult((event as any).toolCallId, (event as any).toolName);
   });
 
-  pi.on("tool_execution_end", (event) => {
+  on("tool_execution_end", (event) => {
     recorder.toolExecutionEnd(
       (event as any).toolCallId,
       (event as any).toolName,
     );
   });
 
-  pi.on("session_shutdown", (event) => {
+  on("message_end", (event, ctx) => {
+    if ((event.message as { customType?: string }).customType === "pi-agent-teleport-failure") {
+      movePending = false;
+      bindSessionRuntime(pi, ctx);
+    }
+  });
+  on("session_shutdown", (event) => {
+    for (const unsubscribe of unsubscribers) unsubscribe();
+    lifecycles.delete(pi.events);
     recorder.sessionShutdown((event as any).reason);
   });
 
@@ -660,7 +695,7 @@ export default function (pi: ExtensionAPI) {
         message: params.message,
       };
       await waitForDescendantDrain();
-      writeFileSync(`${sessionFile}.exit`, JSON.stringify(exitData));
+      writeBindingFile(`${sessionFile}.exit`, exitData);
 
       await waitForPingAcknowledgement(sessionFile, exitData.id, _signal);
       return {
@@ -700,7 +735,7 @@ export default function (pi: ExtensionAPI) {
       if (!pendingDescendants) {
         const sessionFile = process.env.PI_SUBAGENT_SESSION;
         if (sessionFile) {
-          try { writeFileSync(`${sessionFile}.exit`, JSON.stringify(payload)); } catch {}
+          try { writeBindingFile(`${sessionFile}.exit`, payload); } catch {}
         }
         ctx.shutdown();
       } else {

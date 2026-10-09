@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readSessionBinding, sessionBindingStore, sessionLineageRoots } from "./session-binding.js";
 function safeId(value) {
     return Buffer.from(value, "utf8").toString("base64url");
 }
@@ -210,6 +211,10 @@ export function reduceLineage(rootDir) {
                 node.workspaceId = event.workspaceId;
             if (typeof event.cwd === "string")
                 node.cwd = event.cwd;
+            if (event.worktree && typeof event.worktree === "object" &&
+                ["path", "workspaceId", "paneId", "branch", "baseRef", "baseSha", "manifestFile"].every((key) => typeof event.worktree[key] === "string")) {
+                node.worktree = event.worktree;
+            }
         }
         else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
             const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
@@ -651,7 +656,7 @@ export function pendingLineageInboxes(rootDir, sessionId, sessionFile) {
                 continue;
             if (value.type === "inbox_materialized" && typeof value.deliveryId === "string")
                 materialized.add(value.deliveryId);
-            else if (value.type === "inbox" && value.sessionId === sessionId && value.sessionFile === sessionFile && typeof value.deliveryId === "string") {
+            else if (value.type === "inbox" && value.sessionId === sessionId && typeof value.deliveryId === "string") {
                 const payload = value.payload && typeof value.payload === "object" ? value.payload : {};
                 inboxes.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId, sessionFile, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
             }
@@ -665,6 +670,9 @@ export function pendingLineageInboxes(rootDir, sessionId, sessionFile) {
 }
 /** Read the authoritative lineage pointer attached to a child session. */
 export function readLineageAttachment(sessionFile) {
+    const embedded = readSessionBinding(sessionFile)?.child?.lineage;
+    if (embedded && existsSync(join(embedded.rootDir, "events")))
+        return embedded;
     try {
         const value = JSON.parse(readFileSync(`${sessionFile}.lineage.json`, "utf8"));
         if (typeof value.rootDir !== "string" || typeof value.rootId !== "string" || typeof value.nodeId !== "string")
@@ -684,6 +692,14 @@ export function discoverLineageRoots(sessionDir, sessionFile) {
         const attachment = readLineageAttachment(sessionFile);
         if (attachment)
             result.add(attachment.rootDir);
+        try {
+            const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]);
+            if (header.type === "session" && typeof header.id === "string") {
+                for (const rootDir of sessionLineageRoots(sessionBindingStore(sessionFile), header.id))
+                    result.add(rootDir);
+            }
+        }
+        catch { /* An unreadable session cannot supply a durable key. */ }
     }
     try {
         for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {

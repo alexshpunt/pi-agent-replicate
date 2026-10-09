@@ -113,6 +113,7 @@
  * `delivery-failed` widget row.
  */
 import assert from "node:assert/strict";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 import { after, describe, it } from "node:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -624,6 +625,10 @@ interface TestWidget {
 
 /** Install the real extension adapter with only Pi/UI sinks replaced. */
 function installAdapterRuntime(dir: string, parentSessionFile: string, cwd = process.cwd()) {
+	if (!existsSync(parentSessionFile) || !readFileSync(parentSessionFile, "utf8").trim()) {
+		writeFileSync(parentSessionFile, JSON.stringify({ type: "session", version: 3, id: "parent-session", cwd }) + "\n");
+	}
+	seedSessionBinding(parentSessionFile, { version: 1, storeDir: join(dir, "bindings") });
 	const handlers = new Map<string, (...args: any[]) => unknown>();
 	const widgets: TestWidget[] = [];
 	const sends: unknown[] = [];

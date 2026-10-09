@@ -49,6 +49,8 @@ If creation returns an ambiguous Herdr error, the extension may reconcile one ex
 
 `subagent_resume` resumes a session in an ordinary pane. It does not reattach ownership of a retained worktree.
 
+A parent or child may move through Teleport without transferring or discarding the original worktree ownership. The session's binding still resolves the launch manifest and pending answer. The new session location is used for lifecycle observation and delivery; the retained checkout remains the original launch's review target. Herdr process loss does not authorize closing an unrelated pane that reuses an old ID.
+
 ## Cleanup
 
 Only remove a worktree after review and integration. Verify its path and branch first, then use your normal Git or Worktrunk cleanup procedure. Never delete `.git/worktrees` entries by hand.

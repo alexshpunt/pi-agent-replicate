@@ -141,6 +141,12 @@ A child ends through its lifecycle tools, a confirmed terminal failure, cancella
 
 Autonomous children are supervised for crashes and stale inactivity. Interactive children are never killed by the stale watchdog. Durable ownership lets the extension restore pending delivery and ordinary-pane cleanup after restart.
 
+The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
+
+Ownership and current locations are indexed under `$PI_CODING_AGENT_DIR/subagent-sessions` (default: `~/.pi/agent/subagent-sessions`). The session carries this store path through moves. Answers stay in durable lineage inboxes until their exact result entry is saved in the parent session. When the parent is closed, nothing opens it automatically: reopening that session restores observers, replays pending answers, and wakes its agent. A Herdr restart does not erase the store. An interrupted active child uses bounded recovery or reports failure; unfinished computation is not a saved answer.
+
+Keep the binding store, session artifacts, and saved sessions together when backing up or moving to another machine. Pane IDs alone are never permission to close a pane after a restart.
+
 Child-only lifecycle tools are registered only in child contexts:
 
 - `subagent_done` records completion intent for an interactive child.

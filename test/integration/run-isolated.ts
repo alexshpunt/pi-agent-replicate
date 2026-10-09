@@ -16,6 +16,8 @@ import {
   readdirSync,
   rmSync,
   writeFileSync,
+  watch,
+  type FSWatcher,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -295,6 +297,10 @@ environment.XDG_CONFIG_HOME = join(runDir, "config");
 environment.HERDR_CONFIG_PATH = configPath;
 environment.HERDR_SOCKET_PATH = socket;
 environment.HERDR_ENV = "1";
+// Unqualified Pi launches (including Teleport) must not load user settings.
+environment.PI_CODING_AGENT_DIR = join(runDir, "agent");
+environment.PI_INTEGRATION_HERDR_AGENT_DIR = environment.PI_CODING_AGENT_DIR;
+mkdirSync(environment.PI_CODING_AGENT_DIR, { recursive: true });
 
 environment.PI_INTEGRATION_HERDR_SOCKET = socket;
 environment.PI_INTEGRATION_HERDR_RUN_DIR = runDir;
@@ -310,8 +316,19 @@ let shutdownPromise: Promise<void> | undefined;
 let logFd: number | undefined;
 let cleanupComplete = false;
 let cleanupError: unknown;
+let restartWatcher: FSWatcher | undefined;
+let restartPromise: Promise<void> | undefined;
 
-function signalExitCode(signal: NodeJS.Signals): number {
+/** Restart only this runner's server on an explicit test request. */
+async function restartOwnedServer(): Promise<void> {
+  if (!await terminateTrackedProcess(server, serverIdentity, "Herdr restart")) throw new Error("Could not stop the owned Herdr incarnation");
+  rmSync(socket, { force: true });
+  server = spawn("herdr", ["server"], { detached: true, env: environment, stdio: ["ignore", logFd!, logFd!] });
+  trackProcess(server);
+  serverIdentity = captureProcessIdentity(server, "restarted Herdr server");
+  await waitForSocket(socket, server, environment);
+}
+function signalExitCode(signal: "SIGHUP" | "SIGINT" | "SIGTERM"): number {
   return { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 }[signal];
 }
 
@@ -326,6 +343,7 @@ function removeOwnedPaths(): void {
 }
 
 async function shutdown(): Promise<void> {
+  await restartPromise;
   let childStopped = false;
   let serverStopped = false;
   try {
@@ -338,7 +356,7 @@ async function shutdown(): Promise<void> {
       cleanupError = new Error(
         `isolated teardown could not confirm termination (child=${childStopped}, server=${serverStopped})`,
       );
-      console.error(cleanupError.message);
+      console.error(String(cleanupError));
       return;
     }
     removeOwnedPaths();
@@ -359,7 +377,8 @@ async function shutdown(): Promise<void> {
   }
 }
 
-function requestShutdown(signal?: NodeJS.Signals): void {
+function requestShutdown(signal?: "SIGHUP" | "SIGINT" | "SIGTERM"): void {
+  restartWatcher?.close();
   if (signal && requestedExitCode === undefined) requestedExitCode = signalExitCode(signal);
   if (requestedExitCode !== undefined) exitCode = requestedExitCode;
   shutdownPromise ??= shutdown();
@@ -388,6 +407,15 @@ try {
     trackProcess(server);
     serverIdentity = captureProcessIdentity(server, "Herdr server");
   } else {
+    const evidence = {
+      piVersion: spawnSync("pi", ["--version"], { encoding: "utf8" }).stdout.trim(),
+      subagentsVersion: JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8")).version,
+      subagentsSource: spawnSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim(),
+      uncommitted: Boolean(spawnSync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim()),
+      ide: { loaded: false, latestSource: process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT ?? null },
+    };
+    writeFileSync(join(runDir, "runtime.json"), JSON.stringify(evidence));
+    console.log(`Isolated runtime: ${JSON.stringify(evidence)}`);
     logFd = openSync(join(runDir, "herdr-server.log"), "w");
     server = spawn("herdr", ["server"], {
       detached: true,
@@ -420,6 +448,21 @@ try {
     environment.HERDR_TAB_ID = tabId;
   }
   if (!server) throw new Error("isolated Herdr server did not start");
+  if (!fixture) restartWatcher = watch(runDir, (_event, name) => {
+    if (name !== "restart-request.json" || restartPromise || shutdownPromise) return;
+    const path = join(runDir, "restart-request.json");
+    if (!existsSync(path)) return;
+    const request = JSON.parse(readFileSync(path, "utf8")) as { id: string };
+    rmSync(path);
+    restartPromise = (async () => {
+      try {
+        await restartOwnedServer();
+        writeFileSync(join(runDir, "restart-response.json"), JSON.stringify({ id: request.id, pid: server!.pid }));
+      } catch (error) {
+        writeFileSync(join(runDir, "restart-response.json"), JSON.stringify({ id: request.id, error: String(error) }));
+      }
+    })().finally(() => { restartPromise = undefined; });
+  });
   if (fixture) {
     child = spawn(process.execPath, ["--experimental-strip-types", fixture, "child"], {
       detached: true,
