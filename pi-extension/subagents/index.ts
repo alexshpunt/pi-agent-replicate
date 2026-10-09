@@ -36,6 +36,7 @@ import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } fro
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
+import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
@@ -623,6 +624,8 @@ interface PendingTerminalDelivery {
  * State for a launched (but not yet completed) subagent.
  */
 interface RunningSubagent {
+	/** Current-session replica, not a named-role launch. */
+	replication?: boolean;
 	lineage?: LineageRegistration;
 	id: string;
 	name: string;
@@ -873,12 +876,28 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 		}
 	}
 }
+/** Publish a clone's terminal summary or error/history before ordinary-pane cleanup. */
+function finishReplicationResult(running: RunningSubagent, result: SubagentResult): void {
+  const failed = result.exitCode !== 0 || !!result.errorMessage || !!result.error;
+  const historyPath = failed ? materializeReplicationHistory(running.sessionFile, running.id, running.name) : undefined;
+  const errorMessage = result.errorMessage ?? result.error ?? "Replica failed.";
+  const summary = failed ? `Replica failed: ${errorMessage}\n\nTextual answer history: ${historyPath}` : result.summary;
+  queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
+    if (runtime.pi) sendSubagentResult(runtime.pi, summary ?? "", {
+      name: running.name, task: running.task, childId: running.id, sessionFile: running.sessionFile,
+      deliveryId: `terminal:${running.id}`, resultContent: summary,
+      exitCode: failed ? 1 : 0, elapsed: result.elapsed, replication: true,
+      ...(failed ? { errorMessage, historyPath } : {}),
+    });
+  }, summary, failed ? "error" : undefined);
+}
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 function startRecoveredWatcher(running: RunningSubagent): void {
   const controller = new AbortController();
   running.abortController = controller;
   void watchSubagent(running, controller.signal).then((result) => {
     if (result.supervisionEpoch !== (running.supervisionEpoch ?? 0)) return;
+    if (running.replication) { finishReplicationResult(running, result); return; }
     if (result.ping) {
       queueTerminalDelivery(running, undefined, () => {
         if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
@@ -957,6 +976,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
           ? { recoveryWorkspace: { id: node.workspaceId, cwd: node.cwd } }
           : {}),
         ...(node.worktree ? { worktree: node.worktree } : {}),
+        ...(node.replication ? { replication: true } : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
         // A drained node is finished: its result was delivered in an earlier
@@ -1175,7 +1195,7 @@ function renderSubagentWidgetLines(
 			: `${openCount} open`;
 	const accent = activeCount > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
 
-	const lines: string[] = [borderTop("Subagents", info, width, accent)];
+	const lines: string[] = [borderTop(rendered.every(({ agent }) => agent.replication) ? "Replicas" : "Subagents", info, width, accent)];
 
 	for (const { agent, projection } of rendered) {
 		const elapsed = formatElapsedMMSS(
@@ -1591,6 +1611,7 @@ function prepareDurableDelivery(
 		now: Date.now(),
 	});
 	const payload = frameDeliveryPayload({
+		...(running.replication ? { subject: "Replica" as const } : {}),
 		status: resolvedStatus,
 		agentName: running.name,
 		childSessionId: running.id,
@@ -2800,7 +2821,9 @@ async function watchSubagent(
 					...(mismatch ? { runtimeMismatch: mismatch } : {}),
 				};
 			}
-			lastAssistant = findLastAssistantMessage(allEntries);
+			lastAssistant = running.replication && running.sessionBaseline
+				? findNewestAppendedAssistant(readEntriesAfterBaseline(sessionFile, running.sessionBaseline).entries)?.text ?? null
+				: findLastAssistantMessage(allEntries);
 			summary =
 				result.summary ??
 				lastAssistant ??
@@ -2898,7 +2921,7 @@ async function watchSubagent(
 	}
 }
 
-export default function subagentsExtension(pi: ExtensionAPI) {
+function installSubagentRuntime(pi: ExtensionAPI) {
 	runtime.pi = pi;
 	// Capture the UI context for widget updates and restore presentation for
 	// subagents whose watchers survived a reload.
@@ -2960,6 +2983,47 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		cleanupSubagentsForShutdown(shutdownReason, runningSubagents);
 	});
 
+	registerSubagentRenderers(pi);
+}
+
+/** Start the one-tool replication surface while retaining the legacy adapters internally. */
+export default function subagentsExtension(pi: ExtensionAPI) {
+	installSubagentRuntime(pi);
+	registerReplicateTool(pi, async (task, ctx) => {
+		if (!isTerminalAvailable()) throw new Error("Replication requires Herdr.");
+		const file = ctx.sessionManager.getSessionFile();
+		if (!file || !ctx.model) throw new Error("Replication requires a persisted session and selected model.");
+		const snapshot = {
+			entries: JSON.parse(JSON.stringify(ctx.sessionManager.getBranch())),
+			contextMessages: JSON.parse(JSON.stringify(replicationContextMessages(ctx))),
+			systemPrompt: ctx.getSystemPrompt(),
+			extensionArgs: replicationExtensionArgs(process.argv, ctx.cwd),
+		};
+		bindSessionRuntime(pi, ctx);
+		const id = Math.random().toString(16).slice(2, 10);
+		const name = `replica-${id}`;
+		const plan = resolveRuntimePlan({}, { provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel() as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
+		const child = await launchPiSubagent({
+			kind: "fresh", id, name, task: replicationAssignment(ctx.sessionManager.getSessionId(), file, task),
+			fork: true, replication: snapshot, runtimePlan: plan,
+			parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
+			behavior: { tools: pi.getActiveTools().join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
+		});
+		runningSubagents.set(id, child);
+		startWidgetRefresh();
+		startStatusRefresh(pi);
+		startRecoveredWatcher(child);
+		return { id, name, sessionFile: child.sessionFile };
+	});
+}
+
+/** Retained internal adapter for callers and fixtures that explicitly need role-based tools. */
+export function installLegacySubagentExtension(pi: ExtensionAPI) {
+	installSubagentRuntime(pi);
+	registerLegacySubagentTools(pi);
+}
+
+function registerLegacySubagentTools(pi: ExtensionAPI) {
 	// Tools denied via PI_DENY_TOOLS env var (set by parent agent based on frontmatter)
 	const deniedTools = new Set(
 		(process.env.PI_SUBAGENT_ID ? (process.env.PI_DENY_TOOLS ?? "") : "")
@@ -3663,6 +3727,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		});
 
 
+}
+
+function registerSubagentRenderers(pi: ExtensionAPI) {
 	// ── subagent_result message renderer ──
 	pi.registerMessageRenderer("subagent_result", (message, options, theme) => {
 		const details = message.details as any;
@@ -3675,7 +3742,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const exitCode = details.exitCode ?? 0;
 				const errorMessage =
 					typeof details.errorMessage === "string" ? details.errorMessage : "";
-				const failed = exitCode !== 0 || !!errorMessage;
+				const failed = exitCode !== 0 || !!errorMessage || ["error", "crashed", "recovery-failed", "cancelled"].includes(details.status);
 				const elapsed =
 					details.elapsed == null ? "?" : formatElapsed(details.elapsed);
 				const bgFn = failed

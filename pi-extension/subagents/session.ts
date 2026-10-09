@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import type { SessionContext } from "@earendil-works/pi-coding-agent";
 
 import type {
 	NewestAssistantEntry,
@@ -17,7 +18,7 @@ import type {
 export interface SessionEntry {
 	type: string;
 	id: string;
-	parentId?: string;
+	parentId?: string | null;
 	[key: string]: unknown;
 }
 
@@ -93,11 +94,45 @@ export function seedSubagentSessionFile(params: {
 	writeFileSync(params.childSessionFile, lines.join("\n") + "\n", "utf8");
 }
 
-/**
- * Copy only the active Pi branch into a session rooted at another cwd.
- * Pi's native branched-session writer supplies compaction and label fidelity;
- * the temporary source-directory file is rewritten with the target cwd.
- */
+/** Native projected messages may include modern Pi system checkpoints. */
+export type ReplicationContextMessage = SessionContext["messages"][number] | { role: "system" };
+/** Fork the captured active branch and settle inherited calls without running them again. */
+export function seedReplicationSessionFile(params: {
+	parentSessionFile: string;
+	childSessionFile: string;
+	childCwd: string;
+	entries: readonly SessionEntry[];
+	contextMessages: readonly ReplicationContextMessage[];
+}): void {
+	const header = { type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
+	const rows: any[] = [header];
+	const pending = new Map<string, string>();
+	let parentId: string | null = null;
+	for (const source of params.entries) {
+		const entry: SessionEntry = { ...source, parentId };
+		rows.push(entry);
+		parentId = entry.id;
+	}
+	// Use the native projected context, not raw history before compaction or edits.
+	for (const message of params.contextMessages) {
+		if (message.role === "system") continue;
+		if (message.role === "toolResult") { pending.delete(message.toolCallId); continue; }
+		// A later turn already closes older orphan calls during provider replay.
+		pending.clear();
+		if (message.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted") continue;
+		for (const part of message.content) if (part.type === "toolCall") pending.set(part.id, part.name);
+	}
+	for (const [toolCallId, toolName] of pending) {
+		const id = randomBytes(4).toString("hex");
+		rows.push({ type: "message", id, parentId, timestamp: new Date().toISOString(), message: {
+			role: "toolResult", toolCallId, toolName, isError: false, timestamp: Date.now(),
+			content: [{ type: "text", text: "This call belongs to the original session. This copy continues with its own assignment." }],
+		} });
+		parentId = id;
+	}
+	mkdirSync(dirname(params.childSessionFile), { recursive: true });
+	writeFileSync(params.childSessionFile, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+}
 
 function parseEntry(line: string): SessionEntry {
 	try {

@@ -15,6 +15,7 @@ export const DELIVERY_STATUSES = [
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 
 export interface DeliveryPayloadInput {
+  subject?: "Replica";
   status: DeliveryStatus;
   agentName: string;
   childSessionId: string;
@@ -33,7 +34,7 @@ export function frameDeliveryPayload(input: DeliveryPayloadInput): string {
   }
 
   const lines = [
-    `Subagent ${input.agentName} ${input.status}.`,
+    `${input.subject ?? "Subagent"} ${input.agentName} ${input.status}.`,
     "",
     input.answer ?? "No answer was captured.",
   ];

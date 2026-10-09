@@ -1,8 +1,8 @@
 # Pi LPT Herdr Subagents
 
-An asynchronous subagent extension for [Pi](https://github.com/earendil-works/pi) that runs child Pi sessions in [Herdr](https://herdr.dev).
+An experimental session-replication extension for [Pi](https://github.com/earendil-works/pi) in [Herdr](https://herdr.dev).
 
-A parent agent can start a child in an ordinary Herdr pane or an isolated managed Git worktree. The tool returns immediately. When the child finishes, its complete result is delivered to the exact parent automatically.
+An agent can copy its current session into one dedicated pane in the same checkout and give the copy a bounded task. The tool returns immediately. The copy's final summary or failure comes back to its exact original automatically.
 
 ## Install
 
@@ -12,71 +12,32 @@ pi install npm:pi-lpt-herdr-subagents
 
 Start Pi inside Herdr, then restart Pi or run `/reload`.
 
-## Agent-facing tools
+## Agent-facing tool
 
-The extension registers five tools:
-
-| Tool | Purpose |
-| --- | --- |
-| `subagent` | Start a child Pi session asynchronously. |
-| `subagent_resume` | Resume a saved child session in a new ordinary pane. |
-| `subagent_interrupt` | Send Escape to the active child turn without closing the session. |
-| `subagent_cancel` | End one child after pane absence and process exit are confirmed. |
-| `subagents_list` | List custom project, global, and role-pack definitions. |
-
-The extension registers no user commands. It ships no workflows, skills, or built-in roles.
-
-### Start a child
-
-The `subagent` tool requires an existing named role. It does not offer bare launches or a `systemPrompt` parameter. The examples below assume you have added the named roles.
+The extension registers exactly one tool and no user commands:
 
 ```typescript
-subagent({
-  name: "auth-research",
-  agent: "auth-researcher",
-  task: "Map the authentication flow and report relevant files and risks.",
-});
+replicate({ task: "Map the authentication flow. Return the relevant files and risks." });
 ```
 
-For an isolated writing task:
+Each call starts one copy of the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. Clone identity, the original session reference and the assignment are sent as a normal task message, not added to the system prompt.
 
-```typescript
-subagent({
-  name: "auth-build",
-  agent: "auth-builder",
-  task: "Implement the approved authentication fix, test it, and commit it.",
-  worktree: { branch: "fix/auth", base: "main" },
-});
-```
+`task` is the only parameter. There are no role, model, cwd, worktree or batch options. Copies share the same checkout and uncommitted files. Parallelize independent work; keep overlapping edits sequential.
 
-Use ordinary panes for read-only work. Use a unique worktree branch for each independent writing task. Worktree runs keep their workspace for review; the extension does not push, merge, or remove it.
+A copy can call `replicate` for an independent part of its assignment. It must wait for its own copies and return a nonempty final summary. The runtime delivers that summary and closes its pane after descendants drain. Copies do not get `caller_ping` or `subagent_done`.
 
-### `subagent` parameters
+The former `subagent`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel` and `subagents_list` implementations remain internal and are not registered by default. The package-root API is unchanged. The package ships no workflows, skills or built-in roles.
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `name` | string | Required stable label shown in Herdr and the status widget. |
-| `task` | string | Required child prompt. |
-| `agent` | string | Required existing custom role name. |
-| `skills` | string | Comma-separated skills. Replaces the selected role's skill list. |
-| `tools` | string | Comma-separated child tools. Replaces the selected role's tool list. |
-| `cwd` | string | Child working directory, or source repository for a worktree launch. |
-| `worktree` | object | Managed worktree with required `branch` and optional `base`. |
-| `fork` | boolean | Start with the caller's conversation context. |
-| `interactive` | boolean | Suppress autonomous stall/recovery wake-ups for user-driven children. |
-
-A call cannot choose `model` or `thinking`.
-
-## Runtime policy
+## Retained runtime policy
 
 Model and thinking are resolved independently:
 
 1. Use the value from the selected role's frontmatter.
 2. If the role omits it, inherit the value from the parent session.
 
-Bare spawns remain supported by the internal launcher and package-root API, not the `subagent` tool. They inherit both values. Role models must be one exact authenticated `provider/model-id`. Model fallback lists and `config.json` model routing are not supported.
+This role policy applies only to the retained internal launcher and package-root API. `replicate` uses the parent runtime without resolving a role. Bare spawns remain supported by those retained paths. They inherit both values. Role models must be one exact authenticated `provider/model-id`. Model fallback lists and `config.json` model routing are not supported.
 
-## Custom roles
+## Custom roles for the retained API
 
 The package has no built-in roles. Add roles in one of these places:
 
@@ -135,11 +96,11 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 ## Lifecycle
 
-`subagent` is fire-and-forget. Do not poll, sleep, tail session files, or repeatedly call `subagents_list` to check status.
+`replicate` is fire-and-forget. Do not poll, sleep, tail session files or check panes to wait for it. Continue independent work or end your turn until automatic delivery starts the next turn.
 
-A child ends through its lifecycle tools, a confirmed terminal failure, cancellation, or confirmed pane closure. Results include the child session path and an immutable Markdown result-file path. Nested children drain before their owner can deliver its own terminal result.
+Results include the saved session and immutable Markdown result-file paths. Terminal model failures report error facts and a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
-Autonomous children are supervised for crashes and stale inactivity. Interactive children are never killed by the stale watchdog. Durable ownership lets the extension restore pending delivery and ordinary-pane cleanup after restart.
+Autonomous copies are supervised for crashes and stale inactivity. Durable ownership restores pending delivery and ordinary-pane cleanup after restart. The retained API still supports interactive children; the stale watchdog never kills them.
 
 The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
 
@@ -147,14 +108,14 @@ Ownership and current locations are indexed under `$PI_CODING_AGENT_DIR/subagent
 
 Keep the binding store, session artifacts, and saved sessions together when backing up or moving to another machine. Pane IDs alone are never permission to close a pane after a restart.
 
-Child-only lifecycle tools are registered only in child contexts:
+The retained API's non-replica children may receive lifecycle tools:
 
 - `subagent_done` records completion intent for an interactive child.
 - `caller_ping` records a help request and returns it after descendants drain.
 
 ## Managed worktrees
 
-`worktree: { branch, base? }` is opt-in on each `subagent` call.
+Managed worktrees remain opt-in through the package-root API and internal launcher. `replicate` never creates one.
 
 - `cwd` selects the source repository.
 - `base` resolves to an exact commit and defaults to committed `HEAD`.
@@ -174,7 +135,7 @@ Other Pi extensions can import the side-effect-free package root:
 import { createSubagentTree, attachSubagentTree } from "pi-lpt-herdr-subagents";
 ```
 
-The tree API supports nested ownership, exact-parent reattachment, cancellation, worktree children, and one final callback. Its child runtime follows the same rule as `subagent`: role frontmatter, then parent inheritance. See [Public subagent tree API](docs/public-subagent-tree-api.md).
+The tree API supports nested ownership, exact-parent reattachment, cancellation, worktree children, and one final callback. Its child runtime retains role frontmatter, then parent inheritance; this is separate from session replication. See [Public subagent tree API](docs/public-subagent-tree-api.md).
 
 ## Configuration
 
@@ -202,10 +163,10 @@ node --check index.js
 git diff --check
 ```
 
-Run the isolated real-Pi and Herdr suite from inside Herdr:
+Run selected isolated real-Pi and Herdr cases from inside Herdr:
 
 ```bash
-npm run test:integration
+npm run test:integration -- test/integration/replication.test.ts
 ```
 
 See [RELEASING.md](RELEASING.md) for release checks.

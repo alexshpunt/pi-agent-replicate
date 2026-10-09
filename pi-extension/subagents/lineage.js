@@ -207,6 +207,8 @@ export function reduceLineage(rootDir) {
                 node.interactive = event.interactive;
             if (typeof event.autoExit === "boolean")
                 node.autoExit = event.autoExit;
+            if (typeof event.replication === "boolean")
+                node.replication = event.replication;
             if (typeof event.workspaceId === "string")
                 node.workspaceId = event.workspaceId;
             if (typeof event.cwd === "string")

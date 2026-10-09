@@ -14,7 +14,9 @@ A settled assistant entry is still classified for child control:
 
 These boundaries do not publish parent results. A persistent child can settle many times while it remains open. Its earlier answers, empty turns, errors, and aborts stay in its own session.
 
-For an autonomous child, a clean or empty boundary can record terminal intent only after it has processed the last descendant result. Earlier boundaries stay local. Provider errors and aborts keep the child open.
+For a replica, a clean nonempty response can record terminal intent only after the last descendant result is processed. Earlier responses stay local. A terminal provider error or an empty required summary records failure, saves completion evidence and closes after descendant drain. Its original receives error facts and a file of all post-fork textual assistant answers, excluding inherited answers, tooling and hidden reasoning.
+
+The retained non-replica lifecycle is unchanged: autonomous clean or empty boundaries can record terminal intent after the last descendant result; provider errors and aborts keep those children open.
 
 Manual and automatic context compaction are active child work. `session_before_compact` protects the child from stale recovery until `session_compact` or `session_compact_failed` ends that state. Compaction never publishes or repeats a parent result.
 
@@ -41,7 +43,7 @@ Recovery is bounded to three attempts, counted per child across crash and stale 
 
 ## Descendants and exact-parent binding
 
-A child drains only after its terminal outcome reaches its exact immediate-parent inbox and all descendants drain recursively. Failed inbox publication has no timeout and is never rerouted. A pending session inbox stays bound to its recorded parent session ID and file until that exact session returns.
+A child drains only after its terminal outcome reaches its exact immediate-parent inbox and all descendants drain recursively. Failed inbox publication has no timeout and is never rerouted. A pending session inbox stays bound to the stable parent session ID until that exact session returns, even through a changed file path or pane.
 
 Lineage identity belongs to the launched Pi process. Shell commands and test runners may inherit environment variables, but they cannot register fixture calls as real descendants.
 

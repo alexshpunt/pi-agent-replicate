@@ -107,7 +107,7 @@ describe("TS-09 uniform delivery contract", () => {
 				return [];
 			},
 		} as any;
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
 		assert.ok(subagentTool, "the subagent tool is registered");

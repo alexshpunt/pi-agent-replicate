@@ -1561,7 +1561,7 @@ describe("subagent discovery", () => {
 				(request: { register(path: string): void }) =>
 					request.register(rolesDir),
 			);
-			(subagentsModule as any).default(api);
+			(subagentsModule as any).installLegacySubagentExtension(api);
 
 			const listTool = registeredTools.find(
 				(tool) => tool.name === "subagents_list",
@@ -1592,7 +1592,7 @@ describe("subagent discovery", () => {
 			const plugin = createMockExtensionApi(eventBus);
 			rolePackExample(plugin.api);
 			const host = createMockExtensionApi(eventBus);
-			(subagentsModule as any).default(host.api);
+			(subagentsModule as any).installLegacySubagentExtension(host.api);
 			const listTool = host.registeredTools.find(
 				(tool) => tool.name === "subagents_list",
 			);
@@ -1644,7 +1644,7 @@ describe("subagent discovery", () => {
 				request.register(firstRoles);
 				request.register(secondRoles);
 			});
-			(subagentsModule as any).default(api);
+			(subagentsModule as any).installLegacySubagentExtension(api);
 			const result = await registeredTools.find((tool) => tool.name === "subagents_list").execute();
 			assert.equal(result.details.agents.some((agent: any) => agent.name === "duplicate-reviewer"), false);
 			assert.equal(result.details.agents.find((agent: any) => agent.name === "scout")?.provider, "@acme/first-roles");
@@ -1683,7 +1683,7 @@ describe("subagent discovery", () => {
 					(request: { register(path: string): void }) =>
 						request.register(rolesDir),
 				);
-				(subagentsModule as any).default(api);
+				(subagentsModule as any).installLegacySubagentExtension(api);
 
 				const listTool = registeredTools.find(
 					(tool) => tool.name === "subagents_list",
@@ -1720,7 +1720,7 @@ describe("subagent discovery", () => {
 				);
 
 				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).default(api);
+				(subagentsModule as any).installLegacySubagentExtension(api);
 
 				const tool = registeredTools.find(
 					(tool) => tool.name === "subagents_list",
@@ -1769,7 +1769,7 @@ describe("subagent discovery", () => {
 					["description: Legacy scout override", "cli: claude"].join("\n"),
 				);
 				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).default(api);
+				(subagentsModule as any).installLegacySubagentExtension(api);
 
 				const tool = registeredTools.find(
 					(tool) => tool.name === "subagents_list",
@@ -1839,7 +1839,7 @@ describe("subagent discovery", () => {
 			);
 
 			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).default(api);
+			(subagentsModule as any).installLegacySubagentExtension(api);
 
 			const tool = registeredTools.find(
 				(tool) => tool.name === "subagents_list",
@@ -1894,7 +1894,7 @@ describe("subagent discovery", () => {
 				);
 
 				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).default(api);
+				(subagentsModule as any).installLegacySubagentExtension(api);
 
 				const tool = registeredTools.find(
 					(tool) => tool.name === "subagents_list",
@@ -2940,7 +2940,7 @@ describe("completion.ts", () => {
 describe("tool registration", () => {
 	it("requires a named role and hides the bare system prompt from the launch schema", () => {
 		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 		const tool = registeredTools.find((tool) => tool.name === "subagent");
 
 		assert.ok(tool.parameters.required.includes("agent"));
@@ -2950,7 +2950,7 @@ describe("tool registration", () => {
 
 	it("rejects missing and blank roles before reading launch context", async () => {
 		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 		const tool = registeredTools.find((tool) => tool.name === "subagent");
 
 		for (const agent of [undefined, "", "   "]) {
@@ -2963,7 +2963,7 @@ describe("tool registration", () => {
 
 	it("exposes only the five agent-facing lifecycle tools and no user commands", () => {
 		const { api, registeredTools, registeredCommands } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 		assert.deepEqual(
 			registeredTools.map((tool) => tool.name).sort(),
 			["subagent", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagents_list"],
@@ -2980,7 +2980,7 @@ describe("tool registration", () => {
 			"subagent,subagent_interrupt,subagent_resume,subagents_list";
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).default(api);
+			(subagentsModule as any).installLegacySubagentExtension(api);
 			assert.equal(
 				registeredTools.some((tool) => tool.name === "subagent"),
 				true,
@@ -2999,7 +2999,7 @@ describe("tool registration", () => {
 		process.env.PI_DENY_TOOLS = "subagent,subagent_interrupt";
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).default(api);
+			(subagentsModule as any).installLegacySubagentExtension(api);
 			assert.equal(
 				registeredTools.some((tool) => tool.name === "subagent"),
 				false,
@@ -3029,7 +3029,7 @@ describe("tool registration", () => {
 
 	it("exposes worktree branch and optional base on the subagent tool", () => {
 		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const subagentTool = registeredTools.find(
 			(tool) => tool.name === "subagent",
@@ -3045,7 +3045,7 @@ describe("tool registration", () => {
 
 	it("renders partial subagent tool-call args without throwing", () => {
 		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const subagentTool = registeredTools.find(
 			(tool) => tool.name === "subagent",
@@ -3068,7 +3068,7 @@ describe("tool registration", () => {
 
 	it("registers subagent_resume with an autoExit override", () => {
 		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const resumeTool = registeredTools.find(
 			(tool) => tool.name === "subagent_resume",
@@ -3409,7 +3409,7 @@ describe("subagent interruption", () => {
 	it("registers subagent_interrupt in the main session extension", () => {
 		const { api, registeredTools } = createMockExtensionApi();
 
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		assert.equal(
 			registeredTools.some((tool) => tool.name === "subagent_interrupt"),
@@ -4142,7 +4142,7 @@ describe("subagent status renderer", () => {
 
 	it("keeps recovery session details in expanded unexpected-error results", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_result",
@@ -4177,7 +4177,7 @@ describe("subagent status renderer", () => {
 
 	it("renders result details while keeping the custom message context small", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_result",
@@ -4213,7 +4213,7 @@ describe("subagent status renderer", () => {
 
 	it("renders only capped lines plus overflow", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_status",
@@ -4255,7 +4255,7 @@ describe("subagent status renderer", () => {
 
 	it("stays within narrow widths", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).default(api);
+		(subagentsModule as any).installLegacySubagentExtension(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_status",

@@ -30,6 +30,7 @@ import {
 	captureSessionBaseline,
 	seedStandaloneSessionFile,
 	seedSubagentSessionFile,
+	seedReplicationSessionFile,
 } from "./session.ts";
 import type { SessionBaselineCursor } from "./settled-contract.ts";
 import {
@@ -46,6 +47,7 @@ import {
 } from "./terminal.ts";
 
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore } from "./session-binding.ts";
+import type { ReplicationSnapshot } from "./replication.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -81,6 +83,8 @@ export interface FreshPiLaunchRequest {
 	cwd?: string;
 	worktree?: { branch: string; base?: string };
 	fork?: boolean;
+	/** Captured current-branch state for a role-free replication. */
+	replication?: ReplicationSnapshot;
 	surface?: string;
 	parent: {
 		cwd: string;
@@ -136,6 +140,8 @@ export type PiLaunchRequest = FreshPiLaunchRequest | ResumePiLaunchRequest;
 
 export interface PiRunningChild {
 	lineage?: LineageRegistration;
+	/** Distinguish replication settlement from retained role-based launches. */
+	replication?: boolean;
 	id: string;
 	name: string;
 	task: string;
@@ -214,6 +220,7 @@ interface PreparedSession extends PreparedSurface {
 interface PreparedArtifacts extends PreparedSession {
 	taskArg: string;
 	systemPromptFile?: string;
+	replicationPromptFile?: string;
 }
 
 /**
@@ -272,6 +279,12 @@ async function launchFreshPiSubagent(
 					PI_SUBAGENT_TOOLS: buildSubagentToolAllowlist(request.behavior.tools, request.behavior.autoExit, request.behavior.includeControlTools ?? true) ?? "",
 					PI_SUBAGENT_ACTIVITY_FILE: artifacts.activityFile,
 					PI_SUBAGENT_SETTLED_EVENTS_FILE: artifacts.settledEventsFile,
+					...(request.replication ? {
+						PI_SUBAGENT_REPLICATION: "1",
+						PI_SUBAGENT_REPLICATION_PROMPT_FILE: artifacts.replicationPromptFile!,
+						PI_SUBAGENT_REPLICATION_EXTENSIONS: JSON.stringify(request.replication.extensionArgs),
+						PI_SUBAGENT_REPLICATION_ASSISTANTS: JSON.stringify(request.replication.entries.filter((entry) => entry.type === "message" && (entry.message as any)?.role === "assistant").map((entry) => entry.id)),
+					} : {}),
 					...Object.fromEntries(Object.entries(request.environment ?? {}).filter(([key]) => key.startsWith("PI_SUBAGENT_TREE_"))),
 				},
 			},
@@ -291,6 +304,7 @@ async function launchFreshPiSubagent(
 
 				interactive: request.behavior.interactive,
 				autoExit: request.behavior.autoExit,
+				...(request.replication ? { replication: true } : {}),
 				cwd: artifacts.targetCwd,
 				...(artifacts.worktree ? { worktree: artifacts.worktree } : {}),
 				...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
@@ -479,7 +493,9 @@ function prepareTaskArtifacts(
 	session: PreparedSession,
 ): PreparedArtifacts {
 	const { request } = resolved;
-	if (resolved.sessionMode !== "standalone") {
+	if (request.replication) {
+		seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages });
+	} else if (resolved.sessionMode !== "standalone") {
 		seedSubagentSessionFile({
 			mode: resolved.sessionMode,
 			parentSessionFile: request.parent.sessionFile,
@@ -524,7 +540,13 @@ function prepareTaskArtifacts(
 		mkdirSync(dirname(systemPromptFile), { recursive: true });
 		writeFileSync(systemPromptFile, identityInSystemPrompt, "utf8");
 	}
-	return { ...session, taskArg, systemPromptFile };
+	let replicationPromptFile: string | undefined;
+	if (request.replication) {
+		replicationPromptFile = join(resolved.artifactDir, "replication", `${resolved.id}.system.txt`);
+		mkdirSync(dirname(replicationPromptFile), { recursive: true });
+		writeFileSync(replicationPromptFile, request.replication.systemPrompt, { mode: 0o600 });
+	}
+	return { ...session, taskArg, systemPromptFile, replicationPromptFile };
 }
 
 function buildPiCommand(
@@ -536,7 +558,7 @@ function buildPiCommand(
 		"pi",
 		"--session",
 		shellQuote(artifacts.sessionFile),
-		"-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
+		...(!request.replication ? ["-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts"))] : []),
 		...(process.env.HERDR_ENV === "1" && existsSync(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))
 			? ["-e", shellQuote(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))]
 			: []),
@@ -545,6 +567,7 @@ function buildPiCommand(
 		"--thinking",
 		shellQuote(request.runtimePlan.thinking),
 	];
+	if (request.replication) parts.push(...request.replication.extensionArgs.map(shellQuote), "-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")));
 	if (artifacts.systemPromptFile) {
 		parts.push(
 			request.behavior.systemPromptMode === "replace"
@@ -562,6 +585,9 @@ function buildPiCommand(
 	parts.push(shellQuote(artifacts.taskArg));
 
 	const env: string[] = [];
+	if (request.replication) {
+		env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile!)}`);
+	}
 	for (const [key, value] of Object.entries(request.environment ?? {})) {
 		if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env.push(`${key}=${shellQuote(value)}`);
 	}
@@ -637,6 +663,7 @@ function createRunningChild(
 ): PiRunningChild {
 	return {
 		lineage: resolved.lineage,
+		...(resolved.request.replication ? { replication: true } : {}),
 		id: resolved.id,
 		name: resolved.request.name,
 		task: resolved.request.task,
@@ -767,6 +794,7 @@ async function launchResumedPiSubagent(
 			"pi",
 			"--session",
 			shellQuote(request.sessionFile),
+			...(JSON.parse(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION_EXTENSIONS ?? "[]") as string[]).map(shellQuote),
 			"-e",
 			shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
 			...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
@@ -801,6 +829,7 @@ async function launchResumedPiSubagent(
 			launchScriptFile,
 			activityFile,
 			settledEventsFile,
+			...(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION === "1" ? { replication: true } : {}),
 			interactive,
 			runtimePlan: undefined,
 			sessionBaseline,

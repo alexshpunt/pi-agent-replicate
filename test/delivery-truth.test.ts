@@ -124,7 +124,7 @@ import {
 	markDelivery,
 	projectLifecycle,
 } from "../pi-extension/subagents/lifecycle.ts";
-import subagentsExtension, { __test__ } from "../pi-extension/subagents/index.ts";
+import { installLegacySubagentExtension as subagentsExtension, __test__ } from "../pi-extension/subagents/index.ts";
 import {
 	appendLineageEvent,
 	hasUndrainedDescendants,

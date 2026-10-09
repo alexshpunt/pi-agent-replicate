@@ -1,44 +1,35 @@
 # Project context
 
-`pi-lpt-herdr-subagents` gives Pi agents a small asynchronous child-agent API backed by Herdr.
+`pi-lpt-herdr-subagents` lets an agent split independent work into copies of its current Pi session in Herdr.
 
 ## Shipped surface
 
-The extension exposes five model-facing tools:
+The experimental model-facing surface is exactly one tool: `replicate({ task })`. One invocation creates one clone in a dedicated pane in the same checkout. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
 
-- `subagent`
-- `subagent_resume`
-- `subagent_interrupt`
-- `subagent_cancel`
-- `subagents_list`
+The old role-based tools remain implemented but unregistered. The internal launcher and package-root tree API remain available for callers that need custom roles, bare children or managed worktrees. Their contracts are separate from replication.
 
-It registers no user commands. It has no bundled roles, review workflow, or orchestration skill.
+## Replication
 
-The model-facing `subagent` tool requires an existing named role and hides `systemPrompt`. Bare launch support stays in the internal launcher and package-root API. Roles with `disable-model-invocation` stay hidden from listings but can still be launched by name.
+A clone inherits the parent's model, thinking level, full system prompt, active tools and current active conversation, including the triggering user turn. Explicit CLI extensions follow it. The snapshot is captured before asynchronous launch work, so another turn or sibling tool result cannot change its context. Inherited pending tool calls are settled without executing them again.
 
-## Runtime routing
+Clone identity, the original session reference and its bounded assignment belong in a normal task message. They must not change the system prompt or its cache prefix. There are no role, model, cwd, worktree or batch choices on this tool.
 
-A launch cannot choose a model or thinking level. Each value is resolved independently:
+Clones share the caller's files and uncommitted work. Independent assignments can run in parallel; overlapping edits must stay sequential. A clone can replicate its own independent work. It remains responsible until its descendants drain, then returns a nonempty final summary. No help or explicit completion tool is registered for clones.
 
-1. use the custom role frontmatter value when present;
-2. otherwise inherit the parent value.
+The runtime saves completion evidence, delivers the summary and closes the clone. Terminal model failure is also terminal: report honest error facts and a file of every post-fork textual assistant answer. Exclude inherited answers, tool calls, tool results and hidden reasoning. Do not truncate the history. An empty required summary is a failure.
 
-A role model must be one exact authenticated `provider/model-id`. Fallback lists are not supported.
+## Durable lifecycle
 
-## Roles
+Replication is fire-and-forget. The caller gets an acknowledgement and later automatic delivery that starts a turn. Parents do not poll. Autonomous copies retain the bounded crash and stale-recovery policy.
 
-Roles come from project, global, or installed role-pack agent directories. Project roles override global roles, and global roles override role packs. Legacy roles that request an external CLI fail closed.
+Session identity, not a file path or pane ID, owns delivery. A binding inside each session carries its durable store and child settings. Teleport preserves that entry and session ID. The ownership index and lineage inboxes survive Pi and Herdr process replacement. Reopening the exact parent replays pending answers and starts a turn; a closed parent is never opened automatically. New-ID forks cannot claim the original answers. A delivery is acknowledged only after its exact result entry is saved, not merely queued. Cleanup requires the recorded shell incarnation to still own the pane.
 
-## Lifecycle
+## Retained launch paths
 
-A launch is fire-and-forget. The tool returns an acknowledgement, then completion is delivered automatically. Parents do not poll. Nested ownership is durable, and an owner remains responsible until its descendants drain.
+For the internal launcher and package-root API, model and thinking resolve independently: use custom role frontmatter when present, otherwise inherit the parent. Role models must be exact authenticated `provider/model-id` values; fallback lists are unsupported.
 
-Session identity, not a file path or pane ID, owns delivery. A binding entry inside each session carries its durable store and child lifecycle settings. Teleport preserves that entry and session ID. The ownership index and lineage inboxes survive Pi and Herdr process replacement. Reopening the exact parent replays pending answers and starts a turn; a closed parent is never opened automatically. New-ID forks cannot claim the original answers. A delivery is acknowledged only after its exact result entry is saved, not merely queued. A pane can be cleaned up only while its recorded shell incarnation still owns it.
+Roles come from project, global or installed role-pack directories, in that priority order. Legacy external CLI roles fail closed. Non-replica children retain their help, explicit completion and interactive lifecycle behavior.
 
-`caller_ping` reports nonterminal help. Interactive children can use `subagent_done` to settle explicitly. Resume, interrupt, cancel, and list operate on retained child state.
+Managed worktrees remain opt-in on these retained paths. Ownership is recorded before Herdr creates resources. They use an exact committed base without copying parent dirty files, retain the workspace after every outcome, and never push, merge or remove it automatically. Replication does not use worktrees.
 
-## Worktrees
-
-`subagent` may opt into one isolated Herdr-managed Git worktree with `worktree: { branch, base? }`. The extension records ownership before Herdr creates resources. It retains the worktree after every outcome and never pushes, merges, or removes it.
-
-The package-root API keeps the same ownership and runtime rules through `createSubagentTree` and `attachSubagentTree`.
+The package-root API keeps these contracts through `createSubagentTree` and `attachSubagentTree` without registering model-facing tools.

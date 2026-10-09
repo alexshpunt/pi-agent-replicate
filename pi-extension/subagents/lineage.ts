@@ -28,6 +28,8 @@ export interface LineageRegistration {
 }
 
 export interface LineageNodeState {
+  /** Preserve replica lifecycle when restoring a watcher. */
+  replication?: boolean;
   nodeId: string;
   parentNodeId?: string;
   parentSessionId?: string;
@@ -270,6 +272,7 @@ export function reduceLineage(rootDir: string): LineageState {
 
       if (typeof event.interactive === "boolean") node.interactive = event.interactive;
       if (typeof event.autoExit === "boolean") node.autoExit = event.autoExit;
+      if (typeof event.replication === "boolean") node.replication = event.replication;
       if (typeof event.workspaceId === "string") node.workspaceId = event.workspaceId;
       if (typeof event.cwd === "string") node.cwd = event.cwd;
       if (event.worktree && typeof event.worktree === "object" &&

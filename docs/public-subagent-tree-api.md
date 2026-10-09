@@ -4,7 +4,7 @@
 
 ## Create and launch
 
-Unlike the model-facing `subagent` tool, this API still allows bare children without a named role. The tool's role requirement does not change this API.
+The model-facing `replicate` tool copies the current session in the same checkout. This separate API still supports named roles, bare children and managed worktrees. Its ownership and runtime contracts are unchanged.
 
 ```ts
 import {

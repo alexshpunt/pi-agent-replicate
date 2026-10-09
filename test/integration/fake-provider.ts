@@ -206,6 +206,26 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
 
+	if (names.has("replicate") && lastRole !== "tool" && /Call the replicate tool/i.test(user)) {
+		const task = quotedValue(user, "task");
+		if (task) return { toolCalls: [{ name: "replicate", arguments: { task } }] };
+	}
+
+	if (names.has("replication_probe") && user.includes("Your assignment:") && /Use replication_probe/.test(user) && lastRole !== "tool") {
+		return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
+	}
+	const replicaOwner = (request.messages ?? []).some((message) => message.role === "user" && messageText(message.content).includes("Your assignment:\nREPLICATION_NESTED_OWNER"));
+	if (replicaOwner && !/Call the teleport tool/i.test(user)) {
+		if (user.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && lastRole !== "tool") {
+			const gate = user.match(/INTEGRATION_DESCENDANT_GATE:\s*(\S+)/)?.[1];
+			if (gate) return { toolCalls: [{ name: "replicate", arguments: { task: `INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
+		}
+		if (/Replica .* completed\./.test(user) && /REPLICATION_GRANDCHILD/.test(user)) return { text: "REPLICATION_NESTED_SUMMARY" };
+		if (lastRole === "tool") return { text: "REPLICATION_OWNER_WAITING" };
+	}
+	if (user.includes("Your assignment:") && /REPLICATION_FAIL_WITH_HISTORY/.test(user)) {
+		return { text: "REPLICA_FIRST_ANSWER", toolCalls: [{ name: "bash", arguments: { command: "echo TOOL_OUTPUT_NOT_AN_ANSWER" } }] };
+	}
 	if (names.has("teleport") && lastRole !== "tool" && /Call the teleport tool/i.test(user)) {
 		const action = quotedValue(user, "action");
 		const target = quotedValue(user, "target");
@@ -441,6 +461,7 @@ function writeResponse(
 	});
 
 	if (plan.toolCalls && plan.toolCalls.length > 0) {
+		if (plan.text) writeEvent(response, request, { role: "assistant", content: plan.text }, null);
 		writeEvent(
 			response,
 			request,
@@ -481,6 +502,12 @@ const server = createServer(async (request, response) => {
 	}
 	try {
 		const chatRequest = await readJson(request);
+		if (chatRequest.messages?.at(-1)?.role === "tool" && lastUserText(chatRequest).includes("Your assignment:") && lastUserText(chatRequest).includes("REPLICATION_FAIL_WITH_HISTORY")) {
+			providerRequests.push(providerRequest(chatRequest, 400));
+			response.writeHead(400, { "content-type": "application/json" });
+			response.end(JSON.stringify({ error: { message: "deterministic replica terminal failure" } }));
+			return;
+		}
 		if (chatRequest.model === "fallback-primary" || chatRequest.model === "fallback-fail") {
 			providerRequests.push(providerRequest(chatRequest, 503));
 			response.writeHead(503, { "content-type": "application/json" });

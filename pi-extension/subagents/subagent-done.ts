@@ -330,6 +330,8 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1";
+  const inheritedBinding = process.env.PI_SUBAGENT_SESSION ? readSessionBinding(process.env.PI_SUBAGENT_SESSION) : undefined;
+  const replication = process.env.PI_SUBAGENT_REPLICATION === "1" || inheritedBinding?.child?.environment.PI_SUBAGENT_REPLICATION === "1";
   const treeOwner = process.env.PI_SUBAGENT_TREE_OWNER === "1";
   const recorder = createSubagentActivityRecorder({
     runningChildId: process.env.PI_SUBAGENT_ID,
@@ -476,6 +478,11 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     resumeTurnStarted = true;
     recorder.beforeAgentStart();
 
+    if (replication) {
+      const promptFile = process.env.PI_SUBAGENT_REPLICATION_PROMPT_FILE;
+      if (!promptFile) throw new Error("Replica system prompt is missing.");
+      return { systemPrompt: readFileSync(promptFile, "utf8") };
+    }
     if (skillInitializationComplete) return;
     skillInitializationComplete = true;
     const requestedSkills = process.env.PI_SUBAGENT_SKILLS;
@@ -491,7 +498,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   });
   let exitRequested = false;
   const finishAfterDrain = async (
-    ctx: { shutdown: () => void },
+    ctx: ExtensionContext,
     payload: Record<string, unknown>,
   ): Promise<void> => {
     if (exitRequested) return;
@@ -508,8 +515,13 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
         // Publish completion only after descendants drain so the parent can
         // observe this owner's settled turns before its terminal result.
         writeBindingFile(`${sessionFile}.exit`, { ...payload, summary: payload.summary ?? newestAssistantEntry(latestAgentEndMessages)?.text });
-      } catch {
-        // Best effort — the wrapper sentinel remains available after shutdown.
+      } catch (error) {
+        if (replication) {
+          exitRequested = false;
+          ctx.ui.notify(`Replica completion could not be saved: ${String(error)}`, "error");
+          return;
+        }
+        // Legacy callers can still use the wrapper sentinel.
       }
     }
     ctx.shutdown();
@@ -550,7 +562,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     const observedSettledChildId = settledChildResultId;
     settledChildResultId = undefined;
     const terminalAutoExit =
-      autoExit && (outcome === "clean" || outcome === "empty");
+      autoExit && (replication || outcome === "clean" || outcome === "empty");
     const lineage = lineageFromEnvironment();
     const lineageState = lineage ? reduceLineage(lineage.rootDir) : undefined;
     const anyDescendantPending =
@@ -582,7 +594,10 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     });
 
     if (!terminalAutoExit || waitsForChildResult) return;
-    void finishAfterDrain(ctx, { type: "done" });
+    const summary = assistant.text?.trim();
+    void finishAfterDrain(ctx, replication && (outcome !== "clean" || !summary)
+      ? { type: "error", errorMessage: assistant.errorMessage ?? (summary ? `Replica ended with ${outcome}.` : "Replica returned no required summary.") }
+      : { type: "done", ...(replication ? { summary: assistant.text } : {}) });
   });
 
   on("turn_start", (event) => {
@@ -668,6 +683,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     },
   });
 
+  if (replication) return;
   pi.registerTool({
     name: "caller_ping",
     label: "Caller Ping",
