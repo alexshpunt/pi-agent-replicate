@@ -28,9 +28,12 @@ The extension registers no user commands. It ships no workflows, skills, or buil
 
 ### Start a child
 
+The `subagent` tool requires an existing named role. It does not offer bare launches or a `systemPrompt` parameter. The examples below assume you have added the named roles.
+
 ```typescript
 subagent({
   name: "auth-research",
+  agent: "auth-researcher",
   task: "Map the authentication flow and report relevant files and risks.",
 });
 ```
@@ -40,7 +43,7 @@ For an isolated writing task:
 ```typescript
 subagent({
   name: "auth-build",
-  systemPrompt: "Implement only the approved change and report the commit SHA.",
+  agent: "auth-builder",
   task: "Implement the approved authentication fix, test it, and commit it.",
   worktree: { branch: "fix/auth", base: "main" },
 });
@@ -54,8 +57,7 @@ Use ordinary panes for read-only work. Use a unique worktree branch for each ind
 | --- | --- | --- |
 | `name` | string | Required stable label shown in Herdr and the status widget. |
 | `task` | string | Required child prompt. |
-| `agent` | string | Optional custom role name. |
-| `systemPrompt` | string | System prompt for a bare spawn. Named roles keep their own body. |
+| `agent` | string | Required existing custom role name. |
 | `skills` | string | Comma-separated skills. Replaces the selected role's skill list. |
 | `tools` | string | Comma-separated child tools. Replaces the selected role's tool list. |
 | `cwd` | string | Child working directory, or source repository for a worktree launch. |
@@ -72,7 +74,7 @@ Model and thinking are resolved independently:
 1. Use the value from the selected role's frontmatter.
 2. If the role omits it, inherit the value from the parent session.
 
-Bare spawns inherit both values. Role models must be one exact authenticated `provider/model-id`. Model fallback lists and `config.json` model routing are not supported.
+Bare spawns remain supported by the internal launcher and package-root API, not the `subagent` tool. They inherit both values. Role models must be one exact authenticated `provider/model-id`. Model fallback lists and `config.json` model routing are not supported.
 
 ## Custom roles
 

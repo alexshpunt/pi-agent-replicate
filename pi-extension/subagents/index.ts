@@ -243,6 +243,16 @@ const SubagentParams = Type.Object({
 
 
 
+// Keep bare launches available internally, but expose only named roles to the model.
+const SubagentToolParams = Type.Object({
+	...Type.Omit(SubagentParams, ["agent", "systemPrompt"]).properties,
+	agent: Type.String({
+		minLength: 1,
+		description:
+			"Required role name. Discovery precedence is project .pi/agents, global ~/.pi/agent/agents, then installed role packs. Use subagents_list to discover roles.",
+	}),
+});
+
 function discoverAgentDefinitions(
 	pi?: Pick<ExtensionAPI, "events">,
 ): ListedAgentDefinition[] {
@@ -310,14 +320,14 @@ function resolveLaunchBehavior(
  *      woken on stall/recovery transitions. Agents that don't auto-exit are
  *      driven by the user in their own pane and stall pings are noise.
  *
- * A bare `subagent({ name, task })` call has no role defaults and runs
- * autonomously unless the caller explicitly sets `interactive: true`.
+ * An internal bare launch has no role defaults and runs autonomously
+ * unless the caller explicitly sets `interactive: true`.
  */
 function resolveEffectiveAutoExit(
 	params: Static<typeof SubagentParams>,
 	agentDefs: AgentDefaults | null,
 ): boolean {
-	// Named agents preserve their declared behavior. Bare tool calls are
+	// Named agents preserve their declared behavior. Internal bare calls are
 	// autonomous by default, including full-context forks: `fork` controls
 	// context inheritance, not whether the child should remain open.
 	// Interactive callers opt out explicitly with `interactive: true`.
@@ -2884,7 +2894,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			name: "subagent",
 			label: "Subagent",
 			description:
-				"Spawn a sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
+				"Spawn a named-role sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
+				"The agent parameter is required; use subagents_list to discover roles. Bare launches are not available through this tool. " +
 				"Use unique worktree branches for independent writing tasks; use ordinary panes for read-only tasks. The worktree base is committed state, so uncommitted parent changes are not copied. " +
 				"Worktree runs retain their workspace after completion for parent review; they are not pushed, merged, or removed automatically. " +
 				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -2893,7 +2904,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				"DO NOT fabricate, assume, or summarize results after calling this tool. " +
 				"After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
 			promptSnippet:
-				"Spawn a sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
+				"Spawn a named-role sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
+				"The agent parameter is required; use subagents_list to discover roles. Bare launches are not available through this tool. " +
 				"Use unique worktree branches for independent writing tasks; use ordinary panes for read-only tasks. The worktree base is committed state, so uncommitted parent changes are not copied. " +
 				"Worktree runs retain their workspace after completion for parent review; they are not pushed, merged, or removed automatically. " +
 				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -2902,9 +2914,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				"DO NOT fabricate, assume, or summarize results after calling this tool. " +
 				"After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
 			promptGuidelines: subagentRoutingGuidelines,
-			parameters: SubagentParams,
+			parameters: SubagentToolParams,
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				if (!params.agent?.trim()) {
+					throw new Error(
+						"A named role is required. Use subagents_list to discover roles.",
+					);
+				}
+
 				// Self-spawn stays denied unless the current role opts in explicitly.
 				const currentAgent = process.env.PI_SUBAGENT_AGENT;
 				const currentAgentDefaults = currentAgent

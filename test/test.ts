@@ -2938,6 +2938,29 @@ describe("completion.ts", () => {
 
 
 describe("tool registration", () => {
+	it("requires a named role and hides the bare system prompt from the launch schema", () => {
+		const { api, registeredTools } = createMockExtensionApi();
+		(subagentsModule as any).default(api);
+		const tool = registeredTools.find((tool) => tool.name === "subagent");
+
+		assert.ok(tool.parameters.required.includes("agent"));
+		assert.equal(tool.parameters.properties.agent.minLength, 1);
+		assert.equal(tool.parameters.properties.systemPrompt, undefined);
+	});
+
+	it("rejects missing and blank roles before reading launch context", async () => {
+		const { api, registeredTools } = createMockExtensionApi();
+		(subagentsModule as any).default(api);
+		const tool = registeredTools.find((tool) => tool.name === "subagent");
+
+		for (const agent of [undefined, "", "   "]) {
+			await assert.rejects(
+				tool.execute("role-required", { name: "A", task: "T", agent }),
+				/A named role is required.*subagents_list/,
+			);
+		}
+	});
+
 	it("exposes only the five agent-facing lifecycle tools and no user commands", () => {
 		const { api, registeredTools, registeredCommands } = createMockExtensionApi();
 		(subagentsModule as any).default(api);

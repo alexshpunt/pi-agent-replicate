@@ -4,6 +4,8 @@
 
 ## Create and launch
 
+Unlike the model-facing `subagent` tool, this API still allows bare children without a named role. The tool's role requirement does not change this API.
+
 ```ts
 import {
   createSubagentTree,

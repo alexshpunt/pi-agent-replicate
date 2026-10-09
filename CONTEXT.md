@@ -14,6 +14,8 @@ The extension exposes five model-facing tools:
 
 It registers no user commands. It has no bundled roles, review workflow, or orchestration skill.
 
+The model-facing `subagent` tool requires an existing named role and hides `systemPrompt`. Bare launch support stays in the internal launcher and package-root API. Roles with `disable-model-invocation` stay hidden from listings but can still be launched by name.
+
 ## Runtime routing
 
 A launch cannot choose a model or thinking level. Each value is resolved independently:

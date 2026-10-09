@@ -5,10 +5,13 @@ A model-facing `subagent` launch may request an isolated Git worktree:
 ```json
 {
   "name": "issue-42-build",
+  "agent": "implementer",
   "task": "Implement the approved change, test it, commit it, and report the SHA.",
   "worktree": { "branch": "issue/42", "base": "HEAD" }
 }
 ```
+
+The `subagent` tool requires an existing role; this example assumes you have an `implementer` role.
 
 `cwd` selects the source repository. `base` resolves to an exact commit before creation and defaults to committed `HEAD`. The child starts at the Herdr-created worktree root.
 

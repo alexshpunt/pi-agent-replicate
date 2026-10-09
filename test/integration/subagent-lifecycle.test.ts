@@ -1488,9 +1488,10 @@ for (const backend of backends) {
 			const task = [
 				`Call the subagent tool with these EXACT parameters:`,
 				`  name: "Fork-${id}"`,
+				`  agent: "test-echo"`,
 				`  fork: true`,
 				`  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-				`Do not set the agent or interactive parameters. Just set name, fork, and task.`,
+				`Do not set the interactive parameter. Use the named role's default.`,
 				`After you receive the result, say FORK_COMPLETE.`,
 			].join("\n");
 
@@ -1510,7 +1511,7 @@ for (const backend of backends) {
 				PI_TIMEOUT,
 			);
 
-			// Receiving the result proves the bare fork auto-exited and its child pane
+			// Receiving the result proves the named fork auto-exited and its child pane
 			// was finalized instead of remaining at the editor as an interactive run.
 
 			// Verify: the forked session has a parent link
@@ -1778,33 +1779,39 @@ for (const backend of backends) {
 			);
 		});
 
-		// ── Subagent with custom system prompt ──
+		for (const agent of [undefined, "missing-role"]) {
+			it(`rejects ${agent ? "unknown" : "missing"} roles without launching a child`, async () => {
+				const id = uniqueId();
+				const markerFile = join(env.dir, `rejected-child-${id}.txt`);
+				const parentSession = join(env.dir, `role-required-${id}.jsonl`);
+				const surface = createTrackedSurface(env, `role-required-${id}`);
+				await waitForPaneReady(surface);
 
-		it("passes systemPrompt to subagent", async () => {
-			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-sysprompt-${id}.txt`;
-			trackTempFile(env, markerFile);
+				startPi(surface, env.dir, [
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "Rejected-${id}"`,
+					...(agent ? [`  agent: "${agent}"`] : []),
+					`  task: "Run bash: echo 'UNEXPECTED_CHILD' > '${markerFile}'"`,
+					"Call the tool once, then finish.",
+				].join("\n"), {
+					extraArgs: `-p --session ${shellQuote(parentSession)}`,
+				});
 
-			const surface = createTrackedSurface(env, `sysprompt-${id}`);
-			await waitForPaneReady(surface);
-
-			const task = [
-				`Call the subagent tool with these parameters:`,
-				`  name: "SysP-${id}"`,
-				`  agent: "test-echo"`,
-				`  systemPrompt: "Always start your response with CUSTOM_PROMPT_ACTIVE."`,
-				`  task: "Write 'SYSPROMPT_${id}' to ${markerFile} using bash: echo 'SYSPROMPT_${id}' > '${markerFile}'"`,
-				`After the subagent completes, say SYSPROMPT_TEST_DONE.`,
-			].join("\n");
-
-			startPi(surface, env.dir, task);
-
-			const content = await waitForFile(markerFile, PI_TIMEOUT, /SYSPROMPT/);
-			assert.ok(
-				content.includes(`SYSPROMPT_${id}`),
-				`System prompt test marker should exist`,
-			);
-		});
+				await waitForPiExit(surface);
+				const entries = readSessionEntries(parentSession);
+				const result = entries.find((entry) =>
+					entry.type === "message" &&
+					entry.message?.role === "toolResult" &&
+					entry.message?.toolName === "subagent")?.message;
+				assert.ok(result, "the parent must receive a launch error");
+				assert.equal(result.isError, true);
+				assert.match(JSON.stringify(result.content), agent ? /was not found/ : /agent/);
+				assert.equal(existsSync(markerFile), false);
+				assert.equal(customResultEntries(entries).length, 0);
+				assert.equal(getProviderRequests().some((request) =>
+					!request.tools.includes("subagent")), false, "no child provider request should run");
+			});
+		}
 
 		it("keeps an autonomous owner alive past the stale threshold until its child result is processed", async () => {
 			const id = uniqueId();
