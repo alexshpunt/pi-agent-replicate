@@ -8,8 +8,10 @@ import type { SessionEntry, ReplicationContextMessage } from "./session.ts";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** The fresh surface asks only for work and its expected result. */
+const namePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** The fresh surface requires a task name and bounded work. */
 export const ReplicateParams = Type.Object({
+	name: Type.String({ pattern: namePattern.source, description: "A task-specific name in lowercase kebab-case, such as check-auth-risks." }),
 	task: Type.String({ minLength: 1, description: "The exact work this copy must complete and the result you expect back." }),
 }, { additionalProperties: false });
 
@@ -45,6 +47,7 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 		parameters: recovery ? ReplicateRecoveryParams : ReplicateParams,
 		async execute(_id, input, _signal, _update, ctx) {
 			const params = input as ReplicateRequest;
+			if (typeof params.name !== "string" || !namePattern.test(params.name)) throw new Error("Replication needs a lowercase kebab-case name.");
 			if (!params.task.trim()) throw new Error("Replication needs a nonempty task.");
 			if ((params.continuation || params.mode) && (!recovery || sessionId !== ctx.sessionManager.getSessionId())) throw new Error("Recovery is not available in this session.");
 			if (!!params.continuation !== !!params.mode) throw new Error("Continuation and mode must be supplied together.");
@@ -74,22 +77,13 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 	} };
 }
 
-/** Reserve a readable name and a session-owned number before asynchronous launch work. */
-export function reserveReplicationName(pi: ExtensionAPI, ctx: ExtensionContext, paneTitle: () => string | undefined): string {
-	// Strip control characters so a name stays on one safe terminal line.
+/** Add the immediate parent's readable origin to the caller's task name. */
+export function replicationName(name: string, pi: ExtensionAPI, ctx: ExtensionContext, paneTitle: () => string | undefined): string {
+	// Strip control characters so the origin stays on one safe terminal line.
 	// oxlint-disable-next-line no-control-regex
 	const clean = (value: string | undefined) => value?.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim();
-	const base = clean(pi.getSessionName()) || clean(paneTitle()) || basename(ctx.cwd);
-	const sessionId = ctx.sessionManager.getSessionId();
-	let number = 0;
-	for (const entry of ctx.sessionManager.getEntries()) {
-		if (entry.type !== "custom" || entry.customType !== "replica_name") continue;
-		const saved = entry.data as { sessionId?: string; number?: number } | undefined;
-		if (saved?.sessionId === sessionId && typeof saved.number === "number" && Number.isSafeInteger(saved.number) && saved.number > number) number = saved.number;
-	}
-	number++;
-	pi.appendEntry("replica_name", { sessionId, number });
-	return `${base} · copy ${number}`;
+	const origin = clean(pi.getSessionName()) || clean(paneTitle()) || clean(basename(ctx.cwd));
+	return `${name} ← ${origin}`;
 }
 
 /** Plain startup data captured before asynchronous launch work can observe another turn. */

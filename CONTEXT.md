@@ -4,7 +4,7 @@
 
 ## Shipped surface
 
-The experimental model-facing surface is exactly one tool: `replicate({ task })` initially. A saved result adds `continuation` and `mode` to that same tool for its receiving session. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
+The experimental model-facing surface is exactly one tool: `replicate({ name, task })` initially. A saved result adds `continuation` and `mode` to that same tool for its receiving session. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
 
 The old role-based tools remain implemented but unregistered. The internal launcher and package-root tree API remain available for callers that need custom roles, bare children or managed worktrees. Their contracts are separate from replication.
 
@@ -26,7 +26,7 @@ Applied worktrees are cleaned only after durable integration and checkpointing, 
 
 Owned continuation IDs address the latest saved state only. `resume` keeps its session identity; `fork` starts an independent identity. Each attempt has distinct result artifacts. Neither can start on an active continuation, and unrelated parents cannot take ownership. Unjoined work carries its original join basis into recovery; applied work uses its last integrated checkpoint so old changes are not applied again. Terminal model failure is also terminal: report honest error facts and a file of every post-fork textual assistant answer. Exclude inherited answers, tool calls, tool results and hidden reasoning. Do not truncate the history. An empty required summary is a failure.
 
-Copy names should tell the user which parent they belong to, not show a random ID. Use the first nonempty name from the parent session, current Herdr pane, or project directory, followed by ` · copy N`. Reserve each number durably in the exact parent session before launch, including continuation attempts. Inherited counters do not belong to a new-ID copy. Keep the same name in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
+The caller must choose an explicit task-specific name in lowercase kebab-case for every invocation, including continuations. Reject missing or invalid names before launch. The runtime adds the immediate parent's origin as `task-name ← parent-name`, using the first nonempty parent session name, current Herdr pane name, or project directory name. Do not generate task names or copy numbers. Keep the same combined title in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
 
 ## Durable lifecycle
 
