@@ -454,26 +454,29 @@ function claimFile(rootDir: string, deliveryId: string): string {
   return join(materializationClaimDir(rootDir), `${safeId(deliveryId)}.claim`);
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** Linux process start time (field 22 of /proc/<pid>/stat). */
-function processStartTime(pid: number): string | undefined {
+/** Linux stat fields after the command name, starting with process state. */
+function linuxProcessFields(pid: number): string[] | undefined {
   if (process.platform !== "linux") return undefined;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const closingParen = stat.lastIndexOf(")");
-    const fields = closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : [];
-    return fields[19] || undefined;
-  } catch {
-    return undefined;
+    return closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : undefined;
+  } catch { return undefined; }
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
   }
+  // A zombie retains its PID and start time but cannot finish or release its gate.
+  const state = linuxProcessFields(pid)?.[0];
+  return state !== "Z" && state !== "X";
+}
+
+/** Linux process start time (field 22 of /proc/<pid>/stat). */
+function processStartTime(pid: number): string | undefined {
+  return linuxProcessFields(pid)?.[19] || undefined;
 }
 
 function currentProcessIncarnation(): ProcessIncarnation {

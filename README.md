@@ -134,7 +134,7 @@ The retained API's non-replica children may receive lifecycle tools:
 
 ## Managed worktrees
 
-Replication always creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
+Replication always creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially through durable ownership gates. Checkpointing, Git joins and owned cleanup run in background host processes, not Pi's input thread. The host revalidates the original session before applying files and delivering its result. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
 
 Task completion and integration are separate outcomes: `applied`, `conflict`, `blocked`, or `not-attempted`. Conflicts do not apply any of the child's files to the parent. Failed or empty-summary children never auto-join partial work. Their worktrees stay available, and the parent gets the continuation ID and checkpoint. Continuing unjoined work includes its outstanding changes; continuing already-applied work joins only new changes.
 

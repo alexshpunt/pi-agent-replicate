@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
 import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForScreen, type TestEnv } from "./harness.ts";
 import { childSessionLocation, readSessionBinding, sessionLocationAlive } from "../../pi-extension/subagents/session-binding.ts";
+import { readReplicaWork } from "../../pi-extension/subagents/replica-work.ts";
 
 const packageTools = new Set(["replicate", "subagent", "subagent_resume", "subagent_interrupt", "subagent_cancel", "subagents_list", "caller_ping", "subagent_done"]);
 function entries(path: string): any[] {
@@ -29,6 +30,78 @@ for (const backend of getAvailableBackends()) {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });
+
+		for (const [stage, command, pattern] of [["checkpoint", "git", "*"], ["join", "git", "*merge-tree*"], ["cleanup", "herdr", "*worktree*remove*"]]) {
+			it(`keeps the parent responsive while replica ${stage} is held`, async () => {
+				const inspection = stage === "checkpoint" ? process.env.PI_INTEGRATION_TUI_DIR : undefined;
+				const ide = inspection ? process.env.PI_INTEGRATION_IDE_ENTRY : undefined;
+				if (inspection) { assert.ok(ide && existsSync(ide), "native visual proof requires the current IDE"); mkdirSync(inspection, { recursive: true }); }
+				const parentFile = join(env.dir, "responsive-original.jsonl");
+				const state = join(env.dir, ".pi", "agent", "completion-delay");
+				mkdirSync(state);
+				const bin = join(state, "bin"); mkdirSync(bin);
+				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release"), pulse = join(state, "pulse");
+				for (const executableName of stage === "cleanup" ? ["git", "herdr"] : [command]) {
+					const executable = execFileSync("which", [executableName], { encoding: "utf8" }).trim();
+					writeFileSync(join(bin, executableName), `#!/bin/bash\nif [[ "$*" == ${pattern} ]] && test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<${inspection ? 6000 : 200};i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(executable)} "$@"\n`, { mode: 0o700 });
+				}
+				const capability = join(env.dir, "completion-delay-capability.ts");
+				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){let timer;pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID){const witness=${JSON.stringify(join(state, 'runtime.json'))};const starts=existsSync(witness)?JSON.parse(readFileSync(witness,'utf8')).starts:0;writeFileSync(witness,JSON.stringify({starts:starts+1,readHasViews:!!pi.getAllTools().find(t=>t.name==='read')?.parameters?.properties?.views,ideSource:process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT,argv:process.argv}));process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;timer=setInterval(()=>writeFileSync(${JSON.stringify(pulse)},String(Date.now())),25);}});pi.on('session_shutdown',()=>clearInterval(timer));pi.registerTool({name:'replication_probe',label:'Probe',description:'Save isolated source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'responsive-change.txt'),'CHILD_EDIT');writeFileSync(${JSON.stringify(armed)},'ready');return {content:[{type:'text',text:'CAPABILITY_INHERITED'}],details:{}}}});}\n`);
+				const parent = createTrackedSurface(env, "responsive-original");
+				await waitForPaneReady(parent);
+				startPi(parent, env.dir, "Return exactly RESPONSIVE_READY", { environment: stage === "checkpoint" ? { PI_SUBAGENT_QUIET_THRESHOLD_MS: inspection ? "20000" : "2000" } : undefined, extraArgs: `--session ${shellQuote(parentFile)} ${ide ? `-e ${shellQuote(ide)}` : ""} -e ${shellQuote(capability)}` });
+				await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "assistant"), "parent ready");
+				if (inspection) {
+					runInPane(parent, "/reload");
+					await waitUntil(() => JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")).starts >= 2, "native reload must complete");
+					assert.ok(JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")).argv.includes(ide));
+					writeFileSync(join(inspection, "runtime.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")), readHasViews: !!getProviderRequests().find(request => request.toolParameters.read?.properties?.views) }));
+				}
+				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');
+				try {
+					try { await waitUntil(() => existsSync(started), "completion must reach the held operation"); }
+					catch (error) {
+						const result = entries(parentFile).find((row) => row.customType === "subagent_result");
+						const binding = result && readSessionBinding(result.details.sessionFile);
+						const file = binding?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+						const work = file && existsSync(file) ? readReplicaWork(file) : undefined;
+						assert.fail(`${error}\n${JSON.stringify({ stage, result: result?.content, work: work && { cleaned: work.cleaned, integration: work.integration, worktree: work.worktree, location: work.worktreeLocation } })}`);
+					}
+					const before = Number(readFileSync(pulse, "utf8"));
+					await sleep(400);
+					console.log(JSON.stringify({ completionStage: stage, heldObservationMs: 400, parentHeartbeatAdvanceMs: Number(readFileSync(pulse, "utf8")) - before }));
+					assert.ok(Number(readFileSync(pulse, "utf8")) > before, "parent event loop must advance before Git is released");
+					if (stage === "checkpoint") await sleep(2500); // Cross the quiet threshold while the model is already finished.
+					runInPane(parent, "Return exactly PARENT_WORK_DURING_COMPLETION");
+					await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "assistant" && JSON.stringify(row.message.content).includes("PARENT_WORK_DURING_COMPLETION")), "parent must finish independent work while Git is held");
+					assert.equal(existsSync(release), false);
+					if (inspection) assert.ok(getProviderRequests().some(request => !!request.toolParameters.read?.properties?.views), "the real model request must use the IDE reader schema");
+					// Reattach the original while its completion worker still owns the checkpoint gate.
+					if (stage === "checkpoint") {
+						const starts = JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")).starts;
+						runInPane(parent, "/reload");
+						await waitUntil(() => JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")).starts > starts, "reload during held completion must remain responsive");
+					}
+					if (inspection) {
+						writeFileSync(join(inspection, "pane.json"), JSON.stringify({stage:"held",pane:parent,config:process.env.HERDR_CONFIG_PATH,socket:process.env.HERDR_SOCKET_PATH}));
+						writeFileSync(join(inspection, "runtime.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(state, "runtime.json"), "utf8")), readHasViews: true }));
+						const deadline=Date.now()+300000;
+						while(!existsSync(join(inspection,"release-child"))) {assert.ok(Date.now()<deadline,"observer must release held completion");await sleep(100);}
+					}
+				} finally { writeFileSync(release, "release"); }
+				await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "completion must deliver after release");
+				const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
+				assert.equal(results.length, 1);
+				assert.equal(results[0].details.integration.status, "applied");
+				assert.equal(readFileSync(join(env.dir, "responsive-change.txt"), "utf8"), "CHILD_EDIT");
+				if (inspection) {
+					writeFileSync(join(inspection,"result.json"),JSON.stringify(results[0]));
+					writeFileSync(join(inspection,"pane.json"),JSON.stringify({stage:"delivered",pane:parent,config:process.env.HERDR_CONFIG_PATH,socket:process.env.HERDR_SOCKET_PATH}));
+					const deadline=Date.now()+300000;
+					while(!existsSync(join(inspection,"finish"))) {assert.ok(Date.now()<deadline,"observer must finish");await sleep(100);}
+				}
+			});
+		}
 
 		for (const task of ["REPLICATION_FAIL_WITH_HISTORY", "Return exactly EMPTY_COMPLETION"]) {
 			it(`reports ${task} as failure and retains its work`, async () => {

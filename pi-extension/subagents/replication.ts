@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type Static } from "@sinclair/typebox";
-import { materializeResultFile } from "./delivery-files.ts";
-import { readSessionBinding } from "./session-binding.ts";
+export { materializeReplicationHistory } from "./replica-history.ts";
 import type { SessionEntry, ReplicationContextMessage } from "./session.ts";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -117,22 +115,4 @@ export function replicationAssignment(task: string): string {
 		"Your assignment:",
 		task,
 	].join("\n");
-}
-
-/** Save all post-fork textual answers, excluding tools, hidden reasoning and inherited answers. */
-export function materializeReplicationHistory(sessionFile: string, childId: string, name: string): string {
-	const binding = readSessionBinding(sessionFile);
-	const baseline = binding?.child?.environment.PI_SUBAGENT_REPLICATION_ASSISTANTS;
-	if (!baseline) throw new Error("Replica answer history has no inherited-answer boundary.");
-	const inherited = new Set<string>(JSON.parse(baseline));
-	const answers = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean).flatMap((line) => {
-		const entry = JSON.parse(line);
-		if (entry.type !== "message" || entry.message?.role !== "assistant" || inherited.has(entry.id)) return [];
-		const text = entry.message.content.filter((part: any) => part.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n");
-		return text ? [`## Answer ${entry.id}\n\n${text}`] : [];
-	});
-	return materializeResultFile({
-		sessionsDir: dirname(sessionFile), childSessionId: childId, deliveryId: `history:${childId}`,
-		status: "error", agentName: name, answer: answers.join("\n\n") || "No textual answers were produced after replication.", now: Date.now(),
-	}).path;
 }

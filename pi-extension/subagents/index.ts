@@ -36,9 +36,10 @@ import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } fro
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
-import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
+import { registerReplicateTool, replicationAssignment, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
 import { snapshotSource } from "./source-state.ts";
-import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, checkpointReplicaCompletion, joinReplicaWork, cleanupReplicaWork, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
+import { runReplicaBackground } from "./replica-background.ts";
+import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
@@ -635,6 +636,10 @@ interface RunningSubagent {
 	replicaWorkFile?: string;
 	/** Settled task waiting for its exact parent before integration. */
 	pendingReplicaResult?: ReplicaCompletion;
+	/** In-flight background work must not be resubmitted by status ticks or reload. */
+	replicaFinishing?: boolean;
+	replicaRetryAt?: number;
+	replicaCleaning?: boolean;
 	lineage?: LineageRegistration;
 	id: string;
 	name: string;
@@ -891,40 +896,49 @@ function replicaRecordFor(running: RunningSubagent): string | undefined {
   return running.replicaWorkFile ?? readSessionBinding(running.sessionFile)?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
 }
 function finishReplicationResult(running: RunningSubagent, result: SubagentResult): void {
-  if (running.pendingTerminalDelivery) return;
+  if (running.pendingTerminalDelivery || running.replicaFinishing || (running.replicaRetryAt ?? 0) > Date.now()) return;
   const failed = result.exitCode !== 0 || !!result.errorMessage || !!result.error || !result.summary?.trim();
+  const completion: ReplicaCompletion = {
+    name: running.name, task: running.task, summary: result.summary ?? "", exitCode: failed ? 1 : 0, elapsed: result.elapsed,
+    ...(failed ? { errorMessage: result.errorMessage ?? result.error ?? "Replica failed." } : {}),
+  };
+  running.pendingReplicaResult = completion;
+  running.replicaFinishing = true;
+  void completeReplicaInBackground(running, completion).catch((error) => {
+    recordDeliveryFailure(running, `terminal:${running.id}`, error, "replica-completion");
+    running.replicaRetryAt = Date.now() + 2_000;
+  }).finally(() => { running.replicaFinishing = false; });
+}
+async function completeReplicaInBackground(running: RunningSubagent, completion: ReplicaCompletion): Promise<void> {
   const recordFile = replicaRecordFor(running);
-  const savedWork = recordFile ? readReplicaWork(recordFile) : undefined;
-  const historyPath = failed ? savedWork?.completion?.historyPath ?? materializeReplicationHistory(existsSync(running.sessionFile) ? running.sessionFile : savedWork!.sessionCheckpoint!, running.id, running.name) : undefined;
-  const errorMessage = result.errorMessage ?? result.error ?? "Replica failed.";
-  let summary = failed ? `Replica failed: ${errorMessage}\n\nTextual answer history: ${historyPath}` : result.summary;
-  let work;
-  if (recordFile) {
-    const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
-    work = checkpointReplicaCompletion(recordFile, location?.cwd ?? running.worktree!.path, running.sessionFile, {
-      name: running.name, task: running.task, summary: result.summary ?? "", exitCode: failed ? 1 : 0, elapsed: result.elapsed,
-      ...(failed ? { errorMessage, historyPath } : {}),
-    });
-    if (!failed && !exactParentSessionActive(running)) {
-      running.pendingReplicaResult = work.completion;
-      return;
-    }
-    if (!failed) work = joinReplicaWork(recordFile, runtime.latestCtx!.cwd);
-    const report = replicaWorkReport(work);
-    if (report) summary += `\n\n${report}`;
-  }
+  if (!recordFile) throw new Error("Replica has no durable work record.");
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  const ctx = exactParentSessionActive(running) ? runtime.latestCtx : undefined;
+  const sessionFile = ctx?.sessionManager.getSessionFile();
+  const parent = sessionFile ? parentSessionLocation(sessionBindingStore(sessionFile), ctx!.sessionManager.getSessionId()) : undefined;
+  const { work } = await runReplicaBackground({
+    operation: "complete", file: recordFile, cwd: location?.cwd ?? running.worktree!.path,
+    sessionFile: running.sessionFile, completion, parent,
+  });
+  if (!work?.completion) throw new Error("Replica worker returned no saved completion.");
+  running.pendingReplicaResult = work.completion;
+  if (work.integration.status === "pending" || !exactParentSessionActive(running)) return;
+  const saved = work.completion;
+  const failed = saved.exitCode !== 0 || !!saved.error || !!saved.errorMessage || !saved.summary.trim();
+  let summary = failed ? `Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}\n\nTextual answer history: ${saved.historyPath}` : saved.summary;
+  const report = replicaWorkReport(work);
+  if (report) summary += `\n\n${report}`;
   running.pendingReplicaResult = undefined;
-  const finalSummary = summary;
-  const finalWork = work;
   queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
-    if (runtime.pi) sendSubagentResult(runtime.pi, finalSummary ?? "", {
-      name: running.name, task: running.task, childId: running.id, sessionFile: finalWork?.sessionCheckpoint ?? running.sessionFile,
-      deliveryId: `terminal:${running.id}`, resultContent: finalSummary,
-      exitCode: failed ? 1 : 0, elapsed: result.elapsed, replication: true,
-      ...(failed ? { errorMessage, historyPath } : {}),
-      ...(finalWork ? { continuationId: finalWork.id, worktreePath: finalWork.worktree?.path, checkpoint: finalWork.checkpoint?.commit, integration: finalWork.integration, recoveryAvailable: !!finalWork.checkpoint && !!finalWork.sessionCheckpoint } : {}),
+    if (runtime.pi) sendSubagentResult(runtime.pi, summary, {
+      name: running.name, task: running.task, childId: running.id, sessionFile: work.sessionCheckpoint ?? running.sessionFile,
+      deliveryId: `terminal:${running.id}`, resultContent: summary,
+      exitCode: saved.exitCode, elapsed: saved.elapsed, replication: true,
+      ...(failed ? { errorMessage: saved.errorMessage, historyPath: saved.historyPath } : {}),
+      continuationId: work.id, worktreePath: work.worktree?.path, checkpoint: work.checkpoint?.commit,
+      integration: work.integration, recoveryAvailable: !!work.checkpoint && !!work.sessionCheckpoint,
     });
-  }, finalSummary, failed ? "error" : "completed");
+  }, summary, failed ? "error" : "completed");
 }
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 function startRecoveredWatcher(running: RunningSubagent): void {
@@ -1692,14 +1706,24 @@ function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
   try {
     const workFile = running.replication && replicaRecordFor(running);
     if (workFile) {
-      // A Teleport destination is a separate surface from the owned source tree.
-      if (running.worktree && running.surface !== running.worktree.paneId && childPaneOwned(running)) {
-        const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
-        if (location && sessionLocationAlive(location)) return false;
-        closePane(running.surface);
-        return false; // Confirm disappearance on the next bounded cleanup attempt.
-      }
-      if (!runtime.latestCtx || !cleanupReplicaWork(workFile, runtime.latestCtx.cwd)) return false;
+      if (!runtime.latestCtx || running.replicaCleaning) return false;
+      running.replicaCleaning = true;
+      void runReplicaBackground({
+        operation: "cleanup", file: workFile, parentCwd: runtime.latestCtx.cwd, surface: running.surface,
+        ...(running.lineage ? { child: { rootDir: running.lineage.rootDir, nodeId: running.id } } : {}),
+      }).then(({ cleaned }) => {
+        if (!cleaned) return;
+        if (running.lineage) {
+          const ackId = `cleanup-done:${running.id}`;
+          if (!appendLineageEvent(running.lineage.rootDir, ackId, "cleanup_done", running.id) && !hasLineageEvent(running.lineage.rootDir, ackId, "cleanup_done")) throw new Error("Unable to publish cleanup acknowledgement");
+        }
+        running.cleanupPending = false;
+        runningSubagents.delete(running.id);
+        updateWidget();
+      }).catch((error) => {
+        if (running.lineage) appendLineageEvent(running.lineage.rootDir, `cleanup-pending:${running.id}`, "cleanup_pending", running.id, { error: String(error) });
+      }).finally(() => { running.replicaCleaning = false; });
+      return false;
     } else finalizeSubagentSurface(running, "ready_for_review", false, true);
     running.cleanupPending = false;
     if (running.lineage) {
@@ -1832,6 +1856,7 @@ function retireDeliveredSubagent(running: RunningSubagent): void {
 
 /** Retry one retired child's surface cleanup without observing it again. */
 function retryRetiredSubagentCleanup(running: RunningSubagent, now: number): void {
+  if (running.replicaCleaning) return;
   if ((running.cleanupRetryAt ?? 0) > now) return;
   if (tryCleanupSubagentSurface(running)) {
     runningSubagents.delete(running.id);
@@ -2312,7 +2337,8 @@ function deliverRecoveryFailure(running: RunningSubagent, reason: string): void 
 }
 
 async function superviseStaleSubagent(running: RunningSubagent, now: number): Promise<void> {
-	if (running.retired) return;
+	// The model is done; checkpoint or join latency is not an idle agent to restart.
+	if (running.retired || running.pendingReplicaResult || running.replicaFinishing) return;
 	if (!shouldStartStaleRecovery({
 		interactive: running.interactive,
 		pendingTerminalDelivery: Boolean(running.pendingTerminalDelivery),
@@ -2897,7 +2923,7 @@ async function watchSubagent(
 		const effectiveExitCode = closeWithAnswer ? 0 : result.exitCode;
 		if (closeWithAnswer) summary = lastAssistant!;
 
-		const worktreeHandoff = finalizeSubagentSurface(
+		const worktreeHandoff = running.replication ? undefined : finalizeSubagentSurface(
 			running,
 			result.ping
 				? "needs_help"
@@ -2936,7 +2962,7 @@ async function watchSubagent(
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
 	} catch (err: any) {
-		const worktreeHandoff = finalizeSubagentSurface(running, "failed", true, false);
+		const worktreeHandoff = running.replication ? undefined : finalizeSubagentSurface(running, "failed", true, false);
 		running.lifecycle = markFailed(
 			running.lifecycle,
 			signal.aborted ? "Subagent cancelled." : (err?.message ?? String(err)),
