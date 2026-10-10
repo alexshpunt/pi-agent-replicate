@@ -8,31 +8,71 @@ import type { SessionEntry, ReplicationContextMessage } from "./session.ts";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** Register the only model-facing operation; the caller owns durable launch and supervision. */
-export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext) => Promise<{ id: string; name: string; sessionFile: string }>): void {
-	pi.registerTool({
+/** The fresh surface asks only for work and its expected result. */
+export const ReplicateParams = Type.Object({
+	task: Type.String({ minLength: 1, description: "The exact work this copy must complete and the result you expect back." }),
+}, { additionalProperties: false });
+
+/** Recovery choices are disclosed only after a result makes them relevant. */
+const ReplicateRecoveryParams = Type.Object({
+	...ReplicateParams.properties,
+	continuation: Type.Optional(Type.String({ minLength: 1, description: "The saved copy ID supplied with a previous result." })),
+	mode: Type.Optional(Type.Union([Type.Literal("resume"), Type.Literal("fork")], { description: "Continue the saved copy, or start a new copy from where it stopped." })),
+}, { additionalProperties: false });
+export type ReplicateRequest = Static<typeof ReplicateRecoveryParams>;
+
+/** Keep recovery visibility scoped to the exact receiving session. */
+export interface ReplicateToolControls {
+	reveal(ctx: ExtensionContext): void;
+}
+
+/** Register one parallel-work tool; durable result entries restore its disclosed surface. */
+export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext) => Promise<{ id: string; name: string; sessionFile: string }>): ReplicateToolControls {
+	let recovery = false;
+	let sessionId: string | undefined;
+	const publish = () => pi.registerTool({
 		name: "replicate", label: "Replicate",
-		description: "Create one isolated copy of your current session, runtime and working source, assigned exactly one bounded task. Successful copies attempt a host-owned join into your current source; conflicts and failures keep their saved work. To continue an owned saved result, supply its continuation ID and mode resume (same session identity) or fork (new identity). Recovery uses the latest saved state only. Worktrees isolate files, not processes, ports or databases. This call returns only a launch acknowledgement. The copy must return a final summary, which is delivered automatically to this session and starts a turn. On failure you receive error facts and a file of its textual answers. Do not poll, sleep or inspect logs to await completion. Do not assume or invent the result; continue independent work or end your turn until it arrives.",
-		parameters: ReplicateParams,
-		async execute(_id, params, _signal, _update, ctx) {
+		description: "Run a clearly defined part of your task in parallel with another copy of yourself while you continue a different part. The copy's result returns automatically to this session.",
+		promptSnippet: "Run a defined part of your task in parallel with another copy of yourself while you continue a different part.",
+		promptGuidelines: [
+			"Use replicate only from a task-ready state: you are already in the intended working location, understand the task, and have identified independent parts that can proceed in parallel.",
+			"Before calling replicate, know exactly what the copy must do, what result you expect back, and what separate work you will continue yourself.",
+			"Do not replicate while still deciding the task, its scope, or where to work. Do not use it merely to hand off work.",
+			"If your next action after launching a copy would be to wait for it, do the work yourself instead.",
+			"After finishing your own parallel work, you may end your turn and wait for the copy's automatic result.",
+			"Results arrive automatically. Do not poll for completion.",
+		],
+		parameters: recovery ? ReplicateRecoveryParams : ReplicateParams,
+		async execute(_id, input, _signal, _update, ctx) {
+			const params = input as ReplicateRequest;
 			if (!params.task.trim()) throw new Error("Replication needs a nonempty task.");
+			if ((params.continuation || params.mode) && (!recovery || sessionId !== ctx.sessionManager.getSessionId())) throw new Error("Recovery is not available in this session.");
 			if (!!params.continuation !== !!params.mode) throw new Error("Continuation and mode must be supplied together.");
 			const child = await launch(params, ctx);
 			return {
-				content: [{ type: "text", text: `Replica ${child.name} launched. Its summary or failure will return here automatically. Continue independent work or end your turn; do not poll or assume its result.` }],
+				content: [{ type: "text", text: "Copy started. Its result will arrive here automatically." }],
 				details: { ...child, status: "running" },
 			};
 		},
 	});
+	const setRecovery = (enabled: boolean) => {
+		if (recovery === enabled) return;
+		recovery = enabled;
+		publish();
+	};
+	pi.on("session_start", (_event, ctx) => {
+		sessionId = ctx.sessionManager.getSessionId();
+		setRecovery(ctx.sessionManager.getBranch().some((entry) => {
+			const details = (entry as { details?: Record<string, unknown> }).details;
+			return entry.type === "custom_message" && entry.customType === "subagent_result" && details?.replication === true && details.recoveryAvailable === true && details.receiverSessionId === sessionId;
+		}));
+	});
+	publish();
+	return { reveal(ctx) {
+		sessionId = ctx.sessionManager.getSessionId();
+		setRecovery(true);
+	} };
 }
-
-/** One invocation starts one isolated continuation; runtime choices are inherited. */
-export const ReplicateParams = Type.Object({
-	task: Type.String({ minLength: 1, description: "The exact bounded assignment for this continuation." }),
-	continuation: Type.Optional(Type.String({ minLength: 1, description: "An owned continuation ID from a previous result." })),
-	mode: Type.Optional(Type.Union([Type.Literal("resume"), Type.Literal("fork")], { description: "Resume the latest saved session identity, or fork it into an independent identity." })),
-}, { additionalProperties: false });
-export type ReplicateRequest = Static<typeof ReplicateParams>;
 
 /** Plain startup data captured before asynchronous launch work can observe another turn. */
 export interface ReplicationSnapshot {
@@ -67,14 +107,12 @@ export function replicationExtensionArgs(argv: readonly string[], cwd: string): 
 	}
 	return args;
 }
-/** Keep identity and completion requirements in the task, never the system prompt. */
-export function replicationAssignment(originalId: string, originalFile: string, task: string): string {
+/** Give the parallel copy only its bounded assignment and result requirement. */
+export function replicationAssignment(task: string): string {
 	return [
-		`You are a clone of the original Pi session ${originalId}.`,
-		`Original session: ${originalFile}`,
-		"Work only on the assignment below, not the original's whole task. Your cwd is an isolated source-snapshot worktree. Work there; the host saves your changes and attempts integration into your immediate parent.",
-		"You may use replicate for independent parts of your assignment. Wait for your own copies to finish before your final summary.",
-		"Return a nonempty final summary of your result, changes, checks and any remaining limits. The runtime delivers it to your original and closes this copy automatically.",
+		"You are a parallel copy of the agent working on this task.",
+		"Complete only the assignment below.",
+		"Return a clear summary of the result and any unresolved issues.",
 		"",
 		"Your assignment:",
 		task,

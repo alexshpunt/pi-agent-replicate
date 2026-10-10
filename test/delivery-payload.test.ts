@@ -42,6 +42,7 @@ import {
 const SEAM = "../pi-extension/subagents/delivery-payload.ts";
 
 type Frame = (input: {
+	subject?: "Replica";
 	status: DeliveryStatus;
 	agentName: string;
 	childSessionId: string;
@@ -59,6 +60,18 @@ async function loadFrame(): Promise<Frame> {
 }
 
 describe("TS-03 full-fidelity delivery payload", () => {
+	it("keeps the full replica answer without exposing host reference fields", async () => {
+		const frame = await loadFrame();
+		const answer = "ANSWER_START\n" + "x".repeat(200_000) + "\nANSWER_END";
+		const references = {
+			childSessionFile: "/private/session.jsonl",
+			resultPath: "/private/result.md",
+			deliveryId: "private-delivery-id",
+		};
+		const payload = frame({ subject: "Replica", status: "completed", agentName: "copy", childSessionId: "private-session-id", answer, ...references });
+		assert.equal(payload, "Replica copy completed.\n\n" + answer);
+		for (const value of Object.values(references)) assert.equal(payload.includes(value), false);
+	});
 	it("TS-03 frames the complete answer with its result path and session reference", async () => {
 		const frame = await loadFrame();
 		const answer = `HEAD-${"h".repeat(100_000)}-MIDDLE-${"t".repeat(99_960)}-TAIL`;

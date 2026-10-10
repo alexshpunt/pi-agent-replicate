@@ -4,15 +4,19 @@
 
 ## Shipped surface
 
-The experimental model-facing surface is exactly one tool: `replicate({ task, continuation?, mode? })`. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
+The experimental model-facing surface is exactly one tool: `replicate({ task })` initially. A saved result adds `continuation` and `mode` to that same tool for its receiving session. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
 
 The old role-based tools remain implemented but unregistered. The internal launcher and package-root tree API remain available for callers that need custom roles, bare children or managed worktrees. Their contracts are separate from replication.
 
 ## Replication
 
+Replication is parallel work by copies of one agent, not delegation. The caller must already be at its intended working location and understand the task. It must identify independent parts, specify the copy's work and expected result, and continue a different part itself. Do not replicate while deciding the task or just to wait. Waiting after completing useful parallel work is allowed.
+
+Use progressive disclosure. The initial description explains purpose and use, not Git, worktrees, checkpoints, delivery routing or host mechanics. Any usable saved result reveals its copy ID and recovery parameters. Restore that visibility from the exact receiver's durable result entries, not copied history in a new-ID session. Routine results retain a full summary without host reference footers; a failure or conflict explains the work problem and the available continuation.
+
 A clone inherits the parent's model, thinking level, full system prompt, active tools and current active conversation, including the triggering user turn. Explicit CLI extensions follow it. The snapshot is captured before asynchronous launch work, so another turn or sibling tool result cannot change its context. Inherited pending tool calls are settled without executing them again.
 
-Clone identity, the original session reference and its bounded assignment belong in a normal task message. They must not change the system prompt or its cache prefix. There are no role, model, cwd, worktree or batch choices on this tool.
+The bounded assignment, parallel-copy identity and required summary belong in a normal task message. Internal original-session references stay in host metadata. Replication must not change the system prompt or its cache prefix. There are no role, model, cwd, worktree or batch choices on this tool.
 
 Each clone gets a source snapshot with tracked working files and nonignored untracked files. The host uses a private index and protected checkpoint refs without changing parent HEAD or staging. Ignored files are not copied. Worktrees isolate files, not shared processes, ports or databases. A clone can replicate its own independent work. It remains responsible until its descendants drain, then returns a nonempty final summary. No help or explicit completion tool is registered for clones.
 

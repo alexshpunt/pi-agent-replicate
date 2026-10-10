@@ -2,7 +2,7 @@
 
 An experimental session-replication extension for [Pi](https://github.com/earendil-works/pi) in [Herdr](https://herdr.dev).
 
-An agent can copy its current session and working source into an isolated worktree and give the copy a bounded task. The tool returns immediately. The copy's final summary or failure comes back to its exact original automatically.
+An agent can run a defined part of its task in parallel with another copy of itself while continuing a different part. The copy's result returns automatically to the original session.
 
 ## Install
 
@@ -17,14 +17,24 @@ Start Pi inside Herdr, then restart Pi or run `/reload`.
 The extension registers exactly one tool and no user commands:
 
 ```typescript
-replicate({ task: "Map the authentication flow. Return the relevant files and risks." });
+replicate({ task: "Check authentication risks while I implement the settings change. Return concrete findings with file references." });
 ```
 
-Each call starts one copy of the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. Clone identity, the original session reference and the assignment are sent as a normal task message, not added to the system prompt.
+Use it only from a task-ready state: the agent is already in the intended working location, understands its task, and has identified independent parts that can run in parallel. Before calling, it must know the copy's assignment, the expected result, and the separate work it will continue itself.
+
+This is parallel work by one agent, not a tool for handing off a task. Do not replicate while still deciding the task, its scope, or where to work. If the next step would be waiting for the copy, do the work yourself. After finishing real parallel work, the original may end its turn and wait for automatic delivery. Do not poll.
+
+The initial schema contains only `task`. A saved result reveals its copy ID and adds `continuation` and `mode` to the same tool. Reload restores those choices only in the session that received the result; a new-ID copy does not inherit them. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
+
+## Replication runtime
+
+The following details describe the implementation, not instructions added to the agent's prompt.
+
+Each call copies the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. The bounded assignment and summary requirement are sent as a normal task message, without changing the system prompt.
 
 A fresh call needs only `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
 
-Results carry an owned continuation ID. To continue the latest saved source and conversation:
+After a saved result discloses an owned continuation ID, the same tool can continue the latest saved source and conversation:
 
 ```typescript
 replicate({ continuation: "saved-id", mode: "resume", task: "Continue with this new information." });
@@ -107,7 +117,7 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 `replicate` is fire-and-forget. Do not poll, sleep, tail session files or check panes to wait for it. Continue independent work or end your turn until automatic delivery starts the next turn.
 
-Results include the saved session and immutable Markdown result-file paths. Terminal model failures report error facts and a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
+Host metadata retains the saved session and immutable Markdown result-file paths. Routine model-visible results carry the copy's summary and saved-copy choice, not those internal references. Terminal model failures report error facts; host metadata also retains a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
 Autonomous copies are supervised for crashes and stale inactivity. Durable ownership restores pending results, join plans and cleanup after restart. The retained API still supports interactive children; the stale watchdog never kills them.
 

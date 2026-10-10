@@ -36,7 +36,7 @@ import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } fro
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
-import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
 import { snapshotSource } from "./source-state.ts";
 import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, checkpointReplicaCompletion, joinReplicaWork, cleanupReplicaWork, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
@@ -483,7 +483,11 @@ function sendSubagentResult(
 		(typeof details.resultContent === "string"
 			? details.resultContent
 			: boundResultPresentation(content, ""));
-	const promptContent = boundResultPresentation(
+	if (details.replication && runtime.latestCtx) {
+		if (details.recoveryAvailable) runtime.replicateTool?.reveal(runtime.latestCtx);
+		details = { ...details, receiverSessionId: runtime.latestCtx.sessionManager.getSessionId() };
+	}
+	const promptContent = details.replication ? resultContent : boundResultPresentation(
 		`${resultContent}\n\n${RESULT_CONTINUATION_PROMPT}`,
 		"",
 	);
@@ -703,6 +707,7 @@ interface InflightDelivery {
 }
 
 interface SubagentRuntime {
+	replicateTool?: ReplicateToolControls;
 	runningSubagents: Map<string, RunningSubagent>;
 	resultDeliveryQueue: ResultDeliveryQueue;
 	inflightDeliveries: Map<string, InflightDelivery>;
@@ -905,7 +910,8 @@ function finishReplicationResult(running: RunningSubagent, result: SubagentResul
       return;
     }
     if (!failed) work = joinReplicaWork(recordFile, runtime.latestCtx!.cwd);
-    summary += `\n\n${replicaWorkReport(work)}`;
+    const report = replicaWorkReport(work);
+    if (report) summary += `\n\n${report}`;
   }
   running.pendingReplicaResult = undefined;
   const finalSummary = summary;
@@ -916,7 +922,7 @@ function finishReplicationResult(running: RunningSubagent, result: SubagentResul
       deliveryId: `terminal:${running.id}`, resultContent: finalSummary,
       exitCode: failed ? 1 : 0, elapsed: result.elapsed, replication: true,
       ...(failed ? { errorMessage, historyPath } : {}),
-      ...(finalWork ? { continuationId: finalWork.id, worktreePath: finalWork.worktree?.path, checkpoint: finalWork.checkpoint?.commit, integration: finalWork.integration } : {}),
+      ...(finalWork ? { continuationId: finalWork.id, worktreePath: finalWork.worktree?.path, checkpoint: finalWork.checkpoint?.commit, integration: finalWork.integration, recoveryAvailable: !!finalWork.checkpoint && !!finalWork.sessionCheckpoint } : {}),
     });
   }, finalSummary, failed ? "error" : "completed");
 }
@@ -3037,8 +3043,7 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 
 /** Start the one-tool replication surface while retaining the legacy adapters internally. */
 export default function subagentsExtension(pi: ExtensionAPI) {
-	installSubagentRuntime(pi);
-	registerReplicateTool(pi, async (params, ctx) => {
+	runtime.replicateTool = registerReplicateTool(pi, async (params, ctx) => {
 		if (!isTerminalAvailable()) throw new Error("Replication requires Herdr.");
 		const file = ctx.sessionManager.getSessionFile();
 		if (!file || !ctx.model) throw new Error("Replication requires a persisted session and selected model.");
@@ -3076,7 +3081,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			saveReplicaRuntime(recordFile, inherited);
 			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
 			const child = await launchPiSubagent({
-				kind: "fresh", id, name, task: replicationAssignment(ctx.sessionManager.getSessionId(), file, params.task),
+				kind: "fresh", id, name, task: replicationAssignment(params.task),
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
 				worktree: { branch: `pi-replica/${id}`, base: source.commit },
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
@@ -3093,6 +3098,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			throw error;
 		}
 	});
+	installSubagentRuntime(pi);
 }
 
 /** Retained internal adapter for callers and fixtures that explicitly need role-based tools. */

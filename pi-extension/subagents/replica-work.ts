@@ -229,17 +229,23 @@ export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 	return true;
 }
 
-/** Clear human-readable outcome and owned recovery references for the parent. */
+/** Report work problems and disclose a saved copy without host bookkeeping. */
 export function replicaWorkReport(record: ReplicaWork): string {
-	const integration = record.integration;
-	const details = integration.status === "conflict"
-		? integration.details?.split("\n").filter((line) => line.startsWith("CONFLICT")).join("\n") || "Git reported conflicts; parent files were not changed."
-		: integration.details;
+	if (record.integration.status === "applied") {
+		return record.checkpoint && record.sessionCheckpoint ? `Saved copy: ${JSON.stringify(record.id)}. You can continue it with replicate using continuation and mode.` : "";
+	}
+	const problem = record.integration.status === "conflict"
+		? "The copy finished, but its changes conflict with your current work and were not included."
+		: record.integration.status === "not-attempted"
+			? "The copy's unfinished work was not included in your work."
+			: "The copy finished, but its changes could not be safely included in your work.";
+	if (!record.checkpoint || !record.sessionCheckpoint) {
+		return `${problem}\nNo usable saved continuation is available.${record.worktree ? ` The copy's files remain at ${record.worktree.path}.` : ""}`;
+	}
 	return [
-		`Integration: ${integration.status}${details ? ` — ${details}` : "."}`,
-		...(integration.status === "conflict" || integration.status === "blocked" ? ["Your child finished, but the host could not integrate its work. Integration is now your responsibility."] : []),
-		`Continuation: ${record.id}`,
-		...(record.worktree ? [`Worktree: ${record.worktree.path}${record.integration.status === "applied" ? " (eligible for automatic cleanup; checkpoint remains recoverable)" : " (retained)"}`] : []),
-		`Checkpoint: ${record.checkpoint?.commit ?? `unavailable — ${record.checkpointError ?? "not captured"}`}`,
+		problem,
+		"Its work is saved. To continue it alongside your own independent work, use replicate with:",
+		`continuation: ${JSON.stringify(record.id)}, mode: "resume", task: "The exact work to finish and expected result".`,
+		"Use mode: \"fork\" to start a new copy from where it stopped instead.",
 	].join("\n");
 }

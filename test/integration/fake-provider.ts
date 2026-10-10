@@ -13,7 +13,7 @@ interface ChatMessage {
 interface ChatRequest {
 	model?: string;
 	messages?: ChatMessage[];
-	tools?: Array<{ function?: { name?: string } }>;
+	tools?: Array<{ function?: { name?: string; parameters?: { properties?: Record<string, unknown> } } }>;
 }
 
 interface ToolCall {
@@ -36,6 +36,8 @@ export interface ProviderRequest {
 	status: number;
 	messages: ChatMessage[];
 	tools: string[];
+	/** Tool schemas actually sent to the deterministic provider. */
+	toolParameters: Record<string, { properties?: Record<string, unknown> }>;
 	text: string;
 	userText: string;
 }
@@ -96,6 +98,7 @@ function providerRequest(request: ChatRequest, status: number): ProviderRequest 
 		status,
 		messages: request.messages ?? [],
 		tools: [...toolNames(request)].sort(),
+		toolParameters: Object.fromEntries((request.tools ?? []).filter((tool) => tool.function?.name).map((tool) => [tool.function!.name!, tool.function!.parameters ?? {}])),
 		text: requestText(request),
 		userText: lastUserText(request),
 	};
@@ -534,7 +537,7 @@ const server = createServer(async (request, response) => {
 		}
 		writeResponse(response, chatRequest, plan);
 	} catch (error) {
-		providerRequests.push({ status: 500, messages: [], tools: [], text: "", userText: "" });
+		providerRequests.push({ status: 500, messages: [], tools: [], toolParameters: {}, text: "", userText: "" });
 		response.writeHead(500, { "content-type": "application/json" });
 		response.end(
 			JSON.stringify({

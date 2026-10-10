@@ -57,7 +57,8 @@ for (const backend of getAvailableBackends()) {
 					sidecar: existsSync(node.sessionFile + ".exit") ? readFileSync(node.sessionFile + ".exit", "utf8") : null,
 				})}`);
 			}
-			assert.match(results(original)[0].content, /RESTART_SUMMARY[\s\S]*Integration: applied/);
+			assert.match(results(original)[0].content, /RESTART_SUMMARY/);
+			assert.equal(results(original)[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "restart.txt"), "utf8"), "SAVED_RESTART_SOURCE");
 			assert.ok(existsSync(results(original)[0].details.resultPath));
 			runInPane(receiver, "/quit"); await waitForPiExit(receiver); closePane(receiver);
@@ -103,7 +104,7 @@ for (const backend of getAvailableBackends()) {
 			await waitUntil(() => results(moved).length === 1, "the descendant summary must reach its moved immediate parent");
 			assert.equal(results(moved)[0].details.childId, grandchild.nodeId);
 			assert.match(results(moved)[0].content, /REPLICATION_GRANDCHILD/);
-			assert.match(results(moved)[0].content, /Integration: applied/);
+			assert.equal(results(moved)[0].details.integration.status, "applied");
 			await waitUntil(() => entries(moved).some((entry) => entry.message?.role === "assistant" && JSON.stringify(entry.message.content).includes("REPLICATION_NESTED_SUMMARY")), "the owner must summarize after receiving its copy");
 			assert.equal(results(original).length, 0, "a closed original must not be opened automatically");
 			assert.equal(readFileSync(join(owner.worktree.path, "nested.txt"), "utf8"), "GRANDCHILD_SOURCE");
@@ -119,7 +120,7 @@ for (const backend of getAvailableBackends()) {
 			await waitUntil(() => results(original).length === 1, "reopening the exact original must deliver the saved owner result");
 			assert.equal(results(original)[0].details.childId, owner.nodeId);
 			assert.match(results(original)[0].content, /REPLICATION_NESTED_SUMMARY/);
-			assert.match(results(original)[0].content, /Integration: applied/);
+			assert.equal(results(original)[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "nested.txt"), "utf8"), "GRANDCHILD_SOURCE");
 			await waitUntil(() => getProviderRequests().some((request) => /Replica .* completed\./.test(request.userText) && request.userText.includes("REPLICATION_NESTED_SUMMARY")), "replay must start a real agent turn");
 			assert.equal(await waitForPaneAbsence(location()!.paneId!, { timeoutMs: 10_000 }), true);

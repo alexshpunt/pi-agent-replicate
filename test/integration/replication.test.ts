@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -51,7 +52,7 @@ for (const backend of getAvailableBackends()) {
 				const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
 				await waitUntil(() => !sessionLocationAlive(location), "the failed model process must exit");
 				assert.equal(existsSync(entries(result.details.sessionFile)[0].cwd), true);
-				assert.match(result.content, /Integration: not-attempted/);
+				assert.equal(result.details.integration.status, "not-attempted");
 			});
 		}
 		it("retains partial work after repeated unexpected child process loss exhausts recovery", async () => {
@@ -69,7 +70,7 @@ for (const backend of getAvailableBackends()) {
 			assert.equal(results.length, 1);
 			const result = results[0];
 			assert.match(result.content, /Replica .* error/);
-			assert.match(result.content, /Integration: not-attempted/);
+			assert.equal(result.details.integration.status, "not-attempted");
 			assert.equal(readFileSync(join(result.details.worktreePath, "crash-partial.txt"), "utf8"), "CRASH_PARTIAL");
 			assert.ok(existsSync(result.details.sessionFile) && existsSync(result.details.historyPath));
 			assert.equal(existsSync(join(env.dir, "crash-partial.txt")), false);
@@ -79,8 +80,8 @@ for (const backend of getAvailableBackends()) {
 		});
 		for (const mode of ["resume", "fork"]) {
 			it(`recovers failed outstanding changes with ${mode} and preserves the saved conversation`, async () => {
-				const parentFile = join(env.dir, "recover-original.jsonl"), capability = join(env.dir, "recovery-capability.ts");
-				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
+				const parentFile = join(env.dir, "recover-original.jsonl"), capability = join(env.dir, "recovery-capability.ts"), starts = join(env.dir, ".pi", "agent", "recovery-starts.json");
+				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('session_start',(_event,ctx)=>{const p=${JSON.stringify(starts)};const state=existsSync(p)?JSON.parse(readFileSync(p,'utf8')):{};const id=ctx.sessionManager.getSessionId();state[id]=(state[id]??0)+1;writeFileSync(p,JSON.stringify(state));});pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "recover-original");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, "Return exactly RECOVERY_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -89,7 +90,32 @@ for (const backend of getAvailableBackends()) {
 				const results = () => entries(parentFile).filter((row) => row.customType === "subagent_result");
 				await waitUntil(() => results().length === 1, "failed work must be returned");
 				const failed = results()[0];
-				assert.match(failed.content, /Integration: not-attempted/);
+				assert.equal(failed.details.recoveryAvailable, true);
+				assert.ok(failed.content.includes(failed.details.continuationId));
+				if (mode === "resume") {
+					const receiver = entries(parentFile)[0].id;
+					const before = JSON.parse(readFileSync(starts, "utf8"))[receiver];
+					runInPane(parent, "/reload");
+					await waitUntil(() => JSON.parse(readFileSync(starts, "utf8"))[receiver] > before, "reload must reattach the receiving session");
+					await waitForScreen(parent, /Reloaded keybindings, extensions/, 10_000);
+					runInPane(parent, "Return exactly RECOVERY_SCHEMA_AFTER_RELOAD");
+					await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("Return exactly RECOVERY_SCHEMA_AFTER_RELOAD")), "reloaded receiver must send its current schema");
+					const request = getProviderRequests().find((request) => request.userText.includes("Return exactly RECOVERY_SCHEMA_AFTER_RELOAD"))!;
+					assert.deepEqual(Object.keys(request.toolParameters.replicate.properties ?? {}).sort(), ["continuation", "mode", "task"]);
+
+					const copiedFile = join(env.dir, "copied-recovery.jsonl");
+					const rows = entries(parentFile);
+					rows[0] = { ...rows[0], id: randomUUID() };
+					writeFileSync(copiedFile, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+					const foreign = createTrackedSurface(env, "copied-recovery");
+					await waitForPaneReady(foreign);
+					startPi(foreign, env.dir, "Return exactly COPIED_SCHEMA_READY", { extraArgs: `--session ${shellQuote(copiedFile)} -e ${shellQuote(capability)}` });
+					await waitUntil(() => getProviderRequests().some((item) => item.userText === "Return exactly COPIED_SCHEMA_READY"), "copied session must send its own fresh schema");
+					const copiedRequest = getProviderRequests().find((item) => item.userText === "Return exactly COPIED_SCHEMA_READY")!;
+					assert.deepEqual(Object.keys(copiedRequest.toolParameters.replicate.properties ?? {}), ["task"]);
+					closePane(foreign);
+				}
+				assert.equal(failed.details.integration.status, "not-attempted");
 				assert.equal(existsSync(join(env.dir, "outstanding.txt")), false);
 				const binding = readSessionBinding(failed.details.sessionFile)!;
 				const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
@@ -98,7 +124,7 @@ for (const backend of getAvailableBackends()) {
 				await waitUntil(() => results().length === 2, "recovered result must reach the requester");
 				const recovered = results()[1], oldHeader = entries(failed.details.sessionFile)[0], newHeader = entries(recovered.details.sessionFile)[0];
 				assert.match(recovered.content, /RECOVERY_SUMMARY/);
-				assert.match(recovered.content, /Integration: applied/);
+				assert.equal(recovered.details.integration.status, "applied");
 				assert.equal(readFileSync(join(env.dir, "outstanding.txt"), "utf8"), "step\nstep\n");
 				if (mode === "resume") assert.equal(newHeader.id, oldHeader.id);
 				else assert.notEqual(newHeader.id, oldHeader.id);
@@ -130,7 +156,7 @@ for (const backend of getAvailableBackends()) {
 			const index = readFileSync(join(env.dir, ".git", "index"));
 			writeFileSync(gate, "go");
 			await waitUntil(() => entries(parentFile).filter((row) => row.customType === "subagent_result").length === 2, "both sibling results must join");
-			for (const result of entries(parentFile).filter((row) => row.customType === "subagent_result")) assert.match(result.content, /Integration: applied/);
+			for (const result of entries(parentFile).filter((row) => row.customType === "subagent_result")) assert.equal(result.details.integration.status, "applied");
 			for (const id of ids) assert.equal(readFileSync(join(env.dir, id + ".txt"), "utf8"), id);
 			assert.equal(readFileSync(join(env.dir, "parent.txt"), "utf8"), "parent working");
 			assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
@@ -153,8 +179,10 @@ for (const backend of getAvailableBackends()) {
 			writeFileSync(gate, "go");
 			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "conflict must return task summary and retained pointer");
 			const result = entries(parentFile).find((row) => row.customType === "subagent_result");
-			assert.match(result.content, /completed[\s\S]*CONFLICT_TASK_FINISHED[\s\S]*Integration: conflict/);
-			assert.match(result.content, /Continuation:|Checkpoint:/);
+			assert.match(result.content, /completed[\s\S]*CONFLICT_TASK_FINISHED/);
+			assert.equal(result.details.integration.status, "conflict");
+			assert.equal(result.details.recoveryAvailable, true);
+			assert.ok(result.content.includes(result.details.continuationId));
 			assert.equal(readFileSync(join(env.dir, "collision.txt"), "utf8"), "parent working\n");
 			assert.equal(existsSync(join(env.dir, "child-only.txt")), false);
 			assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
@@ -172,12 +200,12 @@ for (const backend of getAvailableBackends()) {
 			const results = () => entries(parentFile).filter((row) => row.customType === "subagent_result");
 			await waitUntil(() => results().length === 1, "first work must join");
 			const first = results()[0];
-			assert.match(first.content, /Integration: applied/);
+			assert.equal(first.details.integration.status, "applied");
 			await waitUntil(() => !existsSync(first.details.worktreePath), "successful worktree must disappear before recovery");
 			writeFileSync(join(env.dir, "old.txt"), "PARENT_LATER");
 			runInPane(parent, `Call the replicate tool once with continuation: "${first.details.continuationId}", mode: "fork", task: "Use replication_probe then Return exactly NEXT_APPLIED"`);
 			await waitUntil(() => results().length === 2, "cleaned continuation must be reconstructed");
-			assert.match(results()[1].content, /Integration: applied/);
+			assert.equal(results()[1].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "old.txt"), "utf8"), "PARENT_LATER");
 			assert.equal(readFileSync(join(env.dir, "new.txt"), "utf8"), "CHILD");
 		});
@@ -195,7 +223,7 @@ export default function(pi){
     const file=join(inspection,'runtime.json');
     const starts=existsSync(file)?JSON.parse(readFileSync(file,'utf8')).starts:0;
     const read=pi.getAllTools().find(tool=>tool.name==='read');
-    writeFileSync(file,JSON.stringify({starts:starts+1,readHasViews:!!read?.parameters?.properties?.views,argv:process.argv,ideSource:process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT}));
+    writeFileSync(file,JSON.stringify({starts:starts+1,readHasViews:!!read?.parameters?.properties?.views,replicateFields:Object.keys(pi.getAllTools().find(tool=>tool.name==='replicate')?.parameters?.properties??{}),argv:process.argv,ideSource:process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT}));
   });
   pi.registerTool({name:'replication_probe',label:'Probe',description:'Write isolated work and hold it for visual inspection',parameters:Type.Object({}),async execute(){
     writeFileSync(join(process.cwd(),'visual-change.txt'),'VISUAL_CHILD_EDIT');
@@ -213,6 +241,7 @@ export default function(pi){
 			runInPane(parent, "/reload");
 			await waitUntil(() => existsSync(join(inspection, "runtime.json")) && JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).starts >= 2, "the native reload must reattach the same source");
 			assert.equal(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).readHasViews, true, "the loaded read tool must be IDE's native tool, not Pi's built-in reader");
+			assert.deepEqual(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).replicateFields, ["task"]);
 			runInPane(parent, 'INTEGRATION_VISUAL_PARENT. Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');
 			await waitUntil(() => existsSync(join(inspection, "child-active.json")), "child active in isolated checkout");
 			assert.notEqual(JSON.parse(readFileSync(join(inspection, "child-active.json"), "utf8")).cwd, env.dir);
@@ -224,7 +253,8 @@ export default function(pi){
 			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "one saved result must wake the parent");
 			const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
 			assert.equal(results.length, 1);
-			assert.match(results[0].content, /REPLICATION_SUMMARY[\s\S]*Integration: applied/);
+			assert.match(results[0].content, /REPLICATION_SUMMARY/);
+			assert.equal(results[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
 			const delivered = await waitForScreen(parent, /REPLICATION_SUMMARY/, 20_000);
 			writeFileSync(join(inspection, "delivered.txt"), delivered);
@@ -244,19 +274,23 @@ export default function(pi){
 			await waitUntil(() => entries(parentFile).some((entry) => entry.message?.role === "assistant" && JSON.stringify(entry.message.content).includes("ORIGINAL_READY")), "the original must persist its initial answer, not just echo the input");
 			const first = getProviderRequests()[0];
 			assert.deepEqual(first.tools.filter((name) => packageTools.has(name)), ["replicate"]);
+			assert.deepEqual(Object.keys(first.toolParameters.replicate.properties ?? {}), ["task"]);
 
 			runInPane(parent, 'Current fact: CURRENT_REPLICATION_CONTEXT. Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');
 			await waitUntil(() => entries(parentFile).some((entry) => entry.type === "custom_message" && entry.customType === "subagent_result"), "the original must receive its clone summary");
 			const deliveries = entries(parentFile).filter((entry) => entry.type === "custom_message" && entry.customType === "subagent_result");
 			assert.equal(deliveries.length, 1);
 			assert.match(deliveries[0].content, /REPLICATION_SUMMARY/);
+			assert.equal(deliveries[0].content, deliveries[0].details.resultContent);
+			assert.equal(deliveries[0].details.recoveryAvailable, true);
+			assert.ok(deliveries[0].content.includes(deliveries[0].details.continuationId));
 			assert.ok(existsSync(deliveries[0].details.resultPath));
 			const childFile = deliveries[0].details.sessionFile;
 			const binding = readSessionBinding(childFile);
 			assert.ok(binding?.child);
 			assert.notEqual(entries(childFile)[0].cwd, env.dir, "the clone must own a separate worktree");
 			assert.equal(execFileSync("git", ["show", `${deliveries[0].details.checkpoint}:snapshot-source.txt`], { cwd: env.dir, encoding: "utf8" }), "FORK_FILE", "the source snapshot remains after cleanup");
-			assert.match(deliveries[0].content, /Integration: applied/);
+			assert.equal(deliveries[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "replica-change.txt"), "utf8"), "CHILD_EDIT");
 			const childRequest = getProviderRequests().find((request) => request.userText.includes("REPLICATION_SUMMARY") && !request.userText.includes("Call the replicate tool"));
 			assert.ok(childRequest, "the clone must make a real provider request");
@@ -267,6 +301,8 @@ export default function(pi){
 			assert.deepEqual(childRequest.tools, first.tools);
 			assert.ok(entries(childFile).some((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "replication_probe" && JSON.stringify(entry.message.content).includes("CAPABILITY_INHERITED")), "the inherited custom tool must actually execute");
 			assert.deepEqual(childRequest.tools.filter((name) => packageTools.has(name)), ["replicate"]);
+			assert.deepEqual(Object.keys(childRequest.toolParameters.replicate.properties ?? {}), ["task"]);
+			for (const hidden of [deliveries[0].details.resultPath, childFile, deliveries[0].details.worktreePath, deliveries[0].details.checkpoint]) assert.equal(deliveries[0].content.includes(hidden), false);
 			const location = childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
 			assert.ok(location?.paneId);
 			assert.equal(await waitForPaneAbsence(location.paneId, { timeoutMs: 10_000 }), true);
@@ -274,6 +310,9 @@ export default function(pi){
 			// The clone closes only its own surface, not the original's.
 			runInPane(parent, "Return exactly ORIGINAL_STILL_OPEN");
 			await waitForScreen(parent, /ORIGINAL_STILL_OPEN/);
+			const afterResult = getProviderRequests().find((request) => request.userText.includes("Return exactly ORIGINAL_STILL_OPEN"))!;
+			assert.ok(afterResult);
+			assert.deepEqual(Object.keys(afterResult.toolParameters.replicate.properties ?? {}).sort(), ["continuation", "mode", "task"]);
 			closePane(parent);
 		});
 	});

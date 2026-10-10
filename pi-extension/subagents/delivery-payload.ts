@@ -38,6 +38,8 @@ export function frameDeliveryPayload(input: DeliveryPayloadInput): string {
     "",
     input.answer ?? "No answer was captured.",
   ];
+  // Replica results disclose only the work outcome; host references stay in metadata.
+  if (input.subject === "Replica") return lines.join("\n");
   if (input.resultPath) lines.push("", `Result file: ${input.resultPath}`);
   if (input.childSessionFile) {
     lines.push(
