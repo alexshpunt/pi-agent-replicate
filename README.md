@@ -26,6 +26,8 @@ This is parallel work by one agent, not a tool for handing off a task. Do not re
 
 The initial schema contains only `task`. A saved result reveals its copy ID and adds `continuation` and `mode` to the same tool. Reload restores those choices only in the session that received the result; a new-ID copy does not inherit them. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
 
+Copies use the parent's session name, then its Herdr pane name, then the project directory name. For example, `Settings · копия 1`. The same name appears in the copy's session, Herdr workspace and pane, active status, and result. Numbers belong to the parent session and survive reloads and moves. Internal IDs remain separate.
+
 ## Replication runtime
 
 The following details describe the implementation, not instructions added to the agent's prompt.

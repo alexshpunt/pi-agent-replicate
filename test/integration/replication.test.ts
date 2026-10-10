@@ -135,6 +135,33 @@ for (const backend of getAvailableBackends()) {
 				assert.equal(await waitForPaneAbsence(childSessionLocation(readSessionBinding(recovered.details.sessionFile)!.child!.lineage.rootDir, readSessionBinding(recovered.details.sessionFile)!.child!.lineage.nodeId)!.paneId!, { timeoutMs: 10_000 }), true);
 			});
 		}
+		it("numbers named copies across reload and keeps the name in sessions and results", async () => {
+			const parentFile = join(env.dir, "named-original.jsonl"), capability = join(env.dir, "naming-capability.ts"), settled = join(env.dir, ".pi", "agent", "naming-settled");
+			writeFileSync(capability, `import {writeFileSync} from 'node:fs'; export default function(pi){if(process.env.PI_SUBAGENT_REPLICATION!=='1'){pi.on('session_start',()=>pi.setSessionName('Настройки'));pi.on('agent_settled',(_event,ctx)=>writeFileSync(${JSON.stringify(settled)},String(ctx.sessionManager.getEntries().filter(row=>row.type==='custom_message'&&row.customType==='subagent_result').length)));}}\n`);
+			const parent = createTrackedSurface(env, "pane-name-is-not-the-session-name");
+			await waitForPaneReady(parent);
+			startPi(parent, env.dir, "Return exactly NAMING_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
+			await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "assistant"), "parent ready");
+			const results = () => entries(parentFile).filter((row) => row.customType === "subagent_result");
+			for (const number of [1, 2]) {
+				if (number === 2) {
+					await waitUntil(() => existsSync(settled) && readFileSync(settled, "utf8") === "1", "parent must finish handling the first result before reload");
+					runInPane(parent, "/reload");
+					await waitForScreen(parent, /Reloaded keybindings, extensions/, 10_000);
+				}
+				runInPane(parent, 'Call the replicate tool once with task: "Return exactly EMPTY_COMPLETION"');
+				const launches = () => entries(parentFile).filter((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
+				await waitUntil(() => launches().length === number, "copy launch must be saved");
+				const launch = launches().at(-1);
+				assert.equal(launch.message.isError, false, JSON.stringify(launch.message));
+				await waitUntil(() => results().length === number, "named result must reach the parent");
+				const expected = `Настройки · копия ${number}`;
+				assert.equal(launch.message.details.name, expected);
+				assert.ok(launch.message.content.some((part: any) => part.text?.includes(expected)));
+				assert.ok(results().at(-1).content.includes(expected));
+				assert.equal(entries(launch.message.details.sessionFile).filter((row) => row.type === "session_info").at(-1).name, expected);
+			}
+		});
 		it("joins two isolated siblings without dropping current parent work or staging", async () => {
 			const parentFile = join(env.dir, "siblings-original.jsonl"), capability = join(env.dir, "siblings-capability.ts");
 			const gate = join(env.dir, ".pi", "agent", "siblings-gate"), markers = gate + ".started";
@@ -220,10 +247,11 @@ import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} fro
 const inspection=${JSON.stringify(inspection)};
 export default function(pi){
   if(process.env.PI_SUBAGENT_REPLICATION!=='1') pi.on('session_start',()=>{
+    pi.setSessionName('Настройки');
     const file=join(inspection,'runtime.json');
     const starts=existsSync(file)?JSON.parse(readFileSync(file,'utf8')).starts:0;
     const read=pi.getAllTools().find(tool=>tool.name==='read');
-    writeFileSync(file,JSON.stringify({starts:starts+1,readHasViews:!!read?.parameters?.properties?.views,replicateFields:Object.keys(pi.getAllTools().find(tool=>tool.name==='replicate')?.parameters?.properties??{}),argv:process.argv,ideSource:process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT}));
+    writeFileSync(file,JSON.stringify({starts:starts+1,readHasViews:!!read?.parameters?.properties?.views,replicateFields:Object.keys(pi.getAllTools().find(tool=>tool.name==='replicate')?.parameters?.properties??{}),argv:process.argv,ideSource:process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT,ideVersion:process.env.PI_INTEGRATION_IDE_PACKAGE_VERSION}));
   });
   pi.registerTool({name:'replication_probe',label:'Probe',description:'Write isolated work and hold it for visual inspection',parameters:Type.Object({}),async execute(){
     writeFileSync(join(process.cwd(),'visual-change.txt'),'VISUAL_CHILD_EDIT');
@@ -245,6 +273,10 @@ export default function(pi){
 			runInPane(parent, 'INTEGRATION_VISUAL_PARENT. Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');
 			await waitUntil(() => existsSync(join(inspection, "child-active.json")), "child active in isolated checkout");
 			assert.notEqual(JSON.parse(readFileSync(join(inspection, "child-active.json"), "utf8")).cwd, env.dir);
+			await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate"), "copy launch must be saved");
+			const launch = entries(parentFile).find((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
+			assert.equal(launch.message.details.name, "Настройки · копия 1");
+			assert.equal(entries(launch.message.details.sessionFile).filter((row) => row.type === "session_info").at(-1).name, launch.message.details.name);
 			const active = await waitForScreen(parent, /1 active/, 20_000);
 			writeFileSync(join(inspection, "active.txt"), active);
 			writeFileSync(join(inspection, "pane.json"), JSON.stringify({ stage: "active", pane: parent, config: process.env.HERDR_CONFIG_PATH, socket: process.env.HERDR_SOCKET_PATH }));
@@ -254,6 +286,7 @@ export default function(pi){
 			const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
 			assert.equal(results.length, 1);
 			assert.match(results[0].content, /REPLICATION_SUMMARY/);
+			assert.match(results[0].content, /Настройки · копия 1/);
 			assert.equal(results[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
 			const delivered = await waitForScreen(parent, /REPLICATION_SUMMARY/, 20_000);
@@ -286,6 +319,9 @@ export default function(pi){
 			assert.ok(deliveries[0].content.includes(deliveries[0].details.continuationId));
 			assert.ok(existsSync(deliveries[0].details.resultPath));
 			const childFile = deliveries[0].details.sessionFile;
+			const started = entries(parentFile).find((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
+			assert.equal(started.message.details.name, "replication-original · копия 1", "an unnamed session uses its current pane name");
+			assert.match(deliveries[0].content, /replication-original · копия 1/);
 			const binding = readSessionBinding(childFile);
 			assert.ok(binding?.child);
 			assert.notEqual(entries(childFile)[0].cwd, env.dir, "the clone must own a separate worktree");

@@ -26,6 +26,8 @@ Applied worktrees are cleaned only after durable integration and checkpointing, 
 
 Owned continuation IDs address the latest saved state only. `resume` keeps its session identity; `fork` starts an independent identity. Each attempt has distinct result artifacts. Neither can start on an active continuation, and unrelated parents cannot take ownership. Unjoined work carries its original join basis into recovery; applied work uses its last integrated checkpoint so old changes are not applied again. Terminal model failure is also terminal: report honest error facts and a file of every post-fork textual assistant answer. Exclude inherited answers, tool calls, tool results and hidden reasoning. Do not truncate the history. An empty required summary is a failure.
 
+Copy names should tell the user which parent they belong to, not show a random ID. Use the first nonempty name from the parent session, current Herdr pane, or project directory, followed by ` · копия N`. Reserve each number durably in the exact parent session before launch, including continuation attempts. Inherited counters do not belong to a new-ID copy. Keep the same name in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
+
 ## Durable lifecycle
 
 Replication is fire-and-forget. The caller gets an acknowledgement and later automatic delivery that starts a turn. Parents do not poll. Autonomous copies retain the bounded crash and stale-recovery policy.

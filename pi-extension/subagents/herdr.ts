@@ -196,6 +196,17 @@ function getHerdrCurrentPaneInfo(run = herdrExec): {
 	return { pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id };
 }
 
+/** Read the current pane's manual name; unavailable metadata must not block a launch. */
+export function getHerdrCurrentPaneTitle(run = herdrExec): string | undefined {
+	try {
+		const parsed = parseHerdrJson(run(buildCurrentPaneArgs())) as { result?: { pane?: { title?: unknown; label?: unknown } } } | null;
+		const pane = parsed?.result?.pane;
+		return [pane?.title, pane?.label].find((value): value is string => typeof value === "string" && !!value.trim());
+	} catch {
+		return undefined;
+	}
+}
+
 function buildTabCreateArgs(
 	name: string,
 	cwd: string,

@@ -6,8 +6,50 @@ import { it } from "node:test";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { seedReplicationSessionFile } from "../pi-extension/subagents/session.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
-import { materializeReplicationHistory, registerReplicateTool } from "../pi-extension/subagents/replication.ts";
+import { materializeReplicationHistory, registerReplicateTool, reserveReplicationName } from "../pi-extension/subagents/replication.ts";
+import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
 
+it("reads the current pane name without falling back to another pane", () => {
+	assert.equal(getHerdrCurrentPaneTitle((args) => {
+		assert.deepEqual(args, ["pane", "current", "--current"]);
+		return JSON.stringify({ result: { pane: { title: "Проверка панели" } } });
+	}), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => JSON.stringify({ result: { pane: { label: "Проверка панели" } } })), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => "{}"), undefined);
+	assert.equal(getHerdrCurrentPaneTitle(() => { throw new Error("Herdr unavailable"); }), undefined);
+});
+
+it("names copies from the session, then pane, then project", () => {
+	const entries: any[] = [];
+	let sessionName: string | undefined = "  Настройки  ";
+	const pi = { getSessionName: () => sessionName, appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }) };
+	const ctx = { cwd: "/work/settings", sessionManager: { getSessionId: () => "parent", getEntries: () => entries } };
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => { throw new Error("session has priority"); }), "Настройки · копия 1");
+	sessionName = " \n ";
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => "Проверка\nпанели"), "Проверка панели · копия 2");
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => undefined), "settings · копия 3");
+});
+
+it("keeps copy numbers through reload and ignores inherited parent counters", () => {
+	const entries: any[] = [{ type: "custom", customType: "replica_name", data: { sessionId: "original", number: 9 } }];
+	const pi = { getSessionName: () => "Настройки · копия 1", appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }) };
+	const context = () => ({ cwd: "/work/settings", sessionManager: { getSessionId: () => "child", getEntries: () => [...entries] } });
+	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · копия 1 · копия 1");
+	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · копия 1 · копия 2");
+});
+
+it("saves the copy name without changing inherited session entries", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-name-"));
+	try {
+		const child = join(dir, "child.jsonl");
+		const branch = [{ type: "session_info", id: "parent-name", name: "Настройки" }];
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: [], name: "Настройки · копия 1" });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(rows.filter((row) => row.type === "session_info").map((row) => row.name), ["Настройки", "Настройки · копия 1"]);
+		assert.equal(rows.at(-1).parentId, "parent-name");
+		assert.equal(branch[0].name, "Настройки");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
 function toolSurface() {
 	let definition: any;
 	const handlers = new Map<string, Function>();

@@ -36,8 +36,9 @@ import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } fro
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
-import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
+import { registerReplicateTool, reserveReplicationName, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
 import { snapshotSource } from "./source-state.ts";
+import { getHerdrCurrentPaneTitle } from "./herdr.ts";
 import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, checkpointReplicaCompletion, joinReplicaWork, cleanupReplicaWork, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
 
@@ -3055,7 +3056,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			resumeSessionId: undefined as string | undefined,
 		};
 		bindSessionRuntime(pi, ctx);
-		const id = Math.random().toString(16).slice(2, 10), name = `replica-${id}`;
+		const id = Math.random().toString(16).slice(2, 10);
+		const name = reserveReplicationName(pi, ctx, getHerdrCurrentPaneTitle);
 		const recordFile = replicaWorkFile(sessionBindingStore(file), id);
 		let reservedFile: string | undefined;
 		try {
