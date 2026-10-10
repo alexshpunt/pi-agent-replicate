@@ -4,7 +4,7 @@
 
 ## Create and launch
 
-The model-facing `replicate` tool copies the current session in the same checkout. This separate API still supports named roles, bare children and managed worktrees. Its ownership and runtime contracts are unchanged.
+The model-facing `replicate` tool uses source-snapshot worktrees and host-owned joins. This separate API still supports named roles, bare children and managed worktrees. Its ownership and runtime contracts are unchanged.
 
 ```ts
 import {
@@ -37,7 +37,7 @@ const grandchild = await handle.launchChild({
 
 The package owns `callerId`, `treeId`, `ownerId`, node IDs, parent IDs, and the opaque `ownershipToken`. Consumer metadata is JSON-compatible and limited to 64 KiB of serialized UTF-8 bytes. Returned metadata, results, and the `children` map are read-only. Child result metadata carries those immutable identities plus the consumer value.
 
-Launching accepts the same `cwd` and `worktree` options as the model-facing tool and reuses the managed-worktree contract described in [Worktree subagents](worktree-subagents.md). Results carry a `SubagentWorktree` with the created path, branch, base, and observed Git state. The package keeps every worktree workspace, including after failures; the caller owns review, integration, and cleanup.
+Launching accepts explicit `cwd` and `worktree` options and reuses the managed-worktree contract described in [Worktree subagents](worktree-subagents.md). Results carry a `SubagentWorktree` with the created path, branch, base, and observed Git state. The package keeps every worktree workspace, including after failures; the caller owns review, integration, and cleanup.
 
 ## Reattach and fork
 

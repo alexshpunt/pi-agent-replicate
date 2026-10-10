@@ -53,7 +53,7 @@ export function seedSubagentSessionFile(params) {
 }
 /** Fork the captured active branch and settle inherited calls without running them again. */
 export function seedReplicationSessionFile(params) {
-    const header = { type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
+    const header = { type: "session", version: 3, id: params.resumeSessionId ?? randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
     const rows = [header];
     const pending = new Map();
     let parentId = null;

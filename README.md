@@ -2,7 +2,7 @@
 
 An experimental session-replication extension for [Pi](https://github.com/earendil-works/pi) in [Herdr](https://herdr.dev).
 
-An agent can copy its current session into one dedicated pane in the same checkout and give the copy a bounded task. The tool returns immediately. The copy's final summary or failure comes back to its exact original automatically.
+An agent can copy its current session and working source into an isolated worktree and give the copy a bounded task. The tool returns immediately. The copy's final summary or failure comes back to its exact original automatically.
 
 ## Install
 
@@ -22,7 +22,16 @@ replicate({ task: "Map the authentication flow. Return the relevant files and ri
 
 Each call starts one copy of the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. Clone identity, the original session reference and the assignment are sent as a normal task message, not added to the system prompt.
 
-`task` is the only parameter. There are no role, model, cwd, worktree or batch options. Copies share the same checkout and uncommitted files. Parallelize independent work; keep overlapping edits sequential.
+A fresh call needs only `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
+
+Results carry an owned continuation ID. To continue the latest saved source and conversation:
+
+```typescript
+replicate({ continuation: "saved-id", mode: "resume", task: "Continue with this new information." });
+replicate({ continuation: "saved-id", mode: "fork", task: "Try an independent continuation." });
+```
+
+`resume` preserves the saved session identity; `fork` creates a new one. Both use fresh per-attempt artifacts and an isolated worktree. Only the immediate parent can address its continuation. Active attempts cannot be continued concurrently. Removed successful worktrees can be rebuilt from their saved checkpoints. Arbitrary historical checkpoint selection is not supported.
 
 A copy can call `replicate` for an independent part of its assignment. It must wait for its own copies and return a nonempty final summary. The runtime delivers that summary and closes its pane after descendants drain. Copies do not get `caller_ping` or `subagent_done`.
 
@@ -100,7 +109,7 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 Results include the saved session and immutable Markdown result-file paths. Terminal model failures report error facts and a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
-Autonomous copies are supervised for crashes and stale inactivity. Durable ownership restores pending delivery and ordinary-pane cleanup after restart. The retained API still supports interactive children; the stale watchdog never kills them.
+Autonomous copies are supervised for crashes and stale inactivity. Durable ownership restores pending results, join plans and cleanup after restart. The retained API still supports interactive children; the stale watchdog never kills them.
 
 The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
 
@@ -115,7 +124,13 @@ The retained API's non-replica children may receive lifecycle tools:
 
 ## Managed worktrees
 
-Managed worktrees remain opt-in through the package-root API and internal launcher. `replicate` never creates one.
+Replication always creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
+
+Task completion and integration are separate outcomes: `applied`, `conflict`, `blocked`, or `not-attempted`. Conflicts do not apply any of the child's files to the parent. Failed or empty-summary children never auto-join partial work. Their worktrees stay available, and the parent gets the continuation ID and checkpoint. Continuing unjoined work includes its outstanding changes; continuing already-applied work joins only new changes.
+
+Successful worktrees are removed only after durable integration and source/session checkpointing, with ownership, process-exit and unchanged-source checks. Unknown ownership or later edits keep the worktree. Saved sessions and GC-protected source refs remain recoverable. If the parent is closed, successful integration waits for its exact session to reopen; no replacement parent is opened automatically.
+
+The package-root API and retained internal role launcher have a separate opt-in worktree contract:
 
 - `cwd` selects the source repository.
 - `base` resolves to an exact commit and defaults to committed `HEAD`.
@@ -168,5 +183,14 @@ Run selected isolated real-Pi and Herdr cases from inside Herdr:
 ```bash
 npm run test:integration -- test/integration/replication.test.ts
 ```
+
+For a manual TUI check with a deterministic provider, set `PI_INTEGRATION_TUI_DIR` to a fresh ignored directory and `PI_INTEGRATION_IDE_ENTRY` to the current IDE source entry. Run only this case with the intended Pi binary on `PATH`:
+
+```bash
+node --experimental-strip-types test/integration/run-isolated.ts \
+  --test-name-pattern='renders an active isolated replica' test/integration/replication.test.ts
+```
+
+The case reloads Pi and records the loaded IDE in `runtime.json`. Use `pane.json` to attach a read-only observer to its private Herdr endpoint. Capture the active pane, then create `release-child` in the inspection directory. Capture the delivered result, then create `finish` so the runner can clean up. Both observation gates time out after five minutes. Do not use the user's persistent Herdr server.
 
 See [RELEASING.md](RELEASING.md) for release checks.

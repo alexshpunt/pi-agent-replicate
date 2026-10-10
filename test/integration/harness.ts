@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { writeBindingFile } from "../../pi-extension/subagents/session-binding.ts";
+import { listHerdrWorktrees } from "../../pi-extension/subagents/herdr.ts";
 import { TEST_MODEL as FIXTURE_MODEL, TEST_PROVIDER_URL } from "./fake-provider.ts";
 import {
   isTerminalAvailable,
@@ -151,6 +152,8 @@ export interface TestEnv {
   dir: string;
   /** Active mux backend for this test run */
   backend: MuxBackend;
+  /** This fixture owns the Git repository and all replication worktrees made from it. */
+  replication?: boolean;
   /** Dedicated workspace owned by this test environment. */
   workspaceId: string;
   /** All workspace incarnations owned by this test across server replacement. */
@@ -314,9 +317,18 @@ export function createTestEnv(backend: MuxBackend, options: { replication?: bool
     }
   }
 
+  if (options.replication) {
+    writeFileSync(join(dir, '.gitignore'), '.pi/agent/\n*.jsonl\n*.lineage.json\n');
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Integration test']);
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.invalid']);
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'Test source']);
+  }
   return {
     dir,
     backend,
+    replication: options.replication,
     workspaceId,
     workspaceIds: [workspaceId],
     previousWorkspaceId,
@@ -464,6 +476,17 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
         await waitForPaneAbsence(surface, { timeoutMs: CLEANUP_TIMEOUT, intervalMs: 50 });
       } catch {}
     }
+    if (env.replication) {
+      // Failed replicas deliberately retain workspaces. Dispose only trees linked
+      // to this test-owned repository, before closing its parent workspace.
+      const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: env.dir, encoding: "utf8" }).trim();
+      for (const work of listHerdrWorktrees(env.dir).filter((entry) => entry.isLinkedWorktree)) {
+        if (execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work.path, encoding: "utf8" }).trim() !== common) throw new Error("Test worktree ownership mismatch.");
+        if (work.workspaceId) execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
+        else execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
+        await waitForPathAbsence(work.path);
+      }
+    }
     for (const workspaceId of env.workspaceIds) await waitForWorkspaceTeardown(workspaceId);
     await waitForProcessCwdRelease(env.dir);
   } catch (error) {
@@ -540,10 +563,16 @@ export async function restartIsolatedHerdr(env: TestEnv): Promise<void> {
     await sleep(50);
   }
   if (response?.id !== id || response.error || !response.pid) throw new Error(response?.error ?? "Isolated restart timed out");
-  await waitForWorkspaceTeardown(env.workspaceId);
-  env.workspaceId = createTestWorkspace(env.dir);
-  env.workspaceIds.push(env.workspaceId);
-  bindTestWorkspace(env.workspaceId);
+  if (env.replication && workspaceExists(env.workspaceId)) {
+    // Herdr keeps the source workspace while it owns linked worktrees. Reuse
+    // this isolated fixture's restored source instead of deleting recovery work.
+    bindTestWorkspace(env.workspaceId);
+  } else {
+    await waitForWorkspaceTeardown(env.workspaceId);
+    env.workspaceId = createTestWorkspace(env.dir);
+    env.workspaceIds.push(env.workspaceId);
+    bindTestWorkspace(env.workspaceId);
+  }
   env.surfaces = [];
 }
 // ── Pi session management ──

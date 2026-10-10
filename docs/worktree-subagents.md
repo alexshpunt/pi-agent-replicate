@@ -1,6 +1,6 @@
 # Worktree subagents
 
-The retained package-root API and internal launcher support isolated Git worktrees. The model-facing `replicate` tool does not create worktrees; its copies share the caller's checkout.
+The retained package-root API and internal launcher support opt-in isolated Git worktrees. This document describes those retained paths only. The model-facing `replicate` tool instead always uses a source-snapshot worktree with automatic host-owned join and successful cleanup. See the README for that separate contract.
 
 For example, a tree consumer can launch:
 

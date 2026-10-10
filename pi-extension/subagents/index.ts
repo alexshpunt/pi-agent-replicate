@@ -3,7 +3,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { keyHint } from "@earendil-works/pi-coding-agent";
+import { keyHint, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import {
 	Box,
@@ -37,6 +37,8 @@ import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
 import { registerReplicateTool, replicationAssignment, materializeReplicationHistory, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { snapshotSource } from "./source-state.ts";
+import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, checkpointReplicaCompletion, joinReplicaWork, cleanupReplicaWork, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
@@ -626,6 +628,9 @@ interface PendingTerminalDelivery {
 interface RunningSubagent {
 	/** Current-session replica, not a named-role launch. */
 	replication?: boolean;
+	replicaWorkFile?: string;
+	/** Settled task waiting for its exact parent before integration. */
+	pendingReplicaResult?: ReplicaCompletion;
 	lineage?: LineageRegistration;
 	id: string;
 	name: string;
@@ -876,20 +881,44 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 		}
 	}
 }
-/** Publish a clone's terminal summary or error/history before ordinary-pane cleanup. */
+/** Save task facts and integration outcome before delivery and owned-resource cleanup. */
+function replicaRecordFor(running: RunningSubagent): string | undefined {
+  return running.replicaWorkFile ?? readSessionBinding(running.sessionFile)?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+}
 function finishReplicationResult(running: RunningSubagent, result: SubagentResult): void {
-  const failed = result.exitCode !== 0 || !!result.errorMessage || !!result.error;
-  const historyPath = failed ? materializeReplicationHistory(running.sessionFile, running.id, running.name) : undefined;
+  if (running.pendingTerminalDelivery) return;
+  const failed = result.exitCode !== 0 || !!result.errorMessage || !!result.error || !result.summary?.trim();
+  const recordFile = replicaRecordFor(running);
+  const savedWork = recordFile ? readReplicaWork(recordFile) : undefined;
+  const historyPath = failed ? savedWork?.completion?.historyPath ?? materializeReplicationHistory(existsSync(running.sessionFile) ? running.sessionFile : savedWork!.sessionCheckpoint!, running.id, running.name) : undefined;
   const errorMessage = result.errorMessage ?? result.error ?? "Replica failed.";
-  const summary = failed ? `Replica failed: ${errorMessage}\n\nTextual answer history: ${historyPath}` : result.summary;
-  queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
-    if (runtime.pi) sendSubagentResult(runtime.pi, summary ?? "", {
-      name: running.name, task: running.task, childId: running.id, sessionFile: running.sessionFile,
-      deliveryId: `terminal:${running.id}`, resultContent: summary,
-      exitCode: failed ? 1 : 0, elapsed: result.elapsed, replication: true,
+  let summary = failed ? `Replica failed: ${errorMessage}\n\nTextual answer history: ${historyPath}` : result.summary;
+  let work;
+  if (recordFile) {
+    const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+    work = checkpointReplicaCompletion(recordFile, location?.cwd ?? running.worktree!.path, running.sessionFile, {
+      name: running.name, task: running.task, summary: result.summary ?? "", exitCode: failed ? 1 : 0, elapsed: result.elapsed,
       ...(failed ? { errorMessage, historyPath } : {}),
     });
-  }, summary, failed ? "error" : undefined);
+    if (!failed && !exactParentSessionActive(running)) {
+      running.pendingReplicaResult = work.completion;
+      return;
+    }
+    if (!failed) work = joinReplicaWork(recordFile, runtime.latestCtx!.cwd);
+    summary += `\n\n${replicaWorkReport(work)}`;
+  }
+  running.pendingReplicaResult = undefined;
+  const finalSummary = summary;
+  const finalWork = work;
+  queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
+    if (runtime.pi) sendSubagentResult(runtime.pi, finalSummary ?? "", {
+      name: running.name, task: running.task, childId: running.id, sessionFile: finalWork?.sessionCheckpoint ?? running.sessionFile,
+      deliveryId: `terminal:${running.id}`, resultContent: finalSummary,
+      exitCode: failed ? 1 : 0, elapsed: result.elapsed, replication: true,
+      ...(failed ? { errorMessage, historyPath } : {}),
+      ...(finalWork ? { continuationId: finalWork.id, worktreePath: finalWork.worktree?.path, checkpoint: finalWork.checkpoint?.commit, integration: finalWork.integration } : {}),
+    });
+  }, finalSummary, failed ? "error" : "completed");
 }
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 function startRecoveredWatcher(running: RunningSubagent): void {
@@ -976,7 +1005,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
           ? { recoveryWorkspace: { id: node.workspaceId, cwd: node.cwd } }
           : {}),
         ...(node.worktree ? { worktree: node.worktree } : {}),
-        ...(node.replication ? { replication: true } : {}),
+        ...(node.replication ? { replication: true, replicaWorkFile: node.replicaWorkFile } : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
         // A drained node is finished: its result was delivered in an earlier
@@ -987,7 +1016,11 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
       refreshChildLocation(running);
       if (running.lineage) running.lineage.parentSessionFile = sessionFile;
       if (running.tabId) rememberPaneTab(running.surface, running.tabId);
-      if (cancellationPending) {
+      const recordFile = running.replication && replicaRecordFor(running);
+      const savedReplica = recordFile ? readReplicaWork(recordFile).completion : undefined;
+      if (savedReplica && !drained) {
+        finishReplicationResult(running, savedReplica);
+      } else if (cancellationPending) {
         void attemptPendingCancellation(running);
       } else if (node.terminal && !node.terminalDelivered) {
         queueTerminalDelivery(running, undefined, () => {
@@ -1601,8 +1634,10 @@ function prepareDurableDelivery(
 	status?: DeliveryStatus,
 ): { resultPath: string; payload: string; status: DeliveryStatus } {
 	const resolvedStatus = deliveryStatusFor(running, answer, status);
+	const replicaFile = running.replication && replicaRecordFor(running);
+	const savedSession = replicaFile ? readReplicaWork(replicaFile).sessionCheckpoint : undefined;
 	const handle = materializeResultFile({
-		sessionsDir: dirname(running.sessionFile),
+		sessionsDir: dirname(savedSession ?? running.sessionFile),
 		childSessionId: running.id,
 		deliveryId,
 		status: resolvedStatus,
@@ -1615,7 +1650,7 @@ function prepareDurableDelivery(
 		status: resolvedStatus,
 		agentName: running.name,
 		childSessionId: running.id,
-		childSessionFile: running.sessionFile,
+		childSessionFile: savedSession ?? running.sessionFile,
 		answer,
 		resultPath: handle.path,
 		deliveryId,
@@ -1647,9 +1682,19 @@ function observeSettledInterruptBoundary(running: RunningSubagent): void {
 }
 
 function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
-  if (running.worktree) return true;
+  if (running.worktree && !running.replication) return true;
   try {
-    finalizeSubagentSurface(running, "ready_for_review", false, true);
+    const workFile = running.replication && replicaRecordFor(running);
+    if (workFile) {
+      // A Teleport destination is a separate surface from the owned source tree.
+      if (running.worktree && running.surface !== running.worktree.paneId && childPaneOwned(running)) {
+        const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+        if (location && sessionLocationAlive(location)) return false;
+        closePane(running.surface);
+        return false; // Confirm disappearance on the next bounded cleanup attempt.
+      }
+      if (!runtime.latestCtx || !cleanupReplicaWork(workFile, runtime.latestCtx.cwd)) return false;
+    } else finalizeSubagentSurface(running, "ready_for_review", false, true);
     running.cleanupPending = false;
     if (running.lineage) {
       const ackId = `cleanup-done:${running.id}`;
@@ -1658,7 +1703,7 @@ function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
     return true;
   } catch (error) {
     const text = String(error);
-    if (text.includes("pane_not_found") || text.includes("not found")) {
+    if (!running.replication && (text.includes("pane_not_found") || text.includes("not found"))) {
       running.cleanupPending = false;
       if (running.lineage) {
         const ackId = `cleanup-done:${running.id}`;
@@ -1860,6 +1905,7 @@ function observeRunningSubagent(
 	);
 	observeSettledInterruptBoundary(running);
   if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
+	if (running.pendingReplicaResult && exactParentSessionActive(running)) finishReplicationResult(running, running.pendingReplicaResult);
 	attemptPendingTerminalDelivery(running);
 	if (running.cleanupPending) retryRetiredSubagentCleanup(running, observedAt);
 }
@@ -2929,6 +2975,9 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 		runtime.latestCtx = ctx;
 		runtime.handoffPending = false;
 		const binding = bindSessionRuntime(pi, ctx);
+		const workFile = binding?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+		const location = binding?.child && childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
+		if (workFile && location) captureReplicaWorkLocation(workFile, location);
 		if (binding?.child && !hasChildLifecycle(pi)) subagentLifecycle(pi, ctx);
 		restoreLineageRuntime(ctx);
 		void restorePendingLineageInboxes(ctx);
@@ -2989,7 +3038,7 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 /** Start the one-tool replication surface while retaining the legacy adapters internally. */
 export default function subagentsExtension(pi: ExtensionAPI) {
 	installSubagentRuntime(pi);
-	registerReplicateTool(pi, async (task, ctx) => {
+	registerReplicateTool(pi, async (params, ctx) => {
 		if (!isTerminalAvailable()) throw new Error("Replication requires Herdr.");
 		const file = ctx.sessionManager.getSessionFile();
 		if (!file || !ctx.model) throw new Error("Replication requires a persisted session and selected model.");
@@ -2998,22 +3047,51 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			contextMessages: JSON.parse(JSON.stringify(replicationContextMessages(ctx))),
 			systemPrompt: ctx.getSystemPrompt(),
 			extensionArgs: replicationExtensionArgs(process.argv, ctx.cwd),
+			resumeSessionId: undefined as string | undefined,
 		};
 		bindSessionRuntime(pi, ctx);
-		const id = Math.random().toString(16).slice(2, 10);
-		const name = `replica-${id}`;
-		const plan = resolveRuntimePlan({}, { provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel() as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
-		const child = await launchPiSubagent({
-			kind: "fresh", id, name, task: replicationAssignment(ctx.sessionManager.getSessionId(), file, task),
-			fork: true, replication: snapshot, runtimePlan: plan,
-			parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
-			behavior: { tools: pi.getActiveTools().join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
-		});
-		runningSubagents.set(id, child);
-		startWidgetRefresh();
-		startStatusRefresh(pi);
-		startRecoveredWatcher(child);
-		return { id, name, sessionFile: child.sessionFile };
+		const id = Math.random().toString(16).slice(2, 10), name = `replica-${id}`;
+		const recordFile = replicaWorkFile(sessionBindingStore(file), id);
+		let reservedFile: string | undefined;
+		try {
+			let source, joinBase: string | undefined;
+			let inherited = { systemPrompt: snapshot.systemPrompt, extensionArgs: snapshot.extensionArgs, provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel(), tools: pi.getActiveTools() };
+			if (params.continuation) {
+				const previous = reserveReplicaContinuation(replicaWorkFile(sessionBindingStore(file), params.continuation), ctx.sessionManager.getSessionId(), id);
+				reservedFile = replicaWorkFile(sessionBindingStore(file), previous.id);
+				if (!previous.runtime) throw new Error("Continuation has no saved runtime.");
+				const saved = SessionManager.open(previous.sessionCheckpoint!);
+				snapshot.entries = JSON.parse(JSON.stringify(saved.getBranch()));
+				snapshot.contextMessages = JSON.parse(JSON.stringify(replicationContextMessages({ ...ctx, sessionManager: saved })));
+				snapshot.systemPrompt = previous.runtime.systemPrompt;
+				snapshot.extensionArgs = previous.runtime.extensionArgs;
+				snapshot.resumeSessionId = params.mode === "resume" ? saved.getSessionId() : undefined;
+				inherited = { ...previous.runtime, thinking: previous.runtime.thinking as ThinkingLevel };
+				source = previous.checkpoint!;
+				joinBase = previous.integration.status === "applied" ? source.commit : previous.joinBase;
+				const parentSource = snapshotSource(ctx.cwd, join(recordFile + ".artifacts", "requester"));
+				if (parentSource.commonDir !== source.commonDir) throw new Error("Continuation belongs to another source repository.");
+			} else source = snapshotSource(ctx.cwd, join(recordFile + ".artifacts", "fork"));
+			createReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), source, joinBase);
+			saveReplicaRuntime(recordFile, inherited);
+			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
+			const child = await launchPiSubagent({
+				kind: "fresh", id, name, task: replicationAssignment(ctx.sessionManager.getSessionId(), file, params.task),
+				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
+				worktree: { branch: `pi-replica/${id}`, base: source.commit },
+				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
+				behavior: { tools: inherited.tools.join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
+			});
+			runningSubagents.set(id, child);
+			startWidgetRefresh();
+			startStatusRefresh(pi);
+			startRecoveredWatcher(child);
+			return { id, name, sessionFile: child.sessionFile, continuationId: id, worktreePath: child.worktree?.path };
+		} catch (error) {
+			if (existsSync(recordFile)) failReplicaLaunch(recordFile, error);
+			if (reservedFile) releaseReplicaContinuation(reservedFile, id);
+			throw error;
+		}
 	});
 }
 

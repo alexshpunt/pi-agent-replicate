@@ -208,17 +208,22 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 
 	if (names.has("replicate") && lastRole !== "tool" && /Call the replicate tool/i.test(user)) {
 		const task = quotedValue(user, "task");
-		if (task) return { toolCalls: [{ name: "replicate", arguments: { task } }] };
+		if (task) {
+			const continuation = quotedValue(user, "continuation"), mode = quotedValue(user, "mode");
+			return { toolCalls: [{ name: "replicate", arguments: { task, ...(continuation ? { continuation, mode } : {}) } }] };
+		}
 	}
 
+	if (lastRole === "tool" && user.startsWith("INTEGRATION_VISUAL_PARENT")) return { text: "REPLICATION_PARENT_WAITING" };
 	if (names.has("replication_probe") && user.includes("Your assignment:") && /Use replication_probe/.test(user) && lastRole !== "tool") {
 		return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
 	}
-	const replicaOwner = (request.messages ?? []).some((message) => message.role === "user" && messageText(message.content).includes("Your assignment:\nREPLICATION_NESTED_OWNER"));
+	const latestAssignment = [...(request.messages ?? [])].reverse().find((message) => message.role === "user" && messageText(message.content).includes("Your assignment:\n"));
+	const replicaOwner = !!latestAssignment && messageText(latestAssignment.content).includes("Your assignment:\nREPLICATION_NESTED_OWNER");
 	if (replicaOwner && !/Call the teleport tool/i.test(user)) {
 		if (user.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && lastRole !== "tool") {
 			const gate = user.match(/INTEGRATION_DESCENDANT_GATE:\s*(\S+)/)?.[1];
-			if (gate) return { toolCalls: [{ name: "replicate", arguments: { task: `INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
+			if (gate) return { toolCalls: [{ name: "replicate", arguments: { task: `Use replication_probe INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
 		}
 		if (/Replica .* completed\./.test(user) && /REPLICATION_GRANDCHILD/.test(user)) return { text: "REPLICATION_NESTED_SUMMARY" };
 		if (lastRole === "tool") return { text: "REPLICATION_OWNER_WAITING" };
@@ -346,7 +351,8 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		return { text: "OWNER_WAITING" };
 	}
 
-		return { text: markerText(source) ?? "completed" };
+		const marker = markerText(source);
+		return marker === "EMPTY_COMPLETION" ? { emptyCompletion: true } : { text: marker ?? "completed" };
 	}
 
 

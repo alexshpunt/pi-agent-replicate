@@ -209,6 +209,8 @@ export function reduceLineage(rootDir) {
                 node.autoExit = event.autoExit;
             if (typeof event.replication === "boolean")
                 node.replication = event.replication;
+            if (typeof event.replicaWorkFile === "string")
+                node.replicaWorkFile = event.replicaWorkFile;
             if (typeof event.workspaceId === "string")
                 node.workspaceId = event.workspaceId;
             if (typeof event.cwd === "string")
@@ -420,7 +422,8 @@ function readMaterializationGate(path) {
         return undefined;
     }
 }
-function processIncarnationAlive(identity, observer) {
+/** Check a saved process identity without treating an unknown live incarnation as dead. */
+export function processIncarnationAlive(identity, observer) {
     if (!processAlive(identity.pid))
         return false;
     const observed = identity.pid === observer.pid ? observer : { pid: identity.pid, startTime: processStartTime(identity.pid) };
@@ -476,6 +479,19 @@ function releaseMaterializationGate(rootDir, token) {
             unlinkSync(path);
         }
         catch { }
+}
+/** Run one synchronous durable mutation under a process-owned filesystem gate. */
+export function withLineageMutationGate(rootDir, mutate) {
+    const owner = currentProcessIncarnation();
+    const gate = acquireMaterializationGate(rootDir, owner);
+    if (!gate)
+        throw new Error("Durable state has an active mutation.");
+    try {
+        return mutate(owner);
+    }
+    finally {
+        releaseMaterializationGate(rootDir, gate.token);
+    }
 }
 function readLineageInboxes(rootDir) {
     const result = [];

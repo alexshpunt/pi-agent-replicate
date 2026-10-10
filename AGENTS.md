@@ -2,15 +2,15 @@
 
 ## Purpose
 
-This package replicates current Pi sessions asynchronously in Herdr. Replication clones use dedicated panes in the same checkout. The retained internal launcher and package-root API also support isolated Herdr-managed Git worktrees.
+This package replicates current Pi sessions asynchronously in Herdr. Replication clones use isolated source-snapshot worktrees and dedicated panes. Their host attempts join after successful settlement; conflicts and failed work stay recoverable. The retained internal launcher and package-root API also support isolated Herdr-managed Git worktrees.
 
 Read `README.md`, `CONTEXT.md`, `docs/public-subagent-tree-api.md`, and `docs/worktree-subagents.md` before changing their contracts.
 
 ## Public surface
 
-Keep exactly one model-facing tool: `replicate({ task })`. Do not register the retained legacy tools or expose child completion/help tools to replication clones. Do not add user commands, bundled roles, review workflows, or orchestration skills.
+Keep exactly one model-facing tool: `replicate`. A normal task forks into an isolated worktree; owned continuation IDs can resume or fork the latest saved state. Do not register the retained legacy tools or expose child completion/help tools to replication clones. Do not add user commands, bundled roles, review workflows, or orchestration skills.
 
-Replication inherits the parent's runtime, system prompt and active conversation. Put clone identity and its bounded assignment in a normal task message, never in the system prompt. One invocation creates one clone in the same checkout. Require a final summary, then close the clone after durable settlement and descendant drain. Terminal model failures return error facts and a file of post-fork textual assistant answers, without tooling or hidden reasoning.
+Replication inherits the parent's runtime, system prompt and active conversation. Put clone identity and its bounded assignment in a normal task message, never in the system prompt. One invocation starts one isolated continuation. Keep task completion separate from integration outcome. Require a final summary, then close the clone after durable settlement and descendant drain. Terminal model failures return error facts and a file of post-fork textual assistant answers, without tooling or hidden reasoning.
 
 The retained internal and package-root launch paths still resolve custom role runtime values independently, then inherit the parent. Keep project, global, and installable role-pack discovery for those paths.
 
@@ -30,9 +30,9 @@ TypeScript modules under `pi-extension/subagents` that have JavaScript mirrors m
 
 ## Worktree rules
 
-Preserve the guarantees in `docs/worktree-subagents.md`: exact committed base, no parent dirty-file copy, manifest before Herdr creation, retained workspace, truthful Git inspection, and no automatic integration or cleanup.
+Preserve the retained API guarantees in `docs/worktree-subagents.md`: exact committed base, no parent dirty-file copy, manifest before Herdr creation, retained workspace, truthful Git inspection, and no automatic integration or cleanup. The model-facing replication path has its own snapshot/join contract.
 
-Replication clones share the caller's checkout and do not create worktrees. Keep overlapping edits sequential. Internal callers that opt into isolated writing still use unique worktree branches.
+Replication snapshots include tracked working files and nonignored untracked files, without changing the parent's HEAD or index. Only successful children attempt join; preserve parent work on conflict and retain failed worktrees. Clean successful worktrees only after durable integration, keeping session/checkpoint recovery. Serialize sibling joins. Internal callers that opt into isolated writing still use unique worktree branches.
 
 ## Documentation
 

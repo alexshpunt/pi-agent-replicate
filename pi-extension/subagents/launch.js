@@ -11,6 +11,8 @@ import { HerdrWorktreeCreateError } from "./herdr.js";
 import { captureSessionBaseline, seedStandaloneSessionFile, seedSubagentSessionFile, seedReplicationSessionFile, } from "./session.js";
 import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore } from "./session-binding.js";
+import { attachReplicaWork } from "./replica-work.js";
+import { sourceRepositoryAnchor } from "./source-state.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
     createPane: (name, workspace) => workspace
@@ -52,9 +54,6 @@ async function launchFreshPiSubagent(request, operations) {
     try {
         surface = prepareLaunchSurface(resolved, operations);
         const session = prepareChildSession(resolved, surface);
-        await confirmShellReady(session, operations, signal);
-        if (signal.aborted)
-            throw new Error("subagent launch aborted");
         const artifacts = prepareTaskArtifacts(resolved, session);
         seedSessionBinding(artifacts.sessionFile, {
             version: 1, storeDir,
@@ -73,6 +72,7 @@ async function launchFreshPiSubagent(request, operations) {
                     PI_SUBAGENT_SETTLED_EVENTS_FILE: artifacts.settledEventsFile,
                     ...(request.replication ? {
                         PI_SUBAGENT_REPLICATION: "1",
+                        ...(request.replication.recordFile ? { PI_SUBAGENT_REPLICA_WORK_FILE: request.replication.recordFile } : {}),
                         PI_SUBAGENT_REPLICATION_PROMPT_FILE: artifacts.replicationPromptFile,
                         PI_SUBAGENT_REPLICATION_EXTENSIONS: JSON.stringify(request.replication.extensionArgs),
                         PI_SUBAGENT_REPLICATION_ASSISTANTS: JSON.stringify(request.replication.entries.filter((entry) => entry.type === "message" && entry.message?.role === "assistant").map((entry) => entry.id)),
@@ -95,12 +95,16 @@ async function launchFreshPiSubagent(request, operations) {
                 startTime: resolved.startTime,
                 interactive: request.behavior.interactive,
                 autoExit: request.behavior.autoExit,
-                ...(request.replication ? { replication: true } : {}),
+                ...(request.replication ? { replication: true, replicaWorkFile: request.replication.recordFile } : {}),
                 cwd: artifacts.targetCwd,
                 ...(artifacts.worktree ? { worktree: artifacts.worktree } : {}),
                 ...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
             });
         }
+        // Publish recovery evidence before waiting on external shell startup.
+        await confirmShellReady(session, operations, signal);
+        if (signal.aborted)
+            throw new Error("subagent launch aborted");
         const command = buildPiCommand(resolved, artifacts);
         const launchScriptFile = startPiProcess(resolved, artifacts, command, operations);
         return createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline);
@@ -146,7 +150,7 @@ function resolveLaunchRequest(request) {
         agentDir,
         localAgentDir: localAgentDir && existsSync(localAgentDir) ? localAgentDir : null,
         sourceCwd,
-        artifactDir: join(request.parent.sessionDir, "artifacts", request.parent.sessionId),
+        artifactDir: request.replication?.recordFile ? join(request.replication.recordFile + ".artifacts", "launch") : join(request.parent.sessionDir, "artifacts", request.parent.sessionId),
         sessionMode,
         taskDelivery: sessionMode === "fork" ? "direct" : "artifact",
     };
@@ -184,7 +188,7 @@ function prepareLaunchSurface(resolved, operations) {
     });
     let created;
     try {
-        created = operations.createWorktree(request.name, resolved.sourceCwd, request.worktree.branch, baseSha);
+        created = operations.createWorktree(request.name, request.replication ? sourceRepositoryAnchor(resolved.sourceCwd) : resolved.sourceCwd, request.worktree.branch, baseSha);
     }
     catch (error) {
         writeWorktreeManifest(manifestFile, {
@@ -224,7 +228,10 @@ function prepareLaunchSurface(resolved, operations) {
     };
 }
 function prepareChildSession(resolved, surface) {
-    const sessionDir = getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
+    const sessionDir = resolved.request.replication?.recordFile
+        ? join(resolved.request.replication.recordFile + ".artifacts", "sessions")
+        : getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
+    mkdirSync(sessionDir, { recursive: true });
     const timestamp = timestampForFile();
     const uuid = [resolved.id, randomUUID(), randomUUID(), randomUUID()].join("-");
     const sessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
@@ -234,6 +241,8 @@ function prepareChildSession(resolved, surface) {
     if (surface.worktree) {
         surface.worktree.sessionFile = sessionFile;
         writeWorktreeManifest(surface.worktree.manifestFile, { sessionFile });
+        if (resolved.request.replication?.recordFile)
+            attachReplicaWork(resolved.request.replication.recordFile, surface.worktree, sessionFile);
     }
     const activityFile = getSubagentActivityFile(resolved.artifactDir, resolved.id);
     const settledEventsFile = getSubagentSettledEventsFile(resolved.artifactDir, resolved.id);
@@ -248,7 +257,7 @@ async function confirmShellReady(session, operations, signal) {
 function prepareTaskArtifacts(resolved, session) {
     const { request } = resolved;
     if (request.replication) {
-        seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages });
+        seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages, resumeSessionId: request.replication.resumeSessionId });
     }
     else if (resolved.sessionMode !== "standalone") {
         seedSubagentSessionFile({
@@ -320,8 +329,12 @@ function buildPiCommand(resolved, artifacts) {
         parts.push("--tools", shellQuote(toolAllowlist));
     parts.push(shellQuote(artifacts.taskArg));
     const env = [];
+    if (!request.replication)
+        env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
     if (request.replication) {
         env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile)}`);
+        if (request.replication.recordFile)
+            env.push(`PI_SUBAGENT_REPLICA_WORK_FILE=${shellQuote(request.replication.recordFile)}`);
     }
     for (const [key, value] of Object.entries(request.environment ?? {})) {
         if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
@@ -374,7 +387,7 @@ function startPiProcess(resolved, artifacts, command, operations) {
 function createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline) {
     return {
         lineage: resolved.lineage,
-        ...(resolved.request.replication ? { replication: true } : {}),
+        ...(resolved.request.replication ? { replication: true, replicaWorkFile: resolved.request.replication.recordFile } : {}),
         id: resolved.id,
         name: resolved.request.name,
         task: resolved.request.task,

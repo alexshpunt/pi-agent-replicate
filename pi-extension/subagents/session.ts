@@ -103,8 +103,9 @@ export function seedReplicationSessionFile(params: {
 	childCwd: string;
 	entries: readonly SessionEntry[];
 	contextMessages: readonly ReplicationContextMessage[];
+	resumeSessionId?: string;
 }): void {
-	const header = { type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
+	const header = { type: "session", version: 3, id: params.resumeSessionId ?? randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
 	const rows: any[] = [header];
 	const pending = new Map<string, string>();
 	let parentId: string | null = null;

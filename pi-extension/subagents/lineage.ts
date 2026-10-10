@@ -30,6 +30,8 @@ export interface LineageRegistration {
 export interface LineageNodeState {
   /** Preserve replica lifecycle when restoring a watcher. */
   replication?: boolean;
+  /** Work/checkpoint ownership must survive moved or deleted session files. */
+  replicaWorkFile?: string;
   nodeId: string;
   parentNodeId?: string;
   parentSessionId?: string;
@@ -273,6 +275,7 @@ export function reduceLineage(rootDir: string): LineageState {
       if (typeof event.interactive === "boolean") node.interactive = event.interactive;
       if (typeof event.autoExit === "boolean") node.autoExit = event.autoExit;
       if (typeof event.replication === "boolean") node.replication = event.replication;
+      if (typeof event.replicaWorkFile === "string") node.replicaWorkFile = event.replicaWorkFile;
       if (typeof event.workspaceId === "string") node.workspaceId = event.workspaceId;
       if (typeof event.cwd === "string") node.cwd = event.cwd;
       if (event.worktree && typeof event.worktree === "object" &&
@@ -508,7 +511,8 @@ function readMaterializationGate(path: string): MaterializationGateRecord | unde
   }
 }
 
-function processIncarnationAlive(identity: ProcessIncarnation, observer: ProcessIncarnation): boolean {
+/** Check a saved process identity without treating an unknown live incarnation as dead. */
+export function processIncarnationAlive(identity: ProcessIncarnation, observer: ProcessIncarnation): boolean {
   if (!processAlive(identity.pid)) return false;
   const observed = identity.pid === observer.pid ? observer : { pid: identity.pid, startTime: processStartTime(identity.pid) };
   // Portable filesystems/platforms may not expose an incarnation identity. Do
@@ -553,6 +557,13 @@ function releaseMaterializationGate(rootDir: string, token: string): void {
   if (current?.token === token) try { unlinkSync(path); } catch {}
 }
 
+/** Run one synchronous durable mutation under a process-owned filesystem gate. */
+export function withLineageMutationGate<T>(rootDir: string, mutate: (owner: ProcessIncarnation) => T): T {
+  const owner = currentProcessIncarnation();
+  const gate = acquireMaterializationGate(rootDir, owner);
+  if (!gate) throw new Error("Durable state has an active mutation.");
+  try { return mutate(owner); } finally { releaseMaterializationGate(rootDir, gate.token); }
+}
 function readLineageInboxes(rootDir: string): { record: LineageInboxRecord; materialized: boolean }[] {
   const result: { record: LineageInboxRecord; materialized: boolean }[] = [];
   const materialized = new Set<string>();

@@ -17,7 +17,7 @@ import {
 	type ResumePiLaunchRequest,
 } from "../pi-extension/subagents/launch.ts";
 
-import { registerLineage } from "../pi-extension/subagents/lineage.ts";
+import { registerLineage, reduceLineage } from "../pi-extension/subagents/lineage.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
 function fixture() {
@@ -145,6 +145,27 @@ describe("Pi launch", () => {
 		});
 	});
 
+	it("publishes recovery metadata before waiting on a newly allocated shell", async () => {
+		await withFixture(async ({ request, root }) => {
+			const lineage = registerLineage({ artifactDir: root, nodeId: request.id!, parentSessionId: "parent", launchKind: "fresh" });
+			let started = false, closed = false;
+			await assert.rejects(() => launchPiSubagent({ ...request, lineage }, {
+				createPane: () => "pending-shell",
+				createWorktree: () => { throw new Error("unexpected worktree"); },
+				async waitForShellReady() {
+					const node = reduceLineage(lineage.rootDir).nodes.get(request.id!)!;
+					assert.equal(node.surface, "pending-shell");
+					assert.ok(node.activityFile && node.settledEventsFile);
+					assert.equal(JSON.parse(readFileSync(node.sessionFile!, "utf8").split("\n")[0]).cwd, request.parent.cwd);
+					throw new Error("owned shell setup failed");
+				},
+				runScript: (_surface, _command, options) => { started = true; return options.scriptPath; },
+				closePane: () => { closed = true; },
+			}), /owned shell setup failed/);
+			assert.equal(started, false);
+			assert.equal(closed, true);
+		});
+	});
 	it("clears inherited auto-exit state for interactive children", async () => {
 		await withFixture(async ({ request }) => {
 			let command = "";
