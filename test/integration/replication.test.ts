@@ -155,7 +155,7 @@ for (const backend of getAvailableBackends()) {
 				const launch = launches().at(-1);
 				assert.equal(launch.message.isError, false, JSON.stringify(launch.message));
 				await waitUntil(() => results().length === number, "named result must reach the parent");
-				const expected = `Настройки · копия ${number}`;
+				const expected = `Настройки · copy ${number}`;
 				assert.equal(launch.message.details.name, expected);
 				assert.ok(launch.message.content.some((part: any) => part.text?.includes(expected)));
 				assert.ok(results().at(-1).content.includes(expected));
@@ -275,7 +275,7 @@ export default function(pi){
 			assert.notEqual(JSON.parse(readFileSync(join(inspection, "child-active.json"), "utf8")).cwd, env.dir);
 			await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate"), "copy launch must be saved");
 			const launch = entries(parentFile).find((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
-			assert.equal(launch.message.details.name, "Настройки · копия 1");
+			assert.equal(launch.message.details.name, "Настройки · copy 1");
 			assert.equal(entries(launch.message.details.sessionFile).filter((row) => row.type === "session_info").at(-1).name, launch.message.details.name);
 			const active = await waitForScreen(parent, /1 active/, 20_000);
 			writeFileSync(join(inspection, "active.txt"), active);
@@ -286,7 +286,7 @@ export default function(pi){
 			const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
 			assert.equal(results.length, 1);
 			assert.match(results[0].content, /REPLICATION_SUMMARY/);
-			assert.match(results[0].content, /Настройки · копия 1/);
+			assert.match(results[0].content, /Настройки · copy 1/);
 			assert.equal(results[0].details.integration.status, "applied");
 			assert.equal(readFileSync(join(env.dir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
 			const delivered = await waitForScreen(parent, /REPLICATION_SUMMARY/, 20_000);
@@ -320,8 +320,8 @@ export default function(pi){
 			assert.ok(existsSync(deliveries[0].details.resultPath));
 			const childFile = deliveries[0].details.sessionFile;
 			const started = entries(parentFile).find((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
-			assert.equal(started.message.details.name, "replication-original · копия 1", "an unnamed session uses its current pane name");
-			assert.match(deliveries[0].content, /replication-original · копия 1/);
+			assert.equal(started.message.details.name, "replication-original · copy 1", "an unnamed session uses its current pane name");
+			assert.match(deliveries[0].content, /replication-original · copy 1/);
 			const binding = readSessionBinding(childFile);
 			assert.ok(binding?.child);
 			assert.notEqual(entries(childFile)[0].cwd, env.dir, "the clone must own a separate worktree");

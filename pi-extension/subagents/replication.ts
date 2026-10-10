@@ -89,7 +89,7 @@ export function reserveReplicationName(pi: ExtensionAPI, ctx: ExtensionContext, 
 	}
 	number++;
 	pi.appendEntry("replica_name", { sessionId, number });
-	return `${base} · копия ${number}`;
+	return `${base} · copy ${number}`;
 }
 
 /** Plain startup data captured before asynchronous launch work can observe another turn. */

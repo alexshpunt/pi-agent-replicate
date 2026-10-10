@@ -24,18 +24,18 @@ it("names copies from the session, then pane, then project", () => {
 	let sessionName: string | undefined = "  Настройки  ";
 	const pi = { getSessionName: () => sessionName, appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }) };
 	const ctx = { cwd: "/work/settings", sessionManager: { getSessionId: () => "parent", getEntries: () => entries } };
-	assert.equal(reserveReplicationName(pi as any, ctx as any, () => { throw new Error("session has priority"); }), "Настройки · копия 1");
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => { throw new Error("session has priority"); }), "Настройки · copy 1");
 	sessionName = " \n ";
-	assert.equal(reserveReplicationName(pi as any, ctx as any, () => "Проверка\nпанели"), "Проверка панели · копия 2");
-	assert.equal(reserveReplicationName(pi as any, ctx as any, () => undefined), "settings · копия 3");
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => "Проверка\nпанели"), "Проверка панели · copy 2");
+	assert.equal(reserveReplicationName(pi as any, ctx as any, () => undefined), "settings · copy 3");
 });
 
 it("keeps copy numbers through reload and ignores inherited parent counters", () => {
 	const entries: any[] = [{ type: "custom", customType: "replica_name", data: { sessionId: "original", number: 9 } }];
-	const pi = { getSessionName: () => "Настройки · копия 1", appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }) };
+	const pi = { getSessionName: () => "Настройки · copy 1", appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }) };
 	const context = () => ({ cwd: "/work/settings", sessionManager: { getSessionId: () => "child", getEntries: () => [...entries] } });
-	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · копия 1 · копия 1");
-	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · копия 1 · копия 2");
+	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · copy 1 · copy 1");
+	assert.equal(reserveReplicationName(pi as any, context() as any, () => undefined), "Настройки · copy 1 · copy 2");
 });
 
 it("saves the copy name without changing inherited session entries", () => {
@@ -43,9 +43,9 @@ it("saves the copy name without changing inherited session entries", () => {
 	try {
 		const child = join(dir, "child.jsonl");
 		const branch = [{ type: "session_info", id: "parent-name", name: "Настройки" }];
-		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: [], name: "Настройки · копия 1" });
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: [], name: "Настройки · copy 1" });
 		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-		assert.deepEqual(rows.filter((row) => row.type === "session_info").map((row) => row.name), ["Настройки", "Настройки · копия 1"]);
+		assert.deepEqual(rows.filter((row) => row.type === "session_info").map((row) => row.name), ["Настройки", "Настройки · copy 1"]);
 		assert.equal(rows.at(-1).parentId, "parent-name");
 		assert.equal(branch[0].name, "Настройки");
 	} finally { rmSync(dir, { recursive: true, force: true }); }
