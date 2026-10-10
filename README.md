@@ -17,14 +17,16 @@ Start Pi inside Herdr, then restart Pi or run `/reload`.
 The extension registers exactly one tool and no user commands:
 
 ```typescript
-replicate({ task: "Check authentication risks while I implement the settings change. Return concrete findings with file references." });
+replicate({ name: "check-auth-risks", task: "Check authentication risks while I implement the settings change. Return concrete findings with file references." });
 ```
 
 Use it only from a task-ready state: the agent is already in the intended working location, understands its task, and has identified independent parts that can run in parallel. Before calling, it must know the copy's assignment, the expected result, and the separate work it will continue itself.
 
 This is parallel work by one agent, not a tool for handing off a task. Do not replicate while still deciding the task, its scope, or where to work. If the next step would be waiting for the copy, do the work yourself. After finishing real parallel work, the original may end its turn and wait for automatic delivery. Do not poll.
 
-The initial schema contains only `task`. A saved result reveals its copy ID and adds `continuation` and `mode` to the same tool. Reload restores those choices only in the session that received the result; a new-ID copy does not inherit them. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
+The initial schema requires `name` and `task`. A saved result reveals its copy ID and adds `continuation` and `mode` to the same tool. Reload restores those choices only in the session that received the result; a new-ID copy does not inherit them. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
+
+The caller must choose a task-specific `name` in lowercase kebab-case, such as `check-auth-risks`. The runtime adds the origin: `check-auth-risks ← Settings`. The origin comes from the parent's session name, then its current Herdr pane name, then the project directory name. The same combined title appears in the copy's session, Herdr workspace and pane, active status, and result. There is no automatic numbering. Internal IDs remain separate.
 
 ## Replication runtime
 
@@ -32,13 +34,13 @@ The following details describe the implementation, not instructions added to the
 
 Each call copies the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. The bounded assignment and summary requirement are sent as a normal task message, without changing the system prompt.
 
-A fresh call needs only `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
+A fresh call requires `name` and `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
 
 After a saved result discloses an owned continuation ID, the same tool can continue the latest saved source and conversation:
 
 ```typescript
-replicate({ continuation: "saved-id", mode: "resume", task: "Continue with this new information." });
-replicate({ continuation: "saved-id", mode: "fork", task: "Try an independent continuation." });
+replicate({ name: "continue-auth-check", continuation: "saved-id", mode: "resume", task: "Continue with this new information." });
+replicate({ name: "try-auth-alternative", continuation: "saved-id", mode: "fork", task: "Try an independent continuation." });
 ```
 
 `resume` preserves the saved session identity; `fork` creates a new one. Both use fresh per-attempt artifacts and an isolated worktree. Only the immediate parent can address its continuation. Active attempts cannot be continued concurrently. Removed successful worktrees can be rebuilt from their saved checkpoints. Arbitrary historical checkpoint selection is not supported.

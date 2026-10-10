@@ -6,43 +6,106 @@ import { it } from "node:test";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { seedReplicationSessionFile } from "../pi-extension/subagents/session.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
-import { materializeReplicationHistory, registerReplicateTool } from "../pi-extension/subagents/replication.ts";
+import { materializeReplicationHistory, registerReplicateTool, replicationName } from "../pi-extension/subagents/replication.ts";
+import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
 
+it("reads the current pane name without falling back to another pane", () => {
+	assert.equal(getHerdrCurrentPaneTitle((args) => {
+		assert.deepEqual(args, ["pane", "current", "--current"]);
+		return JSON.stringify({ result: { pane: { title: "Проверка панели" } } });
+	}), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => JSON.stringify({ result: { pane: { label: "Проверка панели" } } })), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => "{}"), undefined);
+	assert.equal(getHerdrCurrentPaneTitle(() => { throw new Error("Herdr unavailable"); }), undefined);
+});
+
+it("adds the origin from the session, then pane, then project", () => {
+	let sessionName: string | undefined = "  Настройки  ";
+	const pi = { getSessionName: () => sessionName };
+	const ctx = { cwd: "/work/settings" };
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => { throw new Error("session has priority"); }), "check-tests ← Настройки");
+	sessionName = " \n ";
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => "Проверка\nпанели"), "check-tests ← Проверка панели");
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => undefined), "check-tests ← settings");
+});
+
+it("keeps the supplied task name without automatic numbering", () => {
+	const pi = { getSessionName: () => "check-owner ← Settings" };
+	const ctx = { cwd: "/work/settings" };
+	for (const name of ["check-tests", "check-tests", "check-types"]) {
+		assert.equal(replicationName(name, pi as any, ctx as any, () => undefined), `${name} ← check-owner ← Settings`);
+	}
+});
+
+it("saves the copy name without changing inherited session entries", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-name-"));
+	try {
+		const child = join(dir, "child.jsonl");
+		const branch = [{ type: "session_info", id: "parent-name", name: "Настройки" }];
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: [], name: "check-tests ← Настройки" });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(rows.filter((row) => row.type === "session_info").map((row) => row.name), ["Настройки", "check-tests ← Настройки"]);
+		assert.equal(rows.at(-1).parentId, "parent-name");
+		assert.equal(branch[0].name, "Настройки");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
 function toolSurface() {
 	let definition: any;
 	const handlers = new Map<string, Function>();
 	const pi = { registerTool: (tool: any) => { definition = tool; }, on: (event: string, handler: Function) => { handlers.set(event, handler); } };
-	const controls = registerReplicateTool(pi as any, async () => ({ id: "copy", name: "copy", sessionFile: "/saved" })) as any;
-	const context = (id: string, branch: any[] = []) => ({ sessionManager: { getSessionId: () => id, getBranch: () => branch } });
-	return { controls, handlers, context, definition: () => definition };
+	const launches: any[] = [];
+	const controls = registerReplicateTool(pi as any, async (params) => {
+		launches.push(params);
+		return { id: "copy", name: params.name, sessionFile: "/saved" };
+	});
+	const context = (id: string, branch: any[] = []): any => ({ sessionManager: { getSessionId: () => id, getBranch: () => branch } });
+	return { controls, handlers, context, launches, definition: () => definition };
 }
 
-it("starts with only task and reveals recovery for the current receiver", () => {
+it("requires a task name and reveals recovery for the current receiver", () => {
 	const surface = toolSurface();
 	surface.handlers.get("session_start")?.({}, surface.context("original"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["task"]);
+	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
+	assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
 	surface.controls.reveal(surface.context("original"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["task", "continuation", "mode"]);
+	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task", "continuation", "mode"]);
 	assert.equal(surface.definition().name, "replicate");
+	assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
 });
 
 it("restores recovery from its own delivered result, not copied session history", () => {
 	const surface = toolSurface();
 	const branch = [{ type: "custom_message", customType: "subagent_result", details: { replication: true, recoveryAvailable: true, receiverSessionId: "original" } }];
 	surface.handlers.get("session_start")?.({}, surface.context("original", branch));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["task", "continuation", "mode"]);
+	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task", "continuation", "mode"]);
 	surface.handlers.get("session_start")?.({}, surface.context("fresh-copy", branch));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["task"]);
+	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
 	surface.handlers.get("session_start")?.({}, surface.context("unrelated"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["task"]);
+	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
 });
 
+it("rejects missing or non-kebab-case names before launching", async () => {
+	const surface = toolSurface(), ctx = surface.context("original");
+	for (const name of [undefined, "", "Check-tests", "check tests", "check_tests", "check--tests", "-check", "check-", "проверка", "check\nname", "check\n", "check\r\n"]) {
+		await assert.rejects(surface.definition().execute("call", { name, task: "review" }, undefined, undefined, ctx), /kebab-case name/);
+	}
+	assert.equal(surface.launches.length, 0);
+});
+
+it("passes valid caller names unchanged to launch", async () => {
+	const surface = toolSurface(), ctx = surface.context("original");
+	for (const name of ["review", "check-auth-risks", "check-types-2"]) {
+		const result = await surface.definition().execute("call", { name, task: "review" }, undefined, undefined, ctx);
+		assert.equal(surface.launches.at(-1).name, name);
+		assert.equal(result.details.name, name);
+	}
+});
 it("does not launch undisclosed recovery through direct execution", async () => {
 	const surface = toolSurface(), ctx = surface.context("original");
 	surface.handlers.get("session_start")?.({}, ctx);
-	await assert.rejects(surface.definition().execute("call", { task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx), /not available/);
+	await assert.rejects(surface.definition().execute("call", { name: "continue-check", task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx), /not available/);
 	surface.controls.reveal(ctx);
-	const result = await surface.definition().execute("call", { task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx);
+	const result = await surface.definition().execute("call", { name: "continue-check", task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx);
 	assert.equal(result.details.status, "running");
 });
 it("copies only the captured branch and settles inherited pending calls without executing them", () => {

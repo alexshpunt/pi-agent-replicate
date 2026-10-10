@@ -104,6 +104,8 @@ export function seedReplicationSessionFile(params: {
 	entries: readonly SessionEntry[];
 	contextMessages: readonly ReplicationContextMessage[];
 	resumeSessionId?: string;
+	/** Display name for this copy, separate from the inherited parent name. */
+	name?: string;
 }): void {
 	const header = { type: "session", version: 3, id: params.resumeSessionId ?? randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
 	const rows: any[] = [header];
@@ -132,6 +134,7 @@ export function seedReplicationSessionFile(params: {
 		parentId = id;
 	}
 	mkdirSync(dirname(params.childSessionFile), { recursive: true });
+	if (params.name) rows.push({ type: "session_info", id: randomBytes(4).toString("hex"), parentId, timestamp: new Date().toISOString(), name: params.name });
 	writeFileSync(params.childSessionFile, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
 }
 

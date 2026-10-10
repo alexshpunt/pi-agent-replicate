@@ -501,7 +501,7 @@ function prepareTaskArtifacts(
 ): PreparedArtifacts {
 	const { request } = resolved;
 	if (request.replication) {
-		seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages, resumeSessionId: request.replication.resumeSessionId });
+		seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages, resumeSessionId: request.replication.resumeSessionId, name: request.name });
 	} else if (resolved.sessionMode !== "standalone") {
 		seedSubagentSessionFile({
 			mode: resolved.sessionMode,

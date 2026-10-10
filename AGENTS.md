@@ -18,7 +18,7 @@ The extension is fire-and-forget. Never add polling guidance.
 
 Explain replicate as parallel work, not delegation. Callers must already understand the task and intended working location, identify independent parts, specify the expected result, and keep separate work for themselves. No immediate waiting instead of doing the work. Later waiting after useful parallel work is fine.
 
-Keep the initial tool schema task-only. Disclose continuation choices after a saved result, scoped to the exact receiving session. Keep host mechanics out of the tool description, prompt guidelines and routine replies. Do not test prompt wording; verify schema and execution behavior through real requests and results.
+Require `name` and `task` in the initial tool schema. The caller chooses a task-specific name in lowercase kebab-case; the runtime adds the parent origin to visible titles. Disclose continuation choices after a saved result, scoped to the exact receiving session. Keep host mechanics out of the tool description, prompt guidelines and routine replies. Do not test prompt wording; verify schema and execution behavior through real requests and results.
 
 ## Code map
 

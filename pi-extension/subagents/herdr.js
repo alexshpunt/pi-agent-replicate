@@ -140,6 +140,17 @@ function getHerdrCurrentPaneInfo(run = herdrExec) {
     }
     return { pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id };
 }
+/** Read the current pane's manual name; unavailable metadata must not block a launch. */
+export function getHerdrCurrentPaneTitle(run = herdrExec) {
+    try {
+        const parsed = parseHerdrJson(run(buildCurrentPaneArgs()));
+        const pane = parsed?.result?.pane;
+        return [pane?.title, pane?.label].find((value) => typeof value === "string" && !!value.trim());
+    }
+    catch {
+        return undefined;
+    }
+}
 function buildTabCreateArgs(name, cwd, workspaceId) {
     return [
         "tab",

@@ -213,7 +213,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		const task = quotedValue(user, "task");
 		if (task) {
 			const continuation = quotedValue(user, "continuation"), mode = quotedValue(user, "mode");
-			return { toolCalls: [{ name: "replicate", arguments: { task, ...(continuation ? { continuation, mode } : {}) } }] };
+			return { toolCalls: [{ name: "replicate", arguments: { name: quotedValue(user, "name") ?? "integration-copy", task, ...(continuation ? { continuation, mode } : {}) } }] };
 		}
 	}
 
@@ -226,7 +226,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	if (replicaOwner && !/Call the teleport tool/i.test(user)) {
 		if (user.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && lastRole !== "tool") {
 			const gate = user.match(/INTEGRATION_DESCENDANT_GATE:\s*(\S+)/)?.[1];
-			if (gate) return { toolCalls: [{ name: "replicate", arguments: { task: `Use replication_probe INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
+			if (gate) return { toolCalls: [{ name: "replicate", arguments: { name: "check-descendant", task: `Use replication_probe INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
 		}
 		if (/Replica .* completed\./.test(user) && /REPLICATION_GRANDCHILD/.test(user)) return { text: "REPLICATION_NESTED_SUMMARY" };
 		if (lastRole === "tool") return { text: "REPLICATION_OWNER_WAITING" };
