@@ -39,6 +39,7 @@ import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
 import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
 import { snapshotSource } from "./source-state.ts";
 import { runReplicaBackground } from "./replica-background.ts";
+import { reserveReplicaBranch } from "./replica-branch.ts";
 import { getHerdrCurrentPaneTitle } from "./herdr.ts";
 import { replicaWorkFile, createReplicaWork, readReplicaWork, reserveReplicaContinuation, releaseReplicaContinuation, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, replicaWorkReport, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
@@ -3138,7 +3139,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			const child = await launchPiSubagent({
 				kind: "fresh", id, name, task: replicationAssignment(params.task),
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
-				worktree: { branch: `pi-replica/${id}`, base: source.commit },
+				worktree: { branch: reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit },
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
 				behavior: { tools: inherited.tools.join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
 			});
