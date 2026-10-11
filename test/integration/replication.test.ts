@@ -265,14 +265,18 @@ for (const backend of getAvailableBackends()) {
 					runInPane(parent, "/reload");
 					await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
 				}
-				runInPane(parent, `Call the replicate tool once with name: "check-source-${number}", task: "Return exactly EMPTY_COMPLETION"`);
+				runInPane(parent, 'Call the replicate tool once with name: "check-source", task: "Return exactly EMPTY_COMPLETION"');
 				const launches = () => entries(parentFile).filter((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
 				await waitUntil(() => launches().length === number, "copy launch must be saved");
 				const launch = launches().at(-1);
 				assert.equal(launch.message.isError, false, JSON.stringify(launch.message));
 				await waitUntil(() => results().length === number, "named result must reach the parent");
-				const expected = `check-source-${number} ← Настройки`;
+				const expected = "check-source ← Настройки";
 				assert.equal(launch.message.details.name, expected);
+				const work = readReplicaWork(readSessionBinding(launch.message.details.sessionFile)!.child!.environment.PI_SUBAGENT_REPLICA_WORK_FILE);
+				const expectedBranch = `replica/nastroiki/check-source${number === 1 ? "" : "-2"}`;
+				assert.equal(work.worktree!.branch, expectedBranch);
+				assert.ok(work.worktree!.path.endsWith(expectedBranch.replaceAll("/", "-")), work.worktree!.path);
 				assert.ok(launch.message.content.some((part: any) => part.text?.includes(expected)));
 				assert.ok(results().at(-1).content.includes(expected));
 				assert.equal(entries(launch.message.details.sessionFile).filter((row) => row.type === "session_info").at(-1).name, expected);
