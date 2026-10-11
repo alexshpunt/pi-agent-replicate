@@ -230,6 +230,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 			if (gate) return { toolCalls: [{ name: "replicate", arguments: { name: "check-descendant", task: `Use replication_probe INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
 		}
 		if (/Replica .* completed\./.test(user) && /REPLICATION_GRANDCHILD/.test(user)) return { text: "REPLICATION_NESTED_SUMMARY" };
+		if (lastRole === "tool" && user.includes("INTEGRATION_INTERRUPT_OWNER")) return { holdQuiet: true };
 		if (lastRole === "tool") return { text: "REPLICATION_OWNER_WAITING" };
 	}
 	if (user.includes("Your assignment:") && /REPLICATION_FAIL_WITH_HISTORY/.test(user)) {
