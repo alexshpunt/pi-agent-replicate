@@ -419,6 +419,14 @@ for (const backend of backends) {
 
 
 		afterEach(async () => {
+			const artifacts = process.env.PI_INTEGRATION_DEBUG_ARTIFACT_DIR;
+			if (artifacts) {
+				mkdirSync(artifacts, { recursive: true });
+				const parents = readdirSync(env.dir).filter((file) => file.endsWith(".jsonl")).map((file) => ({ file, entries: readSessionEntries(join(env.dir, file)) }));
+				const files = [...new Set(parents.flatMap((parent) => parent.entries).map((entry) => entry.message?.details?.sessionFile).filter((file): file is string => typeof file === "string"))];
+				const children = files.map((file) => ({ file, entries: existsSync(file) ? readSessionEntries(file) : [] }));
+				writeFileSync(join(artifacts, `${env.dir.split("/").at(-1)}.json`), JSON.stringify({ parents, children, requests: getProviderRequests(), screens: env.surfaces.map((surface) => readPane(surface, 80)) }));
+			}
 			await cleanupTestEnv(env);
 			restoreBackend(prevMux);
 		});
@@ -1608,7 +1616,7 @@ for (const backend of backends) {
 			const sessionFile = join(env.dir, `resume-child-${id}.jsonl`);
 			const seedSurface = createTrackedSurface(env, `resume-seed-${id}`);
 			await waitForPaneReady(seedSurface);
-			startPi(seedSurface, env.dir, "BTW question: Say FIRST", {
+			startPi(seedSurface, env.dir, "Return exactly FIRST", {
 				extraArgs: `--print --session ${shellQuote(sessionFile)}`,
 			});
 			await waitForScreen(seedSurface, /FIRST/);
@@ -1669,23 +1677,23 @@ for (const backend of backends) {
 				{ extraArgs: `--session ${shellQuote(firstParentSession)}` },
 			);
 
-			await waitForParentEvidence(
-				firstParentSession,
-				/"customType":"subagent_result"/,
-				firstParent,
-				PI_TIMEOUT,
+			await waitForParentEvidence(firstParentSession, /"status":"started"/, firstParent, PI_TIMEOUT);
+			const launch = readSessionEntries(firstParentSession).find(
+				(entry) => entry.message?.role === "toolResult" && entry.message.toolName === "subagent",
 			);
-			const firstParentEntries = readSessionEntries(firstParentSession);
-			const firstResults = firstParentEntries.filter(
-				(entry) =>
-					entry.type === "custom_message" &&
-					entry.customType === "subagent_result",
-			);
-			assert.equal(firstResults.length, 1, "initial parent must receive one result");
+			assert.equal(launch?.message.isError, false, JSON.stringify(launch));
+			const childSession = await waitForChildSession(env.dir, launch.message.details.id);
+			const childPane = await waitForAgentPane(`ResumeSkilled-${id}`, env.workspaceId);
+			await waitForActivity(env.dir, (state) => state.runningChildId === launch.message.details.id && state.latestEvent === "agent_settled");
+			assert.match(readFileSync(childSession, "utf8"), new RegExp(initialReport));
+			assert.equal(customResultEntries(readSessionEntries(firstParentSession)).length, 0, "a persistent answer stays local until the child closes");
+			runInPane(childPane, "/quit");
+			await waitForAgentGone(childPane, env.workspaceId);
+			await waitForCustomResultCount(firstParentSession, 1);
+			const firstResults = customResultEntries(readSessionEntries(firstParentSession));
+			assert.equal(firstResults.length, 1, "closing publishes one terminal result before resume");
 			assert.match(String(firstResults[0]?.details?.resultContent), new RegExp(initialReport));
-			const childSession = firstResults[0]?.details?.sessionFile;
-			assert.equal(typeof childSession, "string", "initial result must identify child session");
-			if (typeof childSession !== "string") return;
+			assert.equal(firstResults[0]?.details?.sessionFile, childSession);
 
 			const initialChildRequests = getProviderRequests().filter(
 				(request) =>
@@ -1715,6 +1723,10 @@ for (const backend of backends) {
 				].join("\n"),
 				{ extraArgs: `--session ${shellQuote(secondParentSession)}` },
 			);
+			await waitForParentEvidence(secondParentSession, /"status":"started"/, secondParent, PI_TIMEOUT);
+			const resumedLaunch = readSessionEntries(secondParentSession).find((entry) => entry.message?.toolName === "subagent_resume");
+			await waitForActivity(env.dir, (state) => state.runningChildId === resumedLaunch.message.details.id && state.latestEvent === "agent_settled");
+			assert.equal(countText(readFileSync(childSession, "utf8"), "subagent_skill_initialization"), 1, "resume must reuse the persisted skill initialization");
 			await waitForFile(childSession, PI_TIMEOUT, new RegExp(resumedReport));
 			assert.equal(
 				readSessionEntries(firstParentSession).filter(

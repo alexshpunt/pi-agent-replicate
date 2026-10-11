@@ -436,6 +436,9 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   // Show widget + status bar on session start
   const start = (ctx: ExtensionContext) => {
     bindSessionRuntime(pi, ctx);
+    skillInitializationComplete = ctx.sessionManager.getBranch().some(
+      (entry) => entry.type === "custom_message" && entry.customType === "subagent_skill_initialization",
+    );
     recorder.sessionStart();
     toolNames = pi.getAllTools().map((tool) => tool.name).sort();
     denied = parseDeniedTools(deniedToolsValue);

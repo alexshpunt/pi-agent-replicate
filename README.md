@@ -98,6 +98,8 @@ Useful frontmatter fields:
 - `system-prompt`: `append` or `replace`
 - `disable-model-invocation`
 
+Requested skills are saved in the child's conversation once. Reloading or resuming that conversation reuses the saved skills instead of adding another initialization message.
+
 Definitions that request an external `cli` fail before Herdr creates resources.
 
 ### Role packs

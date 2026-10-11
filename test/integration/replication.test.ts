@@ -230,7 +230,7 @@ for (const backend of getAvailableBackends()) {
 			const parent = createTrackedSurface(env, "pane-name-is-not-the-session-name");
 			await waitForPaneReady(parent);
 			const ide = process.env.PI_INTEGRATION_IDE_ENTRY;
-			startPi(parent, env.dir, "", { extraArgs: `--session ${shellQuote(parentFile)} ${ide ? `-e ${shellQuote(ide)}` : ""} -e ${shellQuote(capability)}` });
+			startPi(parent, env.dir, "", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
 			await waitForScreen(parent, /Настройки/);
 			runInPane(parent, "Return exactly NAMING_READY");
 			try {
@@ -247,7 +247,7 @@ for (const backend of getAvailableBackends()) {
 				if (number === 2) {
 					await waitUntil(() => existsSync(settled) && readFileSync(settled, "utf8") === "1", "parent must finish handling the first result before reload");
 					runInPane(parent, "/reload");
-					await waitForScreen(parent, /Reloaded keybindings, extensions/, 10_000);
+					await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
 				}
 				runInPane(parent, `Call the replicate tool once with name: "check-source-${number}", task: "Return exactly EMPTY_COMPLETION"`);
 				const launches = () => entries(parentFile).filter((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
