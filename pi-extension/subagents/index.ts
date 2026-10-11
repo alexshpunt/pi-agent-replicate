@@ -3090,7 +3090,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			let source, joinBase: string | undefined;
 			let inherited = { systemPrompt: snapshot.systemPrompt, extensionArgs: snapshot.extensionArgs, provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel(), tools: pi.getActiveTools() };
 			if (params.continuation) {
-				const previous = reserveReplicaContinuation(replicaWorkFile(sessionBindingStore(file), params.continuation), ctx.sessionManager.getSessionId(), id);
+				let previous: ReturnType<typeof reserveReplicaContinuation>;
+				// A saved result can arrive while its owned pane cleanup still holds the gate.
+				const cleanupDeadline = Date.now() + 5_000;
+				for (;;) {
+					try {
+						previous = reserveReplicaContinuation(replicaWorkFile(sessionBindingStore(file), params.continuation), ctx.sessionManager.getSessionId(), id);
+						break;
+					} catch (error) {
+						if (!String(error).includes("Durable state has an active mutation.") || Date.now() >= cleanupDeadline) throw error;
+						await new Promise((resolve) => setTimeout(resolve, 100));
+					}
+				}
 				reservedFile = replicaWorkFile(sessionBindingStore(file), previous.id);
 				if (!previous.runtime) throw new Error("Continuation has no saved runtime.");
 				const saved = SessionManager.open(previous.sessionCheckpoint!);
