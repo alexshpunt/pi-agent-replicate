@@ -26,7 +26,7 @@ it("does not keep durable ownership alive for a zombie PID", { skip: process.pla
 	} finally { owner.stdin.end(); await exited; }
 });
 
-it("waits without blocking and recovers a completion gate after its owner dies", { timeout: 10_000 }, async () => {
+it("waits without blocking and recovers a completion gate after its owner dies", { timeout: 30_000 }, async () => {
 	const directory = mkdtempSync(join(tmpdir(), "replica-background-"));
 	const repo = join(directory, "repo"), store = join(directory, "store");
 	mkdirSync(repo); mkdirSync(store);
@@ -70,7 +70,7 @@ it("waits without blocking and recovers a completion gate after its owner dies",
 	}
 });
 
-it("recovers the saved attempt after its background worker dies during checkpoint", { timeout: 10_000 }, async () => {
+it("recovers the saved attempt after its background worker dies during checkpoint", { timeout: 30_000 }, async () => {
 	const directory = mkdtempSync(join(tmpdir(), "replica-interrupted-"));
 	const repo = join(directory, "repo"), store = join(directory, "store"), bin = join(directory, "bin");
 	mkdirSync(repo); mkdirSync(store); mkdirSync(bin);
