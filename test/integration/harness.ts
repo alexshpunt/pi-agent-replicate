@@ -481,9 +481,16 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
       // to this test-owned repository, before closing its parent workspace.
       const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: env.dir, encoding: "utf8" }).trim();
       for (const work of listHerdrWorktrees(env.dir).filter((entry) => entry.isLinkedWorktree)) {
-        if (execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work.path, encoding: "utf8" }).trim() !== common) throw new Error("Test worktree ownership mismatch.");
-        if (work.workspaceId) execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
-        else execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
+        // A successful replica may finish its own cleanup after this list was read.
+        if (!existsSync(work.path)) continue;
+        try {
+          if (execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work.path, encoding: "utf8" }).trim() !== common) throw new Error("Test worktree ownership mismatch.");
+          if (work.workspaceId) execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8", stdio: "pipe" });
+          else execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
+        } catch (error) {
+          const missingWorkspace = String((error as { stderr?: unknown }).stderr).includes('"code":"workspace_not_found"');
+          if (existsSync(work.path) && !missingWorkspace) throw error;
+        }
         await waitForPathAbsence(work.path);
       }
     }

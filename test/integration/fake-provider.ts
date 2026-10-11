@@ -336,7 +336,8 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 
 
 	// The parent's launch request contains the gate too; only its child waits.
-	if (!names.has("subagent") || !/Call the subagent tool/i.test(user)) await waitForIntegrationGate(user);
+	if (!names.has("subagent")) await waitForIntegrationGate(source);
+	else if (!/Call the subagent tool/i.test(user)) await waitForIntegrationGate(user);
 
 	const descendantOwner = source.includes("DESCENDANT_OWNER_FIXTURE");
 	if (

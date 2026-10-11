@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
+import { childSessionLocation, readSessionBinding, sessionLocationAlive, sessionOwnsPane, type SessionLocation } from "../../pi-extension/subagents/session-binding.ts";
 import {
 	getAvailableBackends,
 
@@ -341,6 +342,35 @@ async function waitForChildSession(
 	throw new Error(`Timeout waiting for session for child ${childId}`);
 }
 
+/** Wait for the saved session to identify the live Pi process, not a startup helper. */
+async function waitForChildIncarnation(sessionFile: string, paneId: string): Promise<SessionLocation> {
+	const deadline = Date.now() + PI_TIMEOUT;
+	while (Date.now() < deadline) {
+		const binding = readSessionBinding(sessionFile);
+		const location = binding?.child && childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
+		if (location && sessionLocationAlive(location)) {
+			const info = getPaneProcessInfo(paneId);
+			if (sessionOwnsPane(location, paneId, info.shellPid) && info.pids.includes(location.pid)) return location;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for live child incarnation: ${sessionFile}`);
+}
+
+/** Herdr must register an agent before its prompt command can address it. */
+async function waitForRegisteredAgent(paneId: string): Promise<void> {
+	const deadline = Date.now() + PI_TIMEOUT;
+	while (Date.now() < deadline) {
+		try {
+			execFileSync("herdr", ["agent", "get", paneId], { encoding: "utf8", stdio: "pipe" });
+			return;
+		} catch (error) {
+			if (!String((error as { stderr?: unknown }).stderr).includes('"code":"agent_not_found"')) throw error;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for Herdr agent registration: ${paneId}`);
+}
 function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
 	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
@@ -1400,14 +1430,11 @@ for (const backend of backends) {
 			});
 
 			const childPane = await waitForAgentPane(`Crash-${id}`, env.workspaceId);
-			const processDeadline = Date.now() + 5_000;
-			let childPids = getPaneProcessInfo(childPane).pids;
-			while (childPids.length < 2 && Date.now() < processDeadline) {
-				await sleep(50);
-				childPids = getPaneProcessInfo(childPane).pids;
-			}
-			assert.ok(childPids.length > 1, "crash fixture must observe the pane shell and Pi process");
-			process.kill(Math.max(...childPids), "SIGKILL");
+			await waitForParentEvidence(parentSession, /"status":"started"/, surface, PI_TIMEOUT);
+			const launch = readSessionEntries(parentSession).find(entry => entry.message?.toolName === "subagent" && entry.message.details?.status === "started");
+			const childSession = await waitForChildSession(env.dir, launch.message.details.id);
+			const location = await waitForChildIncarnation(childSession, childPane);
+			process.kill(location.pid, "SIGKILL");
 			await waitForCustomResultCount(parentSession, 1);
 
 			await waitForAgentGone(childPane, env.workspaceId);
@@ -2078,6 +2105,7 @@ for (const backend of backends) {
 
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			await waitForPaneTextCount(childPane, "SETTLED_ONE", 2);
+			await waitForRegisteredAgent(childPane);
 			assert.equal(readResults().length, 0, "an open child must not publish an intermediate result");
 
 			const secondPrompt = execFileSync(
