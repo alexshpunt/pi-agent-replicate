@@ -134,8 +134,8 @@ function treePaths(cwd: string, tree: string): Map<string, string> {
 	return result;
 }
 
-/** Apply a saved clean result, or recover interrupted file application, without touching staging. */
-export function applySourceJoin(plan: SourceJoinReady): void {
+/** Apply or recover owned files without touching staging; validate the receiver again before writing. */
+export function applySourceJoin(plan: SourceJoinReady, validateParent: () => void = () => {}): void {
 	const journal = JSON.parse(readFileSync(plan.journalFile, "utf8")) as JoinJournal;
 	if (journal.before.commit !== plan.before.commit || journal.mergedTree !== plan.mergedTree) throw new Error("Replica join journal does not match its plan.");
 	if (journal.state === "integrated") return;
@@ -152,9 +152,11 @@ export function applySourceJoin(plan: SourceJoinReady): void {
 	}
 	// Limit recovery to owned paths; unrelated work written after application must survive.
 	const patch = plan.paths.length ? git(current.repoDir, ["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", current.tree, plan.mergedTree, "--", ...plan.paths]) : "";
+	validateParent();
 	writeBindingFile(plan.journalFile, { ...plan, state: "applying" } satisfies JoinJournal);
 	if (patch) {
 		git(current.repoDir, ["-c", "apply.ignoreWhitespace=no", "apply", "--check", "--binary", "--whitespace=nowarn", "-"], undefined, patch);
+		validateParent();
 		git(current.repoDir, ["-c", "apply.ignoreWhitespace=no", "apply", "--binary", "--whitespace=nowarn", "-"], undefined, patch);
 	}
 	const verified = snapshotSource(current.repoDir, plan.storeDir);

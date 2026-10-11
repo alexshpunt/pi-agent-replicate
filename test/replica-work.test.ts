@@ -59,6 +59,23 @@ it("blocks a successful join into an unrelated repository without changing eithe
 		assert.ok(record.checkpoint && record.sessionCheckpoint);
 	} finally { child.cleanup(); parent.cleanup(); }
 });
+it("retains a prepared join when the parent moves before file application", () => {
+	const child = savedFailure();
+	try {
+		const file = join(child.store, "successful.json");
+		createReplicaWork(file, "successful", "owner", child.source);
+		checkpointReplicaCompletion(file, child.repo, child.session, { name: "successful", task: "work", summary: "done", exitCode: 0, elapsed: 1 });
+		writeFileSync(join(child.repo, "source.txt"), "base\n");
+		const head = child.git("rev-parse", "HEAD"), index = child.git("ls-files", "--stage");
+		const record = joinReplicaWork(file, child.repo, () => false);
+		assert.equal(record.integration.status, "blocked");
+		assert.match(record.integration.details!, /moved or closed/);
+		assert.equal(readFileSync(join(child.repo, "source.txt"), "utf8"), "base\n");
+		assert.equal(child.git("rev-parse", "HEAD"), head);
+		assert.equal(child.git("ls-files", "--stage"), index);
+		assert.ok(record.checkpoint && record.joinPlan);
+	} finally { child.cleanup(); }
+});
 it("serializes continuation reservations and releases with the same filesystem gate", () => {
 	const { file, cleanup } = savedFailure();
 	try {

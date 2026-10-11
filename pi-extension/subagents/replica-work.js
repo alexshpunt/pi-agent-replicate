@@ -134,8 +134,8 @@ export function checkpointReplicaCompletion(file, cwd, sessionFile, completion) 
     writeBindingFile(file, record);
     return record;
 }
-/** Attempt only successful work, persisting the plan before applying parent files. */
-export function joinReplicaWork(file, parentCwd) {
+/** Attempt successful work; the optional receiver check can refuse application after a session move. */
+export function joinReplicaWork(file, parentCwd, parentActive = () => true) {
     let record = readReplicaWork(file);
     if (!record.completion)
         throw new Error("Replica has no saved task result.");
@@ -162,7 +162,10 @@ export function joinReplicaWork(file, parentCwd) {
             record = { ...record, joinPlan: plan };
             writeBindingFile(file, record);
         }
-        applySourceJoin(record.joinPlan);
+        applySourceJoin(record.joinPlan, () => {
+            if (!parentActive())
+                throw new Error("The parent session moved or closed during integration; saved work was retained.");
+        });
         record = { ...record, integration: { status: "applied" } };
     }
     catch (error) {

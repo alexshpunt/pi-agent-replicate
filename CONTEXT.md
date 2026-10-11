@@ -4,7 +4,7 @@
 
 ## Shipped surface
 
-The experimental model-facing surface is exactly one tool: `replicate({ task })` initially. A saved result adds `continuation` and `mode` to that same tool for its receiving session. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
+The experimental model-facing surface is exactly one tool: `replicate({ name, task })` initially. A saved result adds `continuation` and `mode` to that same tool for its receiving session. One invocation creates one isolated continuation in a dedicated worktree and pane. It registers no user commands and ships no bundled roles, review workflows or orchestration skills.
 
 The old role-based tools remain implemented but unregistered. The internal launcher and package-root tree API remain available for callers that need custom roles, bare children or managed worktrees. Their contracts are separate from replication.
 
@@ -22,13 +22,13 @@ The bounded assignment, parallel-copy identity and required summary belong in a 
 
 Each clone gets a source snapshot with tracked working files and nonignored untracked files. The host uses a private index and protected checkpoint refs without changing parent HEAD or staging. Ignored files are not copied. Worktrees isolate files, not shared processes, ports or databases. A clone can replicate its own independent work. It remains responsible until its descendants drain, then returns a nonempty final summary. No help or explicit completion tool is registered for clones.
 
-The immediate parent's host saves completion, source and session evidence. Only successful children attempt a three-way join after their descendants drain. Sibling joins are serial. Task completion and integration are separate outcomes. A Git-clean join does not prove program correctness. Conflicts apply no child files; failures and empty summaries never auto-join partial work. Saved work remains available for manual resolution or continuation.
+The immediate parent's host saves completion, source and session evidence. Only successful children attempt a three-way join after their descendants drain. Sibling joins are serial, including across overlapping Pi incarnations. Costly replica checkpoint, join and cleanup work runs in a separate host process so it cannot block Pi's input or model loop. Durable ownership gates and existing journals recover interrupted work. Revalidate the original parent's location before file application and delivery. Task completion and integration are separate outcomes. A Git-clean join does not prove program correctness. Conflicts apply no child files; failures and empty summaries never auto-join partial work. Saved work remains available for manual resolution or continuation.
 
 Applied worktrees are cleaned only after durable integration and checkpointing, verified ownership and process exit. Later edits or uncertain ownership prevent removal. Sessions and source checkpoints remain reconstructable. Closed parents defer successful joins until their exact session reopens.
 
 Owned continuation IDs address the latest saved state only. `resume` keeps its session identity; `fork` starts an independent identity. Each attempt has distinct result artifacts. Neither can start on an active continuation, and unrelated parents cannot take ownership. Unjoined work carries its original join basis into recovery; applied work uses its last integrated checkpoint so old changes are not applied again. Terminal model failure is also terminal: report honest error facts and a file of every post-fork textual assistant answer. Exclude inherited answers, tool calls, tool results and hidden reasoning. Do not truncate the history. An empty required summary is a failure.
 
-Copy names should tell the user which parent they belong to, not show a random ID. Use the first nonempty name from the parent session, current Herdr pane, or project directory, followed by ` · copy N`. Reserve each number durably in the exact parent session before launch, including continuation attempts. Inherited counters do not belong to a new-ID copy. Keep the same name in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
+The caller must choose an explicit task-specific name in lowercase kebab-case for every invocation, including continuations. Reject missing or invalid names before launch. The runtime adds the immediate parent's origin as `task-name ← parent-name`, using the first nonempty parent session name, current Herdr pane name, or project directory name. Do not generate task names or copy numbers. Keep the same combined title in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
 
 ## Durable lifecycle
 

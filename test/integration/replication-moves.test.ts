@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
-import { childSessionLocation, parentSessionLocation, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
+import { childSessionLocation, parentSessionLocation, readSessionBinding, sessionLineageRoots, sessionOwnsPane } from "../../pi-extension/subagents/session-binding.ts";
 import { readReplicaWork } from "../../pi-extension/subagents/replica-work.ts";
+import { getHerdrPaneProcessInfo } from "../../pi-extension/subagents/herdr.ts";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
 import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, readPane, restartIsolatedHerdr, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForPiExit, waitForScreen, PI_TIMEOUT, type TestEnv } from "./harness.ts";
 
@@ -22,6 +24,86 @@ for (const backend of getAvailableBackends()) {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });
+		for (const handoff of ["move", "restart"]) {
+			it(`recovers held background checkpoint after parent ${handoff}`, { skip: handoff === "move" && !teleportSource }, async () => {
+				const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR!;
+				assert.ok(agentDir);
+				cpSync(join(env.dir, ".pi", "agent"), agentDir, { recursive: true });
+				if (handoff === "move") writeFileSync(join(agentDir, "extensions", "teleport-under-test.ts"), `export {default} from ${JSON.stringify(teleportSource)};\n`);
+				const state = join(env.dir, ".pi", "agent", "held-completion"), original = join(state, "original.jsonl");
+				mkdirSync(state); const bin = join(state, "bin"); mkdirSync(bin);
+				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release");
+				const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+				writeFileSync(join(bin, "git"), `#!/bin/bash\nif test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<600;i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(git)} "$@"\n`, { mode: 0o700 });
+				const capability = join(env.dir, "held-capability.ts");
+				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
+				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
+				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))}` : ""}` });
+				await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready");
+				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly HELD_SUMMARY"');
+				await waitUntil(() => existsSync(started), "the actual background checkpoint must be held");
+				assert.equal(results(original).length, 0);
+				const binding = readSessionBinding(original)!;
+				const copied = join(state, "foreign.jsonl"), rows = entries(original); rows[0].id = randomUUID();
+				writeFileSync(copied, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+				let receiverFile = original;
+				const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" });
+				const index = readFileSync(join(env.dir, ".git", "index"));
+				const openForeign = async () => {
+					const foreign = createTrackedSurface(env, "held-foreign"); await waitForPaneReady(foreign);
+					startPi(foreign, env.dir, "Return exactly FOREIGN_READY", { extraArgs: `--session ${shellQuote(copied)}` });
+					await waitForScreen(foreign, /FOREIGN_READY/);
+				};
+				if (handoff === "move") await openForeign();
+				try {
+					if (handoff === "move") {
+						const destination = join(env.dir, "held-destination"); mkdirSync(destination);
+						runInPane(parent, `Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"`);
+						try { await waitUntil(() => parentSessionLocation(binding.storeDir, binding.sessionId)?.cwd === destination && !existsSync(original), "Teleport must replace the original while checkpoint is held"); }
+						catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}\n${JSON.stringify(parentSessionLocation(binding.storeDir, binding.sessionId))}`); }
+						receiverFile = parentSessionLocation(binding.storeDir, binding.sessionId)!.sessionFile;
+					} else {
+						runInPane(parent, "/quit"); await waitForPiExit(parent); closePane(parent);
+						await restartIsolatedHerdr(env);
+						assert.equal(results(original).length, 0, "a closed original must not be reopened by the host");
+						await openForeign();
+						const receiver = createTrackedSurface(env, "held-reopened"); await waitForPaneReady(receiver);
+						startPi(receiver, env.dir, "Return exactly HELD_REOPENED", { extraArgs: `--session ${shellQuote(original)}` });
+					}
+				} finally { writeFileSync(release, "go"); }
+				try { await waitUntil(() => results(receiverFile).length === 1, "the original must receive its held completion after handoff"); }
+				catch (error) {
+					const location = parentSessionLocation(binding.storeDir, binding.sessionId);
+					const roots = sessionLineageRoots(binding.storeDir, binding.sessionId);
+					const node = roots.flatMap(root => [...reduceLineage(root).nodes.values()]).find(node => node.replication);
+					const work = node?.replicaWorkFile && existsSync(node.replicaWorkFile) ? readReplicaWork(node.replicaWorkFile) : undefined;
+					const gateFile = node?.replicaWorkFile && join(node.replicaWorkFile + ".artifacts", "materialization-claims", "lineage.gate");
+					const owner = gateFile && existsSync(gateFile) ? JSON.parse(readFileSync(gateFile, "utf8")).process : undefined;
+					const ownerStatus = owner && existsSync(`/proc/${owner.pid}/status`) ? readFileSync(`/proc/${owner.pid}/status`, "utf8").split("\n").filter(line => /^(Name|State|PPid):/.test(line)) : undefined;
+					assert.fail(`${error}\n${JSON.stringify({owner, ownerStatus, location, receiver:location?.paneId ? readPane(location.paneId,150):null, node, work:work && { completion:work.completion, integration:work.integration, checkpointError:work.checkpointError }, sidecar:node?.sessionFile && existsSync(node.sessionFile+".exit") ? readFileSync(node.sessionFile+".exit","utf8"):null })}`);
+				}
+				assert.equal(results(receiverFile)[0].details.integration.status, "applied", JSON.stringify(results(receiverFile)[0].details.integration));
+				assert.match(results(receiverFile)[0].content, /HELD_SUMMARY/);
+				assert.equal(readFileSync(join(env.dir, "held.txt"), "utf8"), "HELD_SOURCE");
+				assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" }), head);
+				assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
+				assert.equal(results(copied).length, 0, "copied history cannot claim the original's result");
+				const completed = sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap(root => [...reduceLineage(root).nodes.values()]).find(node => node.replication)!;
+				assert.ok(completed.replicaWorkFile);
+				if (handoff === "move") {
+					await waitUntil(() => readReplicaWork(completed.replicaWorkFile!).cleaned === true, "owned cleanup must finish before test teardown");
+				} else {
+					// Restored shells have new identities. Keep their worktree rather than close by a reused pane ID.
+					const work = readReplicaWork(completed.replicaWorkFile!);
+					assert.equal(work.cleaned === true, false);
+					assert.ok(work.worktreeLocation);
+					assert.equal(sessionOwnsPane(work.worktreeLocation, work.worktree!.paneId, getHerdrPaneProcessInfo(work.worktree!.paneId).shellPid), false);
+					assert.ok(work.worktree && existsSync(work.worktree.path));
+					assert.equal(readFileSync(join(work.worktree.path, "held.txt"), "utf8"), "HELD_SOURCE");
+				}
+				assert.equal(results(receiverFile).length, 1);
+			});
+		}
 		it("joins saved successful work once after a complete isolated Herdr restart", async () => {
 			const original = join(env.dir, "restart-original.jsonl"), capability = join(env.dir, "restart-capability.ts");
 			const gate = join(env.dir, ".pi", "agent", "restart-gate"), started = gate + ".started";
