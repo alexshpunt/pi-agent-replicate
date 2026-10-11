@@ -3139,7 +3139,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			const child = await launchPiSubagent({
 				kind: "fresh", id, name, task: replicationAssignment(params.task),
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
-				worktree: { branch: reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit },
+				worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit },
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
 				behavior: { tools: inherited.tools.join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
 			});
