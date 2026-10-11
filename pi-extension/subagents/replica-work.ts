@@ -2,7 +2,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { writeBindingFile, readSessionBinding, childSessionLocation, sessionLocationAlive, sessionOwnsPane, type SessionLocation } from "./session-binding.ts";
-import { getHerdrPaneProcessInfo, listHerdrWorktrees } from "./herdr.ts";
+import { closeHerdrSurface, getHerdrPaneProcessInfo, listHerdrWorktrees } from "./herdr.ts";
 import { applySourceJoin, planSourceJoin, snapshotSource, type SourceJoinReady, type SourceSnapshot } from "./source-state.ts";
 import type { WorktreeLaunch } from "./launch.ts";
 import { processIncarnationAlive, withLineageMutationGate, type ProcessIncarnation } from "./lineage.ts";
@@ -192,23 +192,26 @@ export function joinReplicaWork(file: string, parentCwd: string, parentActive: (
 	return record;
 }
 
-/** Remove only unchanged, integrated, session-backed work owned by this attempt. */
+/** Close an owned settled pane; remove its checkout only after safe integration. */
 export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 	const record = readReplicaWork(file), worktree = record.worktree;
 	if (record.cleaned || !worktree) return true;
-	if (record.integration.status !== "applied") return true; // Failure/conflict intentionally retains its workspace.
-	if (!record.checkpoint || !record.sessionCheckpoint || !existsSync(record.sessionCheckpoint)) return false;
+	const removeWorktree = record.integration.status === "applied";
 	const matches = listHerdrWorktrees(parentCwd).filter((entry) => entry.path === worktree.path && entry.branch === worktree.branch && entry.isLinkedWorktree);
 	if (matches.length > 1) throw new Error("Ambiguous replica worktree ownership.");
 	if (!matches.length) {
+		if (!removeWorktree) return true;
 		if (existsSync(worktree.path)) return false;
 		writeBindingFile(file, { ...record, cleaned: true });
 		return true;
 	}
 	const observed = matches[0];
 	if (record.worktreeLocation && sessionLocationAlive(record.worktreeLocation)) return false;
-	const checkpoint = snapshotSource(worktree.path, join(file + ".artifacts", "cleanup"));
-	if (checkpoint.tree !== record.checkpoint.tree || checkpoint.head !== record.checkpoint.head || checkpoint.indexHash !== record.checkpoint.indexHash) return false; // Never discard edits made after settlement.
+	if (removeWorktree) {
+		if (!record.checkpoint || !record.sessionCheckpoint || !existsSync(record.sessionCheckpoint)) return false;
+		const checkpoint = snapshotSource(worktree.path, join(file + ".artifacts", "cleanup"));
+		if (checkpoint.tree !== record.checkpoint.tree || checkpoint.head !== record.checkpoint.head || checkpoint.indexHash !== record.checkpoint.indexHash) return false; // Never discard edits made after settlement.
+	}
 	if (observed.workspaceId) {
 		if (observed.workspaceId !== worktree.workspaceId || !record.worktreeLocation) return false;
 		const response = JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", observed.workspaceId], { encoding: "utf8" }));
@@ -216,8 +219,13 @@ export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 		if (!Array.isArray(panes) || panes.length !== 1 || panes[0].pane_id !== worktree.paneId) return false;
 		const info = getHerdrPaneProcessInfo(worktree.paneId);
 		if (!sessionOwnsPane(record.worktreeLocation, worktree.paneId, info.shellPid) || info.pids.some((pid) => pid !== info.shellPid)) return false;
+		if (!removeWorktree) {
+			closeHerdrSurface(worktree.paneId);
+			return true;
+		}
 		execFileSync("herdr", ["worktree", "remove", "--workspace", observed.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
 	} else {
+		if (!removeWorktree) return true;
 		// A restarted Herdr may no longer have its workspace. Keep any surviving cwd users.
 		for (const pid of readdirSync("/proc").filter((entry) => /^\d+$/.test(entry))) {
 			let cwd: string;

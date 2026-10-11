@@ -477,19 +477,32 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
       } catch {}
     }
     if (env.replication) {
-      // Failed replicas deliberately retain workspaces. Dispose only trees linked
-      // to this test-owned repository, before closing its parent workspace.
+      // Settled replicas can close their workspace while retaining the checkout.
+      // Dispose only trees linked to this test-owned repository.
       const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: env.dir, encoding: "utf8" }).trim();
       for (const work of listHerdrWorktrees(env.dir).filter((entry) => entry.isLinkedWorktree)) {
-        // A successful replica may finish its own cleanup after this list was read.
+        // The host may finish cleanup after this list was read.
         if (!existsSync(work.path)) continue;
         try {
           if (execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work.path, encoding: "utf8" }).trim() !== common) throw new Error("Test worktree ownership mismatch.");
-          if (work.workspaceId) execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8", stdio: "pipe" });
-          else execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
         } catch (error) {
-          const missingWorkspace = String((error as { stderr?: unknown }).stderr).includes('"code":"workspace_not_found"');
-          if (existsSync(work.path) && !missingWorkspace) throw error;
+          if (existsSync(work.path)) throw error;
+          continue;
+        }
+        if (work.workspaceId) {
+          try {
+            execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8", stdio: "pipe" });
+          } catch (error) {
+            if (workspaceExists(work.workspaceId)) throw error;
+          }
+        }
+        if (existsSync(work.path)) {
+          await waitForProcessCwdRelease(work.path);
+          try {
+            execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
+          } catch (error) {
+            if (existsSync(work.path)) throw error;
+          }
         }
         await waitForPathAbsence(work.path);
       }

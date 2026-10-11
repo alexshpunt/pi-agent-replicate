@@ -45,7 +45,7 @@ replicate({ name: "try-auth-alternative", continuation: "saved-id", mode: "fork"
 
 `resume` preserves the saved session identity; `fork` creates a new one. Both use fresh per-attempt artifacts and an isolated worktree. Only the immediate parent can address its continuation. Active attempts cannot be continued concurrently. Removed successful worktrees can be rebuilt from their saved checkpoints. Arbitrary historical checkpoint selection is not supported.
 
-A copy can call `replicate` for an independent part of its assignment. It must wait for its own copies and return a nonempty final summary. The runtime delivers that summary and closes its pane after descendants drain. Copies do not get `caller_ping` or `subagent_done`.
+A copy can call `replicate` for an independent part of its assignment. It must wait for its own copies and return a nonempty final summary. The runtime delivers that summary and closes its pane and empty Herdr workspace after descendants drain and the process exits. Failed and conflicted copies close too; their files and saved sessions stay available for recovery. Copies do not get `caller_ping` or `subagent_done`.
 
 The former `subagent`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel` and `subagents_list` implementations remain internal and are not registered by default. The package-root API is unchanged. The package ships no workflows, skills or built-in roles.
 
@@ -207,6 +207,6 @@ node --experimental-strip-types test/integration/run-isolated.ts \
   --test-name-pattern='renders an active isolated replica' test/integration/replication.test.ts
 ```
 
-The case reloads Pi and records the loaded IDE in `runtime.json`. Use `pane.json` to attach a read-only observer to its private Herdr endpoint. Capture the active pane, then create `release-child` in the inspection directory. Capture the delivered result, then create `finish` so the runner can clean up. Both observation gates time out after five minutes. Do not use the user's persistent Herdr server.
+The case reloads Pi and records the loaded IDE in `runtime.json`. The applied and failed cases each write to their own subdirectory. Use its `pane.json` to attach a read-only observer to the private Herdr endpoint. Capture the active pane, then create `release-child` in the inspection directory. Capture the delivered result, then create `finish` so the runner can clean up. Both observation gates time out after five minutes. Do not use the user's persistent Herdr server.
 
 See [RELEASING.md](RELEASING.md) for release checks.
