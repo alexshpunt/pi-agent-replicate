@@ -88,7 +88,7 @@ it("reclaims an unpublished continuation only after its reserving process is gon
 		writeBindingFile(file, { ...reserved, continuationOwner: { pid: 0 } });
 		assert.throws(() => reserveReplicaContinuation(file, "owner", "next"), /Invalid replica work/);
 		writeBindingFile(file, reserved);
-		const endedPid = Number(execFileSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" }).trim());
+		const endedPid = Number(execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" }).trim());
 		writeBindingFile(file, { ...readReplicaWork(file), continuationOwner: { pid: endedPid } });
 		const previous = reserveReplicaContinuation(file, "owner", "next");
 		assert.equal(previous.id, "first");

@@ -13,14 +13,18 @@ import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { replicaStopDue } from "./watchdog.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, writeBindingFile } from "./session-binding.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const lifecycleKey = Symbol.for("pi-herdr-subagents.child-lifecycle");
 const lifecycles: WeakSet<object> = (globalThis as any)[lifecycleKey] ??= new WeakSet<object>();
 
-/** Avoid installing a child lifecycle twice when both extensions load. */
-export function hasChildLifecycle(pi: ExtensionAPI): boolean { return lifecycles.has(pi.events); }
+const lifecycleSessions: Set<string> = (globalThis as any)[Symbol.for("pi-herdr-subagents.child-lifecycle-sessions")] ??= new Set<string>();
+/** Extension event facades differ, but one child process still owns one lifecycle. */
+export function hasChildLifecycle(pi: ExtensionAPI): boolean {
+  return lifecycles.has(pi.events) || !!process.env.PI_SUBAGENT_SESSION && lifecycleSessions.has(process.env.PI_SUBAGENT_SESSION);
+}
 import { dirname, join } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
@@ -315,6 +319,8 @@ export function buildSkillInitialization(
 export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   if (hasChildLifecycle(pi)) return;
   lifecycles.add(pi.events);
+  const lifecycleSession = process.env.PI_SUBAGENT_SESSION;
+  if (lifecycleSession) lifecycleSessions.add(lifecycleSession);
   const unsubscribers: Array<() => void> = [];
   const on: ExtensionAPI["on"] = ((event: any, handler: any) => {
     const unsubscribe = (pi.on as (event: any, handler: any) => unknown)(event, handler);
@@ -441,6 +447,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   if (initialContext) start(initialContext);
 
   on("session_before_compact", (event) => {
+    idleSince = undefined;
     recorder.compactionStart({
       reason: event.reason,
       willRetry: event.willRetry,
@@ -464,6 +471,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   });
 
   on("input", () => {
+    idleSince = undefined;
     resumeInputSeen = true;
     if (shouldMarkUserTookOver(agentStarted)) intervened = true;
     recorder.input();
@@ -472,6 +480,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   on("before_agent_start", (event, ctx) => {
     settledChildResultId =
       settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
+    if (replication) { clearStop(); interruptRequested = false; }
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
     latestAgentEndMessages = undefined;
     latestTurnIndex = undefined;
@@ -497,6 +506,58 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     recorder.agentStart();
   });
   let exitRequested = false;
+  let stopTimer: ReturnType<typeof setInterval> | undefined;
+  let idleSince: number | undefined;
+  let stopPayload: Record<string, unknown> | undefined;
+  const stopFile = process.env.PI_SUBAGENT_SESSION
+    ? `${process.env.PI_SUBAGENT_SESSION}.replica-stop`
+    : undefined;
+  const clearStop = () => {
+    idleSince = undefined;
+    stopPayload = undefined;
+    if (stopFile) rmSync(stopFile, { force: true });
+  };
+  const rememberStop = (payload: Record<string, unknown>) => {
+    stopPayload = payload;
+    // The exit sidecar remains authoritative if this retry checkpoint cannot be saved.
+    if (stopFile) {
+      try { writeBindingFile(stopFile, { payload, stoppedAt: Date.now() }); } catch {}
+    }
+  };
+  const armStopTimer = (ctx: ExtensionContext) => {
+    if (!replication || stopTimer) return;
+    stopTimer = setInterval(() => {
+      if (exitRequested || !resumeTurnStarted || !resumeInputSeen) return;
+      const lineage = lineageFromEnvironment();
+      const descendants = !!lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId);
+      const idle = ctx.isIdle();
+      const pendingMessages = ctx.hasPendingMessages();
+      if (!idle || pendingMessages || movePending || descendants) { idleSince = undefined; return; }
+      if (!latestAgentEndMessages && !stopPayload) return;
+      idleSince ??= Date.now();
+      if (!replicaStopDue({ now: Date.now(), idleSince, idle, pendingMessages, moving: movePending, descendants })) return;
+      const payload = stopPayload ?? { type: "error", errorMessage: "Replica stopped without saved settlement evidence." };
+      rememberStop(payload);
+      void finishAfterDrain(ctx, payload);
+    }, 1000);
+    stopTimer.unref();
+  };
+  const restoreStopTimer = (ctx: ExtensionContext) => {
+    if (replication && stopFile && existsSync(stopFile) && process.env.PI_SUBAGENT_RESUME !== "1") {
+      try {
+        const saved = JSON.parse(readFileSync(stopFile, "utf8"));
+        if (!["done", "error"].includes(saved.payload?.type) || !Number.isFinite(saved.stoppedAt)) throw new Error("Invalid stopped-state checkpoint");
+        stopPayload = saved.payload;
+        idleSince = saved.stoppedAt;
+      } catch {
+        stopPayload = { type: "error", errorMessage: "Replica stopped-state checkpoint could not be read." };
+        idleSince = Date.now();
+      }
+    }
+    armStopTimer(ctx);
+  };
+  on("session_start", (_event, ctx) => restoreStopTimer(ctx));
+  if (initialContext) restoreStopTimer(initialContext);
   const finishAfterDrain = async (
     ctx: ExtensionContext,
     payload: Record<string, unknown>,
@@ -527,7 +588,8 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     ctx.shutdown();
   };
 
-  on("agent_end", (event) => {
+  on("agent_end", (event, ctx) => {
+    armStopTimer(ctx);
     latestAgentEndMessages = (event as any).messages as any[] | undefined;
     const eventTurnIndex = (event as any).turnIndex;
     if (typeof eventTurnIndex === "number") latestTurnIndex = eventTurnIndex;
@@ -548,7 +610,14 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
       interruptRequested,
     );
     const assistant = newestAssistantEntry(latestAgentEndMessages);
-    if (!outcome || !assistant) return;
+    if (!outcome || !assistant) {
+      if (replication && resumeTurnStarted && !movePending) {
+        const payload = { type: "error", errorMessage: "Replica stopped without a final assistant response." };
+        rememberStop(payload);
+        void finishAfterDrain(ctx, payload);
+      }
+      return;
+    }
     if (resumeBaselineAssistantIds.has(assistant.id)) {
       // Pi replays the previous assistant turn while opening a resumed session.
       // Its settlement is not the follow-up requested by the parent.
@@ -556,7 +625,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     }
     if (!resumeTurnStarted || (process.env.PI_SUBAGENT_RESUME === "1" && !resumeInputSeen)) return;
 
-    if (intervened || movePending) return;
+    if ((!replication && intervened) || movePending) return;
 
 
     const observedSettledChildId = settledChildResultId;
@@ -579,7 +648,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
         lineage.nodeId,
         observedSettledChildId,
       );
-    const waitsForChildResult = !treeOwner && descendantPending;
+    const waitsForChildResult = !treeOwner && descendantPending && (!replication || outcome === "clean");
 
     recorder.agentSettled({
       outcome,
@@ -595,9 +664,11 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
 
     if (!terminalAutoExit || waitsForChildResult) return;
     const summary = assistant.text?.trim();
-    void finishAfterDrain(ctx, replication && (outcome !== "clean" || !summary)
-      ? { type: "error", errorMessage: assistant.errorMessage ?? (summary ? `Replica ended with ${outcome}.` : "Replica returned no required summary.") }
-      : { type: "done", ...(replication ? { summary: assistant.text } : {}) });
+    const payload = replication && (outcome !== "clean" || !summary)
+      ? { type: "error", errorMessage: assistant.errorMessage ?? (outcome === "intentional-abort" || outcome === "unexpected-abort" ? "Replica was interrupted." : "Replica returned no required summary.") }
+      : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
+    if (replication) rememberStop(payload);
+    void finishAfterDrain(ctx, payload);
   });
 
   on("turn_start", (event) => {
@@ -669,8 +740,16 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
     }
   });
   on("session_shutdown", (event) => {
+    if (stopTimer) clearInterval(stopTimer);
+    if (replication && event.reason === "quit" && !movePending) {
+      const sessionFile = process.env.PI_SUBAGENT_SESSION;
+      if (sessionFile && !existsSync(`${sessionFile}.exit`)) {
+        writeBindingFile(`${sessionFile}.exit`, { type: "error", errorMessage: "Replica closed without a saved completion." });
+      }
+    }
     for (const unsubscribe of unsubscribers) unsubscribe();
     lifecycles.delete(pi.events);
+    if (lifecycleSession) lifecycleSessions.delete(lifecycleSession);
     recorder.sessionShutdown((event as any).reason);
   });
 

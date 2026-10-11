@@ -2313,7 +2313,7 @@ function deliverRecoveryFailure(running: RunningSubagent, reason: string): void 
 }
 
 async function superviseStaleSubagent(running: RunningSubagent, now: number): Promise<void> {
-	if (running.retired) return;
+	if (running.retired || running.replication) return;
 	if (!shouldStartStaleRecovery({
 		interactive: running.interactive,
 		pendingTerminalDelivery: Boolean(running.pendingTerminalDelivery),
@@ -2669,6 +2669,7 @@ async function attemptRecovery(
 		}
 	}
 
+	const priorLocation = childSessionLocation(lineage.rootDir, running.id);
 	try {
 		const resumed = await launchPiSubagent({
 			kind: "resume",
@@ -2689,6 +2690,17 @@ async function attemptRecovery(
 				interactive: running.interactive,
 			},
 		});
+		// A launch returns before Pi binds. Do not let the new watcher follow
+		// the old closed pane and mistake recovery for a user's cancellation.
+		const bindDeadline = Date.now() + 30_000;
+		for (;;) {
+			const location = childSessionLocation(lineage.rootDir, running.id);
+			if (location?.paneId === resumed.surface &&
+				(location.pid !== priorLocation?.pid || location.processStart !== priorLocation?.processStart) &&
+				sessionOwnsPane(location, resumed.surface, getPaneProcessInfo(resumed.surface).shellPid)) break;
+			if (Date.now() >= bindDeadline) throw new Error("Recovery replacement did not register its session location.");
+			await new Promise<void>((resolve) => setTimeout(resolve, 100));
+		}
 		const epoch = running.supervisionEpoch;
 		const recoveryState = running.recoveryState;
 		const stable = {
@@ -2798,6 +2810,10 @@ async function watchSubagent(
 					running.ignorePriorSentinelEpoch = undefined;
 					continue;
 				}
+				if (running.replication && result.reason === "sentinel") {
+					result = { reason: "error" as const, exitCode: 1, errorMessage: "Replica process closed without a saved completion." };
+					break;
+				}
 				if (result.reason === "sentinel" && result.exitCode !== 0 && !result.errorMessage) {
 					let recovery: Awaited<ReturnType<typeof attemptRecovery>> | undefined;
 					const recoveryLock = (async () => {
@@ -2894,7 +2910,7 @@ async function watchSubagent(
 		}
 
 		if (cancelledByUser) summary = "Subagent cancelled by user.";
-		const closeWithAnswer = !cancelledByUser && !!result.paneDisappeared && !!lastAssistant?.trim();
+		const closeWithAnswer = !running.replication && !cancelledByUser && !!result.paneDisappeared && !!lastAssistant?.trim();
 		const effectiveExitCode = closeWithAnswer ? 0 : result.exitCode;
 		if (closeWithAnswer) summary = lastAssistant!;
 
@@ -2926,7 +2942,7 @@ async function watchSubagent(
 			exitCode: effectiveExitCode,
 			elapsed,
 			ping: result.ping,
-			...(!closeWithAnswer && !cancelledByUser && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+			...(running.replication && cancelledByUser ? { errorMessage: "Replica pane closed without a saved completion." } : !closeWithAnswer && !cancelledByUser && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
 			...(closeWithAnswer ? { closeWithAnswer: true as const } : {}),
 
 			supervisionEpoch,

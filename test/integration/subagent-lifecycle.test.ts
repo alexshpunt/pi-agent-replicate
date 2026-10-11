@@ -812,7 +812,8 @@ for (const backend of backends) {
 			const parentSession = join(env.dir, `direct-skills-parent-${id}.jsonl`);
 			writeIntegrationSkill(env.dir, "ale54-role-default", roleBody);
 			writeIntegrationSkill(env.dir, "ale54-direct", directBody);
-			writeSkillRole(env.dir, role, "ale54-role-default", false);
+			writeSkillRole(env.dir, role, "ale54-role-default");
+			const gate = join(env.dir, "direct-skill-release");
 
 			const childName = `DirectSkills-${id}`;
 			const surface = createTrackedSurface(env, `direct-skills-${id}`);
@@ -822,22 +823,23 @@ for (const backend of backends) {
 				`  name: "${childName}"`,
 				`  agent: "${role}"`,
 				'  skills: "ale54-direct, ale54-missing, ale54-direct, ale54-missing"',
-				`  task: "Return exactly ${report}"`,
+				`  task: "INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly ${report}"`,
 				"Do not do anything else. Just call the subagent tool once.",
 			].join("\n"), { extraArgs: `--session ${shellQuote(parentSession)}` });
 
-			await waitForParentEvidence(
-				parentSession,
-				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
-				surface,
-				PI_TIMEOUT,
-			);
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			const childScreen = await waitForScreen(
 				childPane,
 				/ale54-missing/i,
 				PI_TIMEOUT,
 				300,
+			);
+			writeFileSync(gate, "release");
+			await waitForParentEvidence(
+				parentSession,
+				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
+				surface,
+				PI_TIMEOUT,
 			);
 			const parentEntries = readSessionEntries(parentSession);
 			const results = parentEntries.filter((entry) =>
@@ -1474,6 +1476,9 @@ for (const backend of backends) {
 				/previous process became stale/.test(request.userText)
 			);
 			assert.equal(revives.length, 3, "exactly three same-session revives must run");
+			const lineage = JSON.parse(readFileSync(`${details.sessionFile}.lineage.json`, "utf8")) as { rootDir: string };
+			const events = readdirSync(join(lineage.rootDir, "events")).map(file => readFileSync(join(lineage.rootDir, "events", file), "utf8")).join("\n");
+			assert.doesNotMatch(events, /user_tab_close/, "a replacement must never be mistaken for a manually closed pane");
 		});
 
 
@@ -1574,27 +1579,27 @@ for (const backend of backends) {
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.pane_id === childPane));
 
-			const settledEntries = await waitForCustomResultCount(parentSession, 2);
-			const results = customResultEntries(settledEntries);
-			assert.equal(results.length, 2);
-			assert.notEqual(results[1]?.details?.deliveryId, first.deliveryId);
-			assert.equal(results[1]?.details?.sessionFile, first.sessionFile);
-			assert.match(String(results[1]?.details?.resultContent), /completed/);
+			await waitForScreen(childPane, /completed/, PI_TIMEOUT);
+			await waitForParentTurnAfterResult(parentSession);
+			assert.equal(customResultEntries(readSessionEntries(parentSession)).length, 1, "the settled answer stays local");
 			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.pane_id === childPane), "help and settlement must leave the persistent child open");
 
 			execFileSync("herdr", ["agent", "prompt", childPane, "PING_AGAIN"], { encoding: "utf8" });
-			const repeatedEntries = await waitForCustomResultCount(parentSession, 3);
+			const repeatedEntries = await waitForCustomResultCount(parentSession, 2);
 			const repeated = customResultEntries(repeatedEntries);
-			assert.equal(repeated[2]?.details?.kind, "help-request");
-			assert.notEqual(repeated[2]?.details?.deliveryId, first.deliveryId);
-			assert.notEqual(repeated[2]?.details?.resultPath, first.resultPath);
-			assert.equal(repeated[2]?.details?.sessionFile, first.sessionFile);
+			assert.equal(repeated[1]?.details?.kind, "help-request");
+			assert.notEqual(repeated[1]?.details?.deliveryId, first.deliveryId);
+			assert.notEqual(repeated[1]?.details?.resultPath, first.resultPath);
+			assert.equal(repeated[1]?.details?.sessionFile, first.sessionFile);
+			await waitForPaneTextCount(childPane, "completed", 2);
 
 			execFileSync("herdr", ["agent", "prompt", childPane, "CLOSE_PERSISTENT_CHILD"], { encoding: "utf8" });
+			await waitForCustomResultCount(parentSession, 3);
 			await waitForAgentGone(childPane, env.workspaceId);
 			const finalResults = customResultEntries(readSessionEntries(parentSession));
 			assert.equal(finalResults.filter((entry) => entry.details?.kind === "help-request").length, 2);
-			assert.ok(finalResults.length >= 3 && finalResults.length <= 4, "terminal close must not duplicate the final answer");
+			assert.equal(finalResults.length, 3, "explicit completion publishes exactly one terminal result");
+			assert.match(String(finalResults[2]?.details?.resultContent), /SETTLED_TWO/);
 		});
 
 

@@ -96,7 +96,7 @@ export function seedSubagentSessionFile(params: {
 
 /** Native projected messages may include modern Pi system checkpoints. */
 export type ReplicationContextMessage = SessionContext["messages"][number] | { role: "system" };
-/** Fork the captured active branch and settle inherited calls without running them again. */
+/** Fork conversation and runtime, not extension control state; settle inherited calls without replay. */
 export function seedReplicationSessionFile(params: {
 	parentSessionFile: string;
 	childSessionFile: string;
@@ -112,7 +112,16 @@ export function seedReplicationSessionFile(params: {
 	const pending = new Map<string, string>();
 	let parentId: string | null = null;
 	for (const source of params.entries) {
+		// Custom messages are conversation. Custom entries are extension-owned
+		// controls: restoring them can start a parent turn before our assignment.
+		if (source.type === "custom") continue;
 		const entry: SessionEntry = { ...source, parentId };
+		if (source.type === "compaction") {
+			const firstKeptIndex = params.entries.findIndex((row) => row.id === source.firstKeptEntryId);
+			if (params.entries[firstKeptIndex]?.type === "custom") {
+				entry.firstKeptEntryId = params.entries.slice(firstKeptIndex).find((row) => row.type !== "custom")?.id ?? source.id;
+			}
+		}
 		rows.push(entry);
 		parentId = entry.id;
 	}

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
-import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForScreen, type TestEnv } from "./harness.ts";
+import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, readPaneAsync, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForScreen, PI_TIMEOUT, type TestEnv } from "./harness.ts";
 import { childSessionLocation, readSessionBinding, sessionLocationAlive } from "../../pi-extension/subagents/session-binding.ts";
 
 const packageTools = new Set(["replicate", "subagent", "subagent_resume", "subagent_interrupt", "subagent_cancel", "subagents_list", "caller_ping", "subagent_done"]);
@@ -13,7 +13,7 @@ function entries(path: string): any[] {
 	return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
 }
 async function waitUntil(check: () => boolean, explanation: string): Promise<void> {
-	const deadline = Date.now() + 20_000;
+	const deadline = Date.now() + PI_TIMEOUT;
 	while (Date.now() < deadline) {
 		if (check()) return;
 		await sleep(50);
@@ -25,10 +25,25 @@ function systemText(request: ReturnType<typeof getProviderRequests>[number]): st
 }
 
 for (const backend of getAvailableBackends()) {
-	describe(`replication (${backend})`, { timeout: process.env.PI_INTEGRATION_TUI_DIR ? 660_000 : 45_000 }, () => {
+	describe(`replication (${backend})`, { timeout: process.env.PI_INTEGRATION_TUI_DIR ? 660_000 : PI_TIMEOUT * 3 }, () => {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
-		afterEach(async () => { await cleanupTestEnv(env); });
+		afterEach(async () => {
+			const artifacts = process.env.PI_INTEGRATION_DEBUG_ARTIFACT_DIR;
+			if (artifacts) {
+				mkdirSync(artifacts, { recursive: true });
+				const parents = readdirSync(env.dir).filter(file => file.endsWith(".jsonl")).map(file => ({ file, entries: entries(join(env.dir, file)) }));
+				const launched = parents.flatMap(parent => parent.entries).filter(row => row.message?.toolName === "replicate").map(row => row.message.details).filter(details => details?.sessionFile);
+				const read = (file: string) => { try { return readFileSync(file, "utf8"); } catch { return null; } };
+				const children = await Promise.all(launched.map(async launch => {
+					const binding = readSessionBinding(launch.sessionFile);
+					const location = binding?.child && childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
+					return { launch, entries: entries(launch.sessionFile), location, exit: read(launch.sessionFile + ".exit"), stop: read(launch.sessionFile + ".replica-stop"), work: read(join(env.dir, ".pi", "agent", "subagent-sessions", "replicas", launch.id + ".json")), screen: location?.paneId ? await readPaneAsync(location.paneId, 80).catch(String) : null };
+				}));
+				writeFileSync(join(artifacts, env.dir.split("/").at(-1)! + ".json"), JSON.stringify({ parents, children, screens: await Promise.all(env.surfaces.map(surface => readPaneAsync(surface, 80).catch(String))) }));
+			}
+			await cleanupTestEnv(env);
+		});
 
 		for (const task of ["REPLICATION_FAIL_WITH_HISTORY", "Return exactly EMPTY_COMPLETION"]) {
 			it(`reports ${task} as failure and retains its work`, async () => {
@@ -55,7 +70,7 @@ for (const backend of getAvailableBackends()) {
 				assert.equal(result.details.integration.status, "not-attempted");
 			});
 		}
-		it("retains partial work after repeated unexpected child process loss exhausts recovery", async () => {
+		it("reports unexpected replica process loss without restarting and retains partial work", async () => {
 			const parentFile = join(env.dir, "crash-original.jsonl"), capability = join(env.dir, "crash-capability.ts"), crashes = join(env.dir, "child-crashes.txt");
 			writeFileSync(capability, `import {appendFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('before_agent_start',()=>{if(process.cwd()!==${JSON.stringify(env.dir)}){writeFileSync(join(process.cwd(),'crash-partial.txt'),'CRASH_PARTIAL');appendFileSync(${JSON.stringify(crashes)},process.pid+'\\n');process.kill(process.pid,'SIGKILL');}});}\n`);
 			const parent = createTrackedSurface(env, "crash-original");
@@ -65,7 +80,7 @@ for (const backend of getAvailableBackends()) {
 			const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" });
 			const index = execFileSync("git", ["ls-files", "--stage"], { cwd: env.dir, encoding: "utf8" });
 			runInPane(parent, 'Call the replicate tool once with task: "Return exactly UNREACHABLE_CRASH_SUMMARY"');
-			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "exhausted crash recovery must deliver an honest terminal result");
+			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "process loss must deliver an honest terminal result");
 			const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
 			assert.equal(results.length, 1);
 			const result = results[0];
@@ -76,12 +91,12 @@ for (const backend of getAvailableBackends()) {
 			assert.equal(existsSync(join(env.dir, "crash-partial.txt")), false);
 			assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" }), head);
 			assert.equal(execFileSync("git", ["ls-files", "--stage"], { cwd: env.dir, encoding: "utf8" }), index);
-			assert.equal(new Set(readFileSync(crashes, "utf8").trim().split("\n")).size, 4, "one original process and three bounded recovery attempts");
+			assert.equal(new Set(readFileSync(crashes, "utf8").trim().split("\n")).size, 1, "the parent decides whether to restart its stopped copy");
 		});
 		for (const mode of ["resume", "fork"]) {
 			it(`recovers failed outstanding changes with ${mode} and preserves the saved conversation`, async () => {
 				const parentFile = join(env.dir, "recover-original.jsonl"), capability = join(env.dir, "recovery-capability.ts"), starts = join(env.dir, ".pi", "agent", "recovery-starts.json");
-				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('session_start',(_event,ctx)=>{const p=${JSON.stringify(starts)};const state=existsSync(p)?JSON.parse(readFileSync(p,'utf8')):{};const id=ctx.sessionManager.getSessionId();state[id]=(state[id]??0)+1;writeFileSync(p,JSON.stringify(state));});pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
+				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('session_start',(_event,ctx)=>{const p=${JSON.stringify(starts)};const state=existsSync(p)?JSON.parse(readFileSync(p,'utf8')):{};const id=ctx.sessionManager.getSessionId();state[id]=(state[id]??0)+1;writeFileSync(p,JSON.stringify(state));});pi.on('agent_settled',(_event,ctx)=>{if(process.env.PI_SUBAGENT_REPLICATION!=='1')writeFileSync(${JSON.stringify(starts + '.idle')},JSON.stringify({id:ctx.sessionManager.getSessionId(),results:ctx.sessionManager.getEntries().filter(row=>row.customType==='subagent_result').length}));});pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "recover-original");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, "Return exactly RECOVERY_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -94,6 +109,7 @@ for (const backend of getAvailableBackends()) {
 				assert.ok(failed.content.includes(failed.details.continuationId));
 				if (mode === "resume") {
 					const receiver = entries(parentFile)[0].id;
+					await waitUntil(() => existsSync(starts + ".idle") && JSON.parse(readFileSync(starts + ".idle", "utf8")).id === receiver && JSON.parse(readFileSync(starts + ".idle", "utf8")).results === 1, "the receiver must settle its result turn before reload");
 					const before = JSON.parse(readFileSync(starts, "utf8"))[receiver];
 					runInPane(parent, "/reload");
 					await waitUntil(() => JSON.parse(readFileSync(starts, "utf8"))[receiver] > before, "reload must reattach the receiving session");
@@ -166,7 +182,7 @@ for (const backend of getAvailableBackends()) {
 			const parentFile = join(env.dir, "siblings-original.jsonl"), capability = join(env.dir, "siblings-capability.ts");
 			const gate = join(env.dir, ".pi", "agent", "siblings-gate"), markers = gate + ".started";
 			mkdirSync(markers);
-			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write isolated sibling source',parameters:Type.Object({}),async execute(){const id=process.env.PI_SUBAGENT_ID;writeFileSync(join(process.cwd(),id+'.txt'),id);writeFileSync(join(${JSON.stringify(markers)},id),'ready');const end=Date.now()+20000;while(!existsSync(${JSON.stringify(gate)})&&Date.now()<end)await new Promise(r=>setTimeout(r,25));if(!existsSync(${JSON.stringify(gate)}))throw new Error('gate timeout');return {content:[{type:'text',text:'sibling source written'}],details:{}}}});}\n`);
+			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write isolated sibling source',parameters:Type.Object({}),async execute(){const id=process.env.PI_SUBAGENT_ID;writeFileSync(join(process.cwd(),id+'.txt'),id);writeFileSync(join(${JSON.stringify(markers)},id),'ready');const end=Date.now()+${PI_TIMEOUT};while(!existsSync(${JSON.stringify(gate)})&&Date.now()<end)await new Promise(r=>setTimeout(r,25));if(!existsSync(${JSON.stringify(gate)}))throw new Error('gate timeout');return {content:[{type:'text',text:'sibling source written'}],details:{}}}});}\n`);
 			const parent = createTrackedSurface(env, "siblings-original");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, "Return exactly SIBLINGS_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -192,7 +208,7 @@ for (const backend of getAvailableBackends()) {
 			const parentFile = join(env.dir, "conflict-original.jsonl"), capability = join(env.dir, "conflict-capability.ts");
 			const gate = join(env.dir, ".pi", "agent", "conflict-release"), started = gate + ".started";
 			writeFileSync(join(env.dir, "collision.txt"), "base\n");
-			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write gated child files',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'collision.txt'),'child\\n');writeFileSync(join(process.cwd(),'child-only.txt'),'retained');writeFileSync(${JSON.stringify(started)},'ready');const deadline=Date.now()+20000;while(!existsSync(${JSON.stringify(gate)})&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));if(!existsSync(${JSON.stringify(gate)}))throw new Error('gate timeout');return {content:[{type:'text',text:'CAPABILITY_INHERITED'}],details:{}}}});}\n`);
+			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write gated child files',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'collision.txt'),'child\\n');writeFileSync(join(process.cwd(),'child-only.txt'),'retained');writeFileSync(${JSON.stringify(started)},'ready');const deadline=Date.now()+${PI_TIMEOUT};while(!existsSync(${JSON.stringify(gate)})&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));if(!existsSync(${JSON.stringify(gate)}))throw new Error('gate timeout');return {content:[{type:'text',text:'CAPABILITY_INHERITED'}],details:{}}}});}\n`);
 			const parent = createTrackedSurface(env, "conflict-original");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, "Return exactly CONFLICT_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -264,10 +280,11 @@ export default function(pi){
 `);
 			const parent = createTrackedSurface(env, "visual-original");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, "Return exactly VISUAL_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(ide)} -e ${shellQuote(capability)}` });
+			startPi(parent, env.dir, "Return exactly VISUAL_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
 			await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "assistant"), "native parent ready");
 			runInPane(parent, "/reload");
 			await waitUntil(() => existsSync(join(inspection, "runtime.json")) && JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).starts >= 2, "the native reload must reattach the same source");
+			await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
 			assert.equal(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).readHasViews, true, "the loaded read tool must be IDE's native tool, not Pi's built-in reader");
 			assert.deepEqual(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).replicateFields, ["task"]);
 			runInPane(parent, 'INTEGRATION_VISUAL_PARENT. Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');

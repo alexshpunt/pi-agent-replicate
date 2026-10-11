@@ -121,7 +121,9 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 Host metadata retains the saved session and immutable Markdown result-file paths. Routine model-visible results carry the copy's summary and saved-copy choice, not those internal references. Terminal model failures report error facts; host metadata also retains a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
-Autonomous copies are supervised for crashes and stale inactivity. Durable ownership restores pending results, join plans and cleanup after restart. The retained API still supports interactive children; the stale watchdog never kills them.
+Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent can choose a continuation from the returned result.
+
+Normal settlement reports immediately. A ten-second safety net retries a missed handoff only while Pi is truly idle, with no queued work, movement or undrained descendants. Active tools, requests, retries and compaction are not subject to that deadline. Durable ownership restores pending results, join plans and cleanup after restart. The retained non-replica API keeps its existing recovery and interactive policies.
 
 The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
 

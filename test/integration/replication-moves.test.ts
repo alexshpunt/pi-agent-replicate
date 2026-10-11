@@ -7,18 +7,18 @@ import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
 import { childSessionLocation, parentSessionLocation, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
 import { readReplicaWork } from "../../pi-extension/subagents/replica-work.ts";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
-import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, readPane, restartIsolatedHerdr, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForPiExit, waitForScreen, type TestEnv } from "./harness.ts";
+import { cleanupTestEnv, closePane, createTestEnv, createTrackedSurface, getAvailableBackends, runInPane, readPane, restartIsolatedHerdr, shellQuote, sleep, startPi, waitForPaneAbsence, waitForPaneReady, waitForPiExit, waitForScreen, PI_TIMEOUT, type TestEnv } from "./harness.ts";
 
 function entries(path: string): any[] { return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []; }
 function results(path: string): any[] { return entries(path).filter((entry) => entry.customType === "subagent_result"); }
 async function waitUntil(check: () => boolean, explanation: string): Promise<void> {
-	const deadline = Date.now() + 25_000;
+	const deadline = Date.now() + PI_TIMEOUT;
 	while (Date.now() < deadline) { if (check()) return; await sleep(50); }
 	assert.fail(explanation);
 }
 const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
 for (const backend of getAvailableBackends()) {
-	describe(`replication moves (${backend})`, { timeout: 60_000 }, () => {
+	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 2 }, () => {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });

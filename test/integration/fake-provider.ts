@@ -218,6 +218,7 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	}
 
 	if (lastRole === "tool" && user.startsWith("INTEGRATION_VISUAL_PARENT")) return { text: "REPLICATION_PARENT_WAITING" };
+	if (lastRole === "tool" && /Call the replicate tool/i.test(user) && user.includes("STOP_CHILD_SUMMARY")) return { text: "REPLICATION_PARENT_WAITING" };
 	if (names.has("replication_probe") && user.includes("Your assignment:") && /Use replication_probe/.test(user) && lastRole !== "tool") {
 		return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
 	}
@@ -333,7 +334,8 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	}
 
 
-	await waitForIntegrationGate(user);
+	// The parent's launch request contains the gate too; only its child waits.
+	if (!names.has("subagent") || !/Call the subagent tool/i.test(user)) await waitForIntegrationGate(user);
 
 	const descendantOwner = source.includes("DESCENDANT_OWNER_FIXTURE");
 	if (

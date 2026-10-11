@@ -598,6 +598,21 @@ export function startPi(
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
+  const ideEntry = process.env.PI_INTEGRATION_IDE_ENTRY;
+  let ideFixture: string | undefined;
+  const ideEnvironment: Record<string, string> = {};
+  if (ideEntry) {
+    ideFixture = join(testDir, "ide-under-test.ts");
+    const source = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dirname(dirname(ideEntry)), encoding: "utf8" }).trim();
+    const latest = execFileSync("git", ["rev-parse", "origin/develop"], { cwd: dirname(dirname(ideEntry)), encoding: "utf8" }).trim();
+    if (source !== latest) throw new Error("IDE checkout must match origin/develop");
+    const version = JSON.parse(readFileSync(join(dirname(dirname(ideEntry)), "package.json"), "utf8")).version;
+    const evidence = { loaded: true, entry: ideEntry, version, source };
+    ideEnvironment.PI_INTEGRATION_IDE_SOURCE_COMMIT = source;
+    ideEnvironment.PI_INTEGRATION_IDE_PACKAGE_VERSION = version;
+    const record = process.env.PI_INTEGRATION_IDE_RECORD ?? join(testDir, "ide-runtime.jsonl");
+    writeFileSync(ideFixture, `import ide from ${JSON.stringify(ideEntry)}; import {appendFileSync} from "node:fs"; export default async function(pi){await ide(pi); pi.on("session_start",()=>appendFileSync(${JSON.stringify(record)},JSON.stringify(${JSON.stringify(evidence)})+"\\n"));}`);
+  }
   const agentDir = opts?.agentDir ?? (USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "");
   const extensionSource = opts?.extensionSource ?? (USE_TEST_PROVIDER
     ? join(agentDir, "extensions", "subagents-under-test.ts")
@@ -607,13 +622,14 @@ export function startPi(
   // their isolated extension path while keeping all automatic extensions off.
   const cmd = [
     `cd ${shellQuote(testDir)} &&`,
-    ...Object.entries(opts?.environment ?? {}).map(
+    ...Object.entries({ ...ideEnvironment, ...opts?.environment }).map(
       ([name, value]) => `${name}=${shellQuote(value)}`,
     ),
     agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)}` : "",
     `pi`,
     `-ne`,
     `-e ${shellQuote(extensionSource)}`,
+    ideFixture ? `-e ${shellQuote(ideFixture)}` : "",
     `--model ${shellQuote(model)}`,
     extra,
     shellQuote(task),

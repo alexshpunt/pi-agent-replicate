@@ -16,6 +16,8 @@ Use progressive disclosure. The initial description explains purpose and use, no
 
 A clone inherits the parent's model, thinking level, full system prompt, active tools and current active conversation, including the triggering user turn. Explicit CLI extensions follow it. The snapshot is captured before asynchronous launch work, so another turn or sibling tool result cannot change its context. Inherited pending tool calls are settled without executing them again.
 
+Copied extension control state must not wake a parent-side background operation before the replica receives its own assignment. Keep the active conversation, not ownership of the parent's pending operations.
+
 The bounded assignment, parallel-copy identity and required summary belong in a normal task message. Internal original-session references stay in host metadata. Replication must not change the system prompt or its cache prefix. There are no role, model, cwd, worktree or batch choices on this tool.
 
 Each clone gets a source snapshot with tracked working files and nonignored untracked files. The host uses a private index and protected checkpoint refs without changing parent HEAD or staging. Ignored files are not copied. Worktrees isolate files, not shared processes, ports or databases. A clone can replicate its own independent work. It remains responsible until its descendants drain, then returns a nonempty final summary. No help or explicit completion tool is registered for clones.
@@ -30,7 +32,9 @@ Copy names should tell the user which parent they belong to, not show a random I
 
 ## Durable lifecycle
 
-Replication is fire-and-forget. The caller gets an acknowledgement and later automatic delivery that starts a turn. Parents do not poll. Autonomous copies retain the bounded crash and stale-recovery policy.
+Replication is fire-and-forget. The caller gets an acknowledgement and later automatic delivery that starts a turn. Parents do not poll. Every fully stopped replica returns one truthful result, even after user input or Escape, and closes after durable settlement and descendant drain. Interruption and unsaved closure are failures with preserved post-fork answers and source work. Process loss does not automatically relaunch a replica; its immediate parent decides whether to continue it.
+
+Normal settlement is immediate. Ten continuously idle seconds provide a safety net for missed handoff, not a limit on active work. Queued messages, requests, tools, retries, compaction, movement and descendant drain suspend that clock. A saved settlement can be retried after reload; missing settlement evidence cannot become success. The retained non-replica recovery and intervention policies remain separate.
 
 Session identity, not a file path or pane ID, owns delivery. A binding inside each session carries its durable store and child settings. Teleport preserves that entry and session ID. The ownership index and lineage inboxes survive Pi and Herdr process replacement. Reopening the exact parent replays pending answers and starts a turn; a closed parent is never opened automatically. New-ID forks cannot claim the original answers. A delivery is acknowledged only after its exact result entry is saved, not merely queued. Cleanup requires the recorded shell incarnation to still own the pane.
 

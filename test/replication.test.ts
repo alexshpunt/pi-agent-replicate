@@ -108,6 +108,49 @@ it("copies only the captured branch and settles inherited pending calls without 
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+for (const resumeSessionId of [undefined, "saved-copy"]) {
+	it(`keeps conversation and runtime without replaying extension control state (${resumeSessionId ? "resume" : "fork"})`, () => {
+		const dir = mkdtempSync(join(tmpdir(), "replication-controls-"));
+		try {
+			const branch: any[] = [
+				{ type: "model_change", id: "model", provider: "local", modelId: "test" },
+				{ type: "thinking_level_change", id: "thinking", thinkingLevel: "high" },
+				{ type: "message", id: "user", message: { role: "user", content: [{ type: "text", text: "current assignment context" }] } },
+				{ type: "custom", id: "queue", customType: "ask:queued", data: { requestId: "parent-question" } },
+				{ type: "custom", id: "ready", customType: "ask:queue-completed", data: { requestId: "parent-question" } },
+				{ type: "custom", id: "other-control", customType: "another-extension:pending", data: { active: true } },
+				{ type: "custom_message", id: "answer", customType: "ask:background-answer", content: "already delivered context", display: true, details: {} },
+			];
+			branch.forEach((row, i) => { row.parentId = i ? branch[i - 1].id : null; });
+			const original = JSON.stringify(branch);
+			const context = buildSessionContext(branch);
+			const child = join(dir, "child.jsonl");
+			seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: context.messages, resumeSessionId });
+			const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(rows.filter((row) => row.type === "custom"), [], "pending control state belongs to its source, not a launched attempt");
+			assert.deepEqual(buildSessionContext(rows.slice(1)), context, "model, thinking and conversation stay unchanged");
+			assert.equal(rows.at(-1).parentId, "user");
+			if (resumeSessionId) assert.equal(rows[0].id, resumeSessionId);
+			assert.equal(JSON.stringify(branch), original);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
+	});
+}
+
+it("keeps compacted context when its first retained entry was extension control state", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-control-compaction-"));
+	try {
+		const branch: any[] = [
+			{ type: "custom", id: "control", parentId: null, customType: "pending", data: {} },
+			{ type: "message", id: "kept", parentId: "control", message: { role: "user", content: [{ type: "text", text: "keep this fact" }] } },
+			{ type: "compaction", id: "compact", parentId: "kept", firstKeptEntryId: "control", summary: "older facts", tokensBefore: 1000 },
+		];
+		const context = buildSessionContext(branch), child = join(dir, "child.jsonl");
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: context.messages });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(rows.filter((row) => row.type === "custom"), []);
+		assert.deepEqual(buildSessionContext(rows.slice(1)), context);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
 it("does not add outputs for abandoned, errored or compacted historical calls", () => {
 	const dir = mkdtempSync(join(tmpdir(), "replication-orphans-"));
 	try {

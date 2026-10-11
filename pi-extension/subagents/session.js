@@ -51,14 +51,23 @@ export function seedSubagentSessionFile(params) {
     mkdirSync(dirname(params.childSessionFile), { recursive: true });
     writeFileSync(params.childSessionFile, lines.join("\n") + "\n", "utf8");
 }
-/** Fork the captured active branch and settle inherited calls without running them again. */
+/** Fork conversation and runtime, not extension control state; settle inherited calls without replay. */
 export function seedReplicationSessionFile(params) {
     const header = { type: "session", version: 3, id: params.resumeSessionId ?? randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
     const rows = [header];
     const pending = new Map();
     let parentId = null;
     for (const source of params.entries) {
+        // Custom messages are conversation. Custom entries are extension-owned
+        // controls: restoring them can start a parent turn before our assignment.
+        if (source.type === "custom") continue;
         const entry = { ...source, parentId };
+        if (source.type === "compaction") {
+            const firstKeptIndex = params.entries.findIndex((row) => row.id === source.firstKeptEntryId);
+            if (params.entries[firstKeptIndex]?.type === "custom") {
+                entry.firstKeptEntryId = params.entries.slice(firstKeptIndex).find((row) => row.type !== "custom")?.id ?? source.id;
+            }
+        }
         rows.push(entry);
         parentId = entry.id;
     }
