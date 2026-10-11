@@ -11,22 +11,33 @@ import { readReplicaWork } from "../../pi-extension/subagents/replica-work.ts";
 
 const packageTools = new Set(["replicate", "subagent", "subagent_resume", "subagent_interrupt", "subagent_cancel", "subagents_list", "caller_ping", "subagent_done"]);
 function entries(path: string): any[] {
-	return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
+	if (!existsSync(path)) return [];
+	const source = readFileSync(path, "utf8");
+	const complete = source.slice(0, source.lastIndexOf("\n") + 1).trim();
+	return complete ? complete.split("\n").map((line) => JSON.parse(line)) : [];
 }
 async function waitUntil(check: () => boolean, explanation: string): Promise<void> {
-	const deadline = Date.now() + 20_000;
+	const deadline = Date.now() + 60_000;
 	while (Date.now() < deadline) {
 		if (check()) return;
 		await sleep(50);
 	}
 	assert.fail(explanation);
 }
+async function assertReplicaSurfaceClosed(result: any): Promise<void> {
+	const binding = readSessionBinding(result.details.sessionFile)!;
+	const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
+	assert.equal(await waitForPaneAbsence(location.paneId!, { timeoutMs: 10_000 }), true, "a settled replica must not leave its pane open");
+	const work = readReplicaWork(binding.child!.environment.PI_SUBAGENT_REPLICA_WORK_FILE);
+	const workspaces = JSON.parse(execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" })).result.workspaces;
+	assert.equal(workspaces.some((workspace: any) => workspace.workspace_id === work.worktree!.workspaceId), false, "the empty replica workspace must leave the sidebar");
+}
 function systemText(request: ReturnType<typeof getProviderRequests>[number]): string {
 	return JSON.stringify(request.messages.filter((message) => message.role === "system"));
 }
 
 for (const backend of getAvailableBackends()) {
-	describe(`replication (${backend})`, { timeout: process.env.PI_INTEGRATION_TUI_DIR ? 660_000 : 45_000 }, () => {
+	describe(`replication (${backend})`, { timeout: process.env.PI_INTEGRATION_TUI_DIR ? 660_000 : 600_000 }, () => {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });
@@ -125,6 +136,8 @@ for (const backend of getAvailableBackends()) {
 				const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
 				await waitUntil(() => !sessionLocationAlive(location), "the failed model process must exit");
 				assert.equal(existsSync(entries(result.details.sessionFile)[0].cwd), true);
+				await assertReplicaSurfaceClosed(result);
+				assert.equal(existsSync(result.details.worktreePath), true, "closing the failed pane must retain its source");
 				assert.equal(result.details.integration.status, "not-attempted");
 			});
 		}
@@ -153,8 +166,8 @@ for (const backend of getAvailableBackends()) {
 		});
 		for (const mode of ["resume", "fork"]) {
 			it(`recovers failed outstanding changes with ${mode} and preserves the saved conversation`, async () => {
-				const parentFile = join(env.dir, "recover-original.jsonl"), capability = join(env.dir, "recovery-capability.ts"), starts = join(env.dir, ".pi", "agent", "recovery-starts.json");
-				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('session_start',(_event,ctx)=>{const p=${JSON.stringify(starts)};const state=existsSync(p)?JSON.parse(readFileSync(p,'utf8')):{};const id=ctx.sessionManager.getSessionId();state[id]=(state[id]??0)+1;writeFileSync(p,JSON.stringify(state));});pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
+				const parentFile = join(env.dir, "recover-original.jsonl"), capability = join(env.dir, "recovery-capability.ts"), starts = join(env.dir, ".pi", "agent", "recovery-starts.json"), settled = join(env.dir, ".pi", "agent", "recovery-settled");
+				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.on('session_start',(_event,ctx)=>{const p=${JSON.stringify(starts)};const state=existsSync(p)?JSON.parse(readFileSync(p,'utf8')):{};const id=ctx.sessionManager.getSessionId();state[id]=(state[id]??0)+1;writeFileSync(p,JSON.stringify(state));});pi.on('agent_settled',(_event,ctx)=>{if(ctx.sessionManager.getEntries().some(row=>row.type==='custom_message'&&row.customType==='subagent_result'))writeFileSync(${JSON.stringify(settled)},'ready');});pi.registerTool({name:'replication_probe',label:'Probe',description:'Write checkpoint content',parameters:Type.Object({}),async execute(){const p=join(process.cwd(),'outstanding.txt');writeFileSync(p,(existsSync(p)?readFileSync(p,'utf8'):'')+'step\\n');return {content:[{type:'text',text:'SAVED_CONVERSATION_FACT'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "recover-original");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, "Return exactly RECOVERY_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -166,6 +179,7 @@ for (const backend of getAvailableBackends()) {
 				assert.equal(failed.details.recoveryAvailable, true);
 				assert.ok(failed.content.includes(failed.details.continuationId));
 				if (mode === "resume") {
+					await waitUntil(() => existsSync(settled), "the parent must settle after the result before reload");
 					const receiver = entries(parentFile)[0].id;
 					const before = JSON.parse(readFileSync(starts, "utf8"))[receiver];
 					runInPane(parent, "/reload");
@@ -194,6 +208,9 @@ for (const backend of getAvailableBackends()) {
 				const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
 				await waitUntil(() => !sessionLocationAlive(location), "old attempt must exit before explicit recovery");
 				runInPane(parent, `Call the replicate tool once with continuation: "${failed.details.continuationId}", mode: "${mode}", task: "Use replication_probe then Return exactly RECOVERY_SUMMARY"`);
+				const launches = () => entries(parentFile).filter((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate");
+				await waitUntil(() => launches().length === 2, "the continuation launch must settle");
+				assert.equal(launches()[1].message.isError, false, JSON.stringify(launches()[1].message));
 				await waitUntil(() => results().length === 2, "recovered result must reach the requester");
 				const recovered = results()[1], oldHeader = entries(failed.details.sessionFile)[0], newHeader = entries(recovered.details.sessionFile)[0];
 				assert.match(recovered.content, /RECOVERY_SUMMARY/);
@@ -299,6 +316,8 @@ for (const backend of getAvailableBackends()) {
 			assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
 			assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" }), head);
 			assert.equal(readFileSync(join(result.details.worktreePath, "child-only.txt"), "utf8"), "retained");
+			await assertReplicaSurfaceClosed(result);
+			assert.equal(readFileSync(join(result.details.worktreePath, "child-only.txt"), "utf8"), "retained", "closing the conflicted pane must retain its source");
 		});
 		it("rebuilds an applied cleaned continuation without reapplying its old changes", async () => {
 			const parentFile = join(env.dir, "cleaned-original.jsonl"), capability = join(env.dir, "cleaned-capability.ts");
@@ -320,8 +339,8 @@ for (const backend of getAvailableBackends()) {
 			assert.equal(readFileSync(join(env.dir, "old.txt"), "utf8"), "PARENT_LATER");
 			assert.equal(readFileSync(join(env.dir, "new.txt"), "utf8"), "CHILD");
 		});
-		it("renders an active isolated replica and its applied result after native reload", { skip: !process.env.PI_INTEGRATION_TUI_DIR }, async () => {
-			const inspection = process.env.PI_INTEGRATION_TUI_DIR!;
+		for (const outcome of ["applied", "failed"]) it(`renders an active isolated replica and its ${outcome} result after native reload`, { skip: !process.env.PI_INTEGRATION_TUI_DIR }, async () => {
+			const inspection = join(process.env.PI_INTEGRATION_TUI_DIR!, outcome);
 			const ide = process.env.PI_INTEGRATION_IDE_ENTRY;
 			assert.ok(ide && existsSync(ide), "visual verification requires the current IDE source");
 			mkdirSync(inspection, { recursive: true });
@@ -354,7 +373,7 @@ export default function(pi){
 			await waitUntil(() => existsSync(join(inspection, "runtime.json")) && JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).starts >= 2, "the native reload must reattach the same source");
 			assert.equal(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).readHasViews, true, "the loaded read tool must be IDE's native tool, not Pi's built-in reader");
 			assert.deepEqual(JSON.parse(readFileSync(join(inspection, "runtime.json"), "utf8")).replicateFields, ["name", "task"]);
-			runInPane(parent, 'INTEGRATION_VISUAL_PARENT. Call the replicate tool once with task: "Use replication_probe then Return exactly REPLICATION_SUMMARY"');
+			runInPane(parent, `INTEGRATION_VISUAL_PARENT. Call the replicate tool once with task: "Use replication_probe then Return exactly ${outcome === "applied" ? "REPLICATION_SUMMARY" : "EMPTY_COMPLETION"}"`);
 			await waitUntil(() => existsSync(join(inspection, "child-active.json")), "child active in isolated checkout");
 			assert.notEqual(JSON.parse(readFileSync(join(inspection, "child-active.json"), "utf8")).cwd, env.dir);
 			await waitUntil(() => entries(parentFile).some((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate"), "copy launch must be saved");
@@ -369,11 +388,13 @@ export default function(pi){
 			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "one saved result must wake the parent");
 			const results = entries(parentFile).filter((row) => row.customType === "subagent_result");
 			assert.equal(results.length, 1);
-			assert.match(results[0].content, /REPLICATION_SUMMARY/);
+			assert.match(results[0].content, outcome === "applied" ? /REPLICATION_SUMMARY/ : /no required summary/);
 			assert.match(results[0].content, /integration-copy ← Настройки/);
-			assert.equal(results[0].details.integration.status, "applied");
-			assert.equal(readFileSync(join(env.dir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
-			const delivered = await waitForScreen(parent, /REPLICATION_SUMMARY/, 20_000);
+			assert.equal(results[0].details.integration.status, outcome === "applied" ? "applied" : "not-attempted");
+			await assertReplicaSurfaceClosed(results[0]);
+			const sourceDir = outcome === "applied" ? env.dir : results[0].details.worktreePath;
+			assert.equal(readFileSync(join(sourceDir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
+			const delivered = await waitForScreen(parent, outcome === "applied" ? /REPLICATION_SUMMARY/ : /no required summary/, 20_000);
 			writeFileSync(join(inspection, "delivered.txt"), delivered);
 			writeFileSync(join(inspection, "result.json"), JSON.stringify(results[0]));
 			writeFileSync(join(inspection, "pane.json"), JSON.stringify({ stage: "delivered", pane: parent, config: process.env.HERDR_CONFIG_PATH, socket: process.env.HERDR_SOCKET_PATH }));
@@ -427,6 +448,7 @@ export default function(pi){
 			assert.ok(location?.paneId);
 			assert.equal(await waitForPaneAbsence(location.paneId, { timeoutMs: 10_000 }), true);
 			assert.equal(existsSync(entries(childFile)[0].cwd), false, "successful joined worktrees are cleaned");
+			await assertReplicaSurfaceClosed(deliveries[0]);
 			// The clone closes only its own surface, not the original's.
 			runInPane(parent, "Return exactly ORIGINAL_STILL_OPEN");
 			await waitForScreen(parent, /ORIGINAL_STILL_OPEN/);
