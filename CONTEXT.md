@@ -30,6 +30,8 @@ Owned continuation IDs address the latest saved state only. `resume` keeps its s
 
 The caller must choose an explicit task-specific name in lowercase kebab-case for every invocation, including continuations. Reject missing or invalid names before launch. The runtime adds the immediate parent's origin as `task-name ← parent-name`, using the first nonempty parent session name, current Herdr pane name, or project directory name. Do not generate task names or copy numbers. Keep the same combined title in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
 
+New replica branches must show their origin and supplied task name as `replica/<origin>/<name>`, not an opaque copy ID. Use a lowercase ASCII origin slug, transliterating Cyrillic so Herdr does not drop the origin from the checkout directory. Reserve each branch atomically at its exact snapshot commit; occupied names get numeric suffixes without changing session titles or reusing another copy's source. Preserve parent HEAD and staging, and leave existing branches and recovery paths unchanged.
+
 ## Durable lifecycle
 
 Replication is fire-and-forget. The caller gets an acknowledgement and later automatic delivery that starts a turn. Parents do not poll. Every fully stopped replica returns one truthful result, even after user input or Escape, and closes after durable settlement and descendant drain. Interruption and unsaved closure are failures with preserved post-fork answers and source work. Process loss does not automatically relaunch a replica; its immediate parent decides whether to continue it.

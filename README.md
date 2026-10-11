@@ -28,6 +28,8 @@ The initial schema requires `name` and `task`. A saved result reveals its copy I
 
 The caller must choose a task-specific `name` in lowercase kebab-case, such as `check-auth-risks`. The runtime adds the origin: `check-auth-risks ← Settings`. The origin comes from the parent's session name, then its current Herdr pane name, then the project directory name. The same combined title appears in the copy's session, Herdr workspace and pane, active status, and result. There is no automatic numbering. Internal IDs remain separate.
 
+Git branches use `replica/<origin>/<name>`, for example `replica/settings/check-auth-risks`. The origin is lowercased and made safe for a path; Cyrillic is transliterated (`Настройки` becomes `nastroiki`). Herdr uses the branch to name the checkout directory, such as `replica-nastroiki-check-auth-risks`. Repeated or simultaneous launches reserve separate branches with `-2`, `-3`, and so on, without changing the displayed session title. Existing branches and worktrees are not renamed.
+
 ## Replication runtime
 
 The following details describe the implementation, not instructions added to the agent's prompt.
