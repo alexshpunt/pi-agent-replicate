@@ -303,6 +303,11 @@ for (const backend of getAvailableBackends()) {
 			for (const id of ids) assert.equal(readFileSync(join(env.dir, id + ".txt"), "utf8"), id);
 			assert.equal(readFileSync(join(env.dir, "parent.txt"), "utf8"), "parent working");
 			assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
+			for (const result of entries(parentFile).filter((row) => row.customType === "subagent_result")) {
+				const binding = readSessionBinding(result.details.sessionFile)!;
+				await waitUntil(() => readReplicaWork(binding.child!.environment.PI_SUBAGENT_REPLICA_WORK_FILE).cleaned === true, "each applied sibling must finish durable cleanup");
+				await assertReplicaSurfaceClosed(result);
+			}
 		});
 		it("reports a host join conflict without applying any child file or replacing parent staging", async () => {
 			const parentFile = join(env.dir, "conflict-original.jsonl"), capability = join(env.dir, "conflict-capability.ts");

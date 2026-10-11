@@ -44,14 +44,9 @@ Update every affected active contract with behavior changes. Keep durable intent
 
 ## Verification
 
-For normal changes:
+Run only tests that check the changed behavior. Do not run full unit or integration suites unless the user explicitly asks. Run heavy checks on ZinPC, not the user's local machine. Give every test run a bounded timeout.
 
-```bash
-npm test
-npm run lint
-npm pack --dry-run
-git diff --check
-```
+Also check the changed files with lint, inspect package contents with `npm pack --dry-run`, and run `git diff --check`.
 
 Run diagnostics on every changed TypeScript file. If root `index.ts`, `index.js`, or `index.d.ts` changes, also run:
 
@@ -60,7 +55,7 @@ npx tsc --noEmit index.ts
 node --check index.js
 ```
 
-For lifecycle or Herdr changes, run `npm run test:integration` through the isolated runner. Never point tests at the user's persistent Herdr server.
+For lifecycle or Herdr changes, run the targeted real-Pi cases through the isolated runner with an explicit file list and test-name filter when needed. Never point tests at the user's persistent Herdr server.
 
 Before committing, inspect status and diff, check package contents, remove generated artifacts, and confirm no accidental empty root directory exists.
 
