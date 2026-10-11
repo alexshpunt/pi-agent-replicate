@@ -30,7 +30,7 @@ Owned continuation IDs address the latest saved state only. `resume` keeps its s
 
 The caller must choose an explicit task-specific name in lowercase kebab-case for every invocation, including continuations. Reject missing or invalid names before launch. The runtime adds the immediate parent's origin as `task-name ← parent-name`, using the first nonempty parent session name, current Herdr pane name, or project directory name. Do not generate task names or copy numbers. Keep the same combined title in the child session, host surfaces, status, and result; internal IDs still own recovery and delivery.
 
-New replica branches must show their origin and supplied task name as `replica/<origin>/<name>`, not an opaque copy ID. Use a lowercase ASCII origin slug, transliterating Cyrillic so Herdr does not drop the origin from the checkout directory. Reserve each branch atomically at its exact snapshot commit; occupied names get numeric suffixes without changing session titles or reusing another copy's source. Preserve parent HEAD and staging, and leave existing branches and recovery paths unchanged.
+New replica branches must show their origin and supplied task name as `replica/<origin>/<name>`, not an opaque copy ID. Use a lowercase ASCII origin slug, transliterating Cyrillic so Herdr does not drop the origin from the checkout directory. Reserve each branch atomically at its exact snapshot commit. Serialize allocation across the repository and check both branch names and flattened checkout names; occupied names get numeric suffixes without changing session titles or reusing another copy's source. Preserve parent HEAD and staging, and leave existing branches and recovery paths unchanged.
 
 ## Durable lifecycle
 
