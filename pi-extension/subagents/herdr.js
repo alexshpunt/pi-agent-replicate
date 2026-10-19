@@ -212,7 +212,8 @@ export function parseHerdrWorktreeList(output) {
     if (parsed?.result?.type !== "worktree_list" || !Array.isArray(worktrees)) {
         throw new Error("Unexpected herdr worktree list output");
     }
-    return worktrees.map((worktree) => {
+    // Detached checkouts have no branch and cannot match an owned replica.
+    return worktrees.filter((worktree) => !(worktree.is_detached === true && worktree.branch === undefined && typeof worktree.path === "string")).map((worktree) => {
         if (typeof worktree.branch !== "string" ||
             typeof worktree.path !== "string") {
             throw new Error("Unexpected herdr worktree list entry");
