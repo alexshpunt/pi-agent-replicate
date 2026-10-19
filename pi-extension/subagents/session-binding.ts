@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, fsyncSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, fsyncSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, fstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
@@ -96,24 +96,115 @@ function readJson(path: string): any {
 	try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
 }
 
-/** Read a binding only when its key matches the containing session header. */
-export function readSessionBinding(sessionFile: string): SessionBinding | undefined {
-	let rows: any[];
-	try {
-		rows = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean).flatMap((line) => {
-			try { return [JSON.parse(line)]; } catch { return []; }
-		});
-	} catch { return undefined; }
-	const header = rows[0];
-	if (header?.type !== "session" || typeof header.id !== "string") return undefined;
-	for (const row of rows.reverse()) {
-		const binding = row.data;
-		if (row.type !== "custom" || row.customType !== SESSION_BINDING_TYPE) continue;
-		if (binding?.version !== 1 || binding.sessionId !== header.id || typeof binding.storeDir !== "string" || !isAbsolute(binding.storeDir)) continue;
-		if (binding.child && (!binding.child.lineage?.rootDir || !binding.child.lineage?.nodeId || !binding.child.environment)) continue;
-		return binding;
+interface BindingCursor {
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	sessionId: string;
+	boundary: Buffer;
+	pending: Buffer[];
+	lineStart: number;
+	record?: { offset: number; bytes: Buffer };
+	binding?: SessionBinding;
+}
+
+// Bound memory to observed sessions, not the full conversation or session directory.
+const bindingCursors = new Map<string, BindingCursor>();
+const READ_CHUNK = 4096;
+
+function readHeader(fd: number): { type: "session"; id: string } | undefined {
+	const chunks: Buffer[] = [];
+	for (let position = 0; position < 64 * 1024; position += READ_CHUNK) {
+		const buffer = Buffer.allocUnsafe(READ_CHUNK);
+		const count = readSync(fd, buffer, 0, buffer.length, position);
+		const newline = buffer.subarray(0, count).indexOf(10);
+		chunks.push(buffer.subarray(0, newline < 0 ? count : newline));
+		if (newline >= 0 || count < READ_CHUNK) {
+			const header = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			return header.type === "session" && typeof header.id === "string" ? header : undefined;
+		}
 	}
 	return undefined;
+}
+
+/** Read only the session header, never the conversation that follows it. */
+export function readSessionHeader(sessionFile: string): { type: "session"; id: string } | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(sessionFile, "r");
+		return readHeader(fd);
+	} catch { return undefined; }
+	finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function readBoundary(fd: number, size: number): Buffer {
+	const buffer = Buffer.alloc(Math.min(64, size));
+	const count = readSync(fd, buffer, 0, buffer.length, size - buffer.length);
+	return buffer.subarray(0, count);
+}
+
+function bindingRecordUnchanged(fd: number, cursor: BindingCursor): boolean {
+	if (!cursor.record) return true;
+	const buffer = Buffer.alloc(cursor.record.bytes.length);
+	return readSync(fd, buffer, 0, buffer.length, cursor.record.offset) === buffer.length && buffer.equals(cursor.record.bytes);
+}
+/** Read complete appended binding records, validating ownership against the current header. */
+export function readSessionBinding(sessionFile: string): SessionBinding | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(sessionFile, "r");
+		// Keep identity and records on one opened file if the path is replaced.
+		const stat = fstatSync(fd);
+		const previous = bindingCursors.get(sessionFile);
+		if (previous && previous.dev === stat.dev && previous.ino === stat.ino && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs) {
+			return previous.binding && structuredClone(previous.binding);
+		}
+		const header = readHeader(fd);
+		if (!header) { bindingCursors.delete(sessionFile); return undefined; }
+		// A replaced, truncated or rewritten journal must not retain cached ownership.
+		const append = previous && previous.dev === stat.dev && previous.ino === stat.ino && previous.sessionId === header.id && stat.size > previous.size && readBoundary(fd, previous.size).equals(previous.boundary) && bindingRecordUnchanged(fd, previous);
+		const cursor: BindingCursor = append ? previous : {
+			dev: stat.dev, ino: stat.ino, size: 0, mtimeMs: 0, ctimeMs: 0,
+			sessionId: header.id, boundary: Buffer.alloc(0), pending: [], lineStart: 0,
+		};
+		let position = cursor.size;
+		while (position < stat.size) {
+			const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, stat.size - position));
+			const count = readSync(fd, buffer, 0, buffer.length, position);
+			if (!count) break;
+			let start = 0;
+			for (let index = 0; index < count; index++) {
+				if (buffer[index] !== 10) continue;
+				cursor.pending.push(buffer.subarray(start, index));
+				const line = Buffer.concat(cursor.pending).toString("utf8");
+				const lineStart = cursor.lineStart;
+				cursor.lineStart = position + index + 1;
+				cursor.pending = [];
+				start = index + 1;
+				if (!line.includes(SESSION_BINDING_TYPE)) continue;
+				try {
+					const row = JSON.parse(line), binding = row.data;
+					if (row.type !== "custom" || row.customType !== SESSION_BINDING_TYPE) continue;
+					if (binding?.version !== 1 || binding.sessionId !== header.id || typeof binding.storeDir !== "string" || !isAbsolute(binding.storeDir)) continue;
+					if (binding.child && (!binding.child.lineage?.rootDir || !binding.child.lineage?.nodeId || !binding.child.environment)) continue;
+					cursor.binding = binding;
+					cursor.record = { offset: lineStart, bytes: Buffer.from(line + "\n") };
+				} catch { /* Ignore malformed complete records, as before. */ }
+			}
+			if (start < count) cursor.pending.push(buffer.subarray(start, count));
+			position += count;
+		}
+		cursor.size = position;
+		cursor.mtimeMs = stat.mtimeMs; cursor.ctimeMs = stat.ctimeMs;
+		cursor.boundary = readBoundary(fd, position);
+		bindingCursors.delete(sessionFile);
+		bindingCursors.set(sessionFile, cursor);
+		if (bindingCursors.size > 128) bindingCursors.delete(bindingCursors.keys().next().value!);
+		return cursor.binding && structuredClone(cursor.binding);
+	} catch { bindingCursors.delete(sessionFile); return undefined; }
+	finally { if (fd !== undefined) closeSync(fd); }
 }
 
 /** Use the store carried by the session, even when it moved to another agent directory. */
@@ -221,8 +312,5 @@ export function childSessionLocation(rootDir: string, nodeId: string): SessionLo
 export function parentSessionLocation(storeDir: string, sessionId: string): SessionLocation | undefined {
 	const value = readJson(join(storeDir, "locations", `${encodeURIComponent(sessionId)}.json`));
 	if (!validLocation(value) || value.sessionId !== sessionId) return undefined;
-	try {
-		const header = JSON.parse(readFileSync(value.sessionFile, "utf8").split("\n")[0]);
-		return header.type === "session" && header.id === sessionId ? value : undefined;
-	} catch { return undefined; }
+	return readSessionHeader(value.sessionFile)?.id === sessionId ? value : undefined;
 }

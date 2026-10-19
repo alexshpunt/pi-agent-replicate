@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { readSessionBinding, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
+import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
 import type { WorktreeLaunch } from "./launch.ts";
 
 /** Durable launch registration and recursive ownership projection. */
@@ -752,12 +752,22 @@ export function discoverLineageRoots(sessionDir: string, sessionFile?: string): 
   if (sessionFile) {
     const attachment = readLineageAttachment(sessionFile);
     if (attachment) result.add(attachment.rootDir);
-    try {
-      const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0]);
-      if (header.type === "session" && typeof header.id === "string") {
-        for (const rootDir of sessionLineageRoots(sessionBindingStore(sessionFile), header.id)) result.add(rootDir);
-      }
-    } catch { /* An unreadable session cannot supply a durable key. */ }
+    const binding = readSessionBinding(sessionFile);
+    const header = readSessionHeader(sessionFile);
+    if (header) {
+      for (const rootDir of sessionLineageRoots(binding?.storeDir ?? sessionBindingStore(), header.id)) result.add(rootDir);
+    }
+    // Bound sessions need only their index and their own legacy artifacts,
+    // including a root published after startup but not yet indexed by a launcher.
+    if (binding) {
+      const lineageDir = join(sessionDir, "artifacts", binding.sessionId, "lineage");
+      try {
+        for (const root of readdirSync(lineageDir, { withFileTypes: true })) {
+          if (root.isDirectory()) result.add(join(lineageDir, root.name));
+        }
+      } catch { /* This session may have no local artifacts after a move. */ }
+      return [...result].sort();
+    }
   }
   try {
     for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {
