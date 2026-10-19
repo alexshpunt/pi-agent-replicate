@@ -26,7 +26,7 @@ function packageMeta(path) { let d = statSync(path).isDirectory() ? path : dirna
     d = parent;
 } }
 function legacy(content, name, path) { const m = content.match(/^---\n([\s\S]*?)\n---/), cli = m ? fm(m[1], "cli") : undefined; if (!cli)
-    return null; const n = fm(m[1], "name") ?? name; return { code: "external-cli-unsupported", message: `Role "${n}" requests external CLI "${cli}" in ${path}. pi-lpt-herdr-subagents is Pi-only; remove the cli and cli-model fields and select Claude through an authenticated Pi provider/model ID.`, path, agentName: n }; }
+    return null; const n = fm(m[1], "name") ?? name; return { code: "external-cli-unsupported", message: `Role "${n}" requests external CLI "${cli}" in ${path}. pi-agent-replicate is Pi-only; remove the cli and cli-model fields and select Claude through an authenticated Pi provider/model ID.`, path, agentName: n }; }
 export function resolveDenyTools(agent) { const out = new Set(); if (!agent)
     return out; if (agent.spawning === false)
     for (const x of SPAWNING)
