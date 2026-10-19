@@ -125,6 +125,8 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 `replicate` is fire-and-forget. Do not poll, sleep, tail session files or check panes to wait for it. Continue independent work or end your turn until automatic delivery starts the next turn.
 
+Delayed result and help cards keep the launch call that owns that attempt. In Stereo fullscreen they appear beside that call in Activity, not as a second Conversation card. Nested calls link to their actual visible outer call; resume and fork link to their new invocation. Saved ownership follows delivery through reload, receiver recovery and Teleport. Older or API-launched work without a recorded tool owner stays unlinked. This changes presentation only: the parent still receives the complete result, and saved history stays chronological.
+
 Host metadata retains the saved session and immutable Markdown result-file paths. Routine model-visible results carry the copy's summary and saved-copy choice, not those internal references. Terminal model failures report error facts; host metadata also retains a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
 Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent can choose a continuation from the returned result.
