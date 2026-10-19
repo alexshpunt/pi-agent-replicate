@@ -483,10 +483,12 @@ function sendSubagentResult(
 ): void {
 	const childId = typeof details.childId === "string" ? details.childId : undefined;
 	const running = childId ? runningSubagents.get(childId) : undefined;
-	const executionOwner = Object.hasOwn(details, "executionOwner")
+	// A replay must keep its saved payload, file and owner together.
+	const savedDelivery = Object.hasOwn(details, "executionOwner");
+	const executionOwner = savedDelivery
 		? readExecutionOwner(details.executionOwner)
 		: running?.executionOwner;
-	const resultContent = running?.deliveryPayload ??
+	const resultContent = (savedDelivery ? undefined : running?.deliveryPayload) ??
 		(typeof details.resultContent === "string"
 			? details.resultContent
 			: boundResultPresentation(content, ""));
@@ -507,7 +509,7 @@ function sendSubagentResult(
 				...details,
 				...linkedOutputDetails(executionOwner),
 				resultContent,
-				...(running?.resultPath ? { resultPath: running.resultPath } : {}),
+				...(!savedDelivery && running?.resultPath ? { resultPath: running.resultPath } : {}),
 			},
 		},
 		{ triggerTurn: true, deliverAs: "steer" },
@@ -3946,7 +3948,7 @@ function registerSubagentRenderers(pi: ExtensionAPI) {
 					// Full view: complete summary + session info
 					if (summary) {
 						for (const line of summary.split("\n")) {
-							contentLines.push(line.slice(0, width - 6));
+							contentLines.push(line);
 						}
 					}
 					if (details.sessionFile) {
