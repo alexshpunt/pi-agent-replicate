@@ -270,7 +270,7 @@ export function createHerdrSurface(name: string): string {
 	return createHerdrSurfaceInWorkspace(name, process.cwd(), workspaceId);
 }
 
-/** Worktree records returned by `herdr worktree list`. */
+/** Branch-backed worktree records returned by `herdr worktree list`. */
 export interface HerdrWorktreeInfo {
 	branch: string;
 	path: string;
@@ -308,6 +308,7 @@ export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
 				label?: unknown;
 				open_workspace_id?: unknown;
 				is_linked_worktree?: unknown;
+				is_detached?: unknown;
 			}>;
 		};
 	} | null;
@@ -315,7 +316,10 @@ export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
 	if (parsed?.result?.type !== "worktree_list" || !Array.isArray(worktrees)) {
 		throw new Error("Unexpected herdr worktree list output");
 	}
-	return worktrees.map((worktree) => {
+	// Detached checkouts have no branch and cannot match an owned replica.
+	return worktrees.filter((worktree) => !(
+		worktree.is_detached === true && worktree.branch === undefined && typeof worktree.path === "string"
+	)).map((worktree) => {
 		if (
 			typeof worktree.branch !== "string" ||
 			typeof worktree.path !== "string"
