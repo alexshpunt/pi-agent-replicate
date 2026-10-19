@@ -4612,6 +4612,24 @@ describe("herdr.ts", () => {
 			);
 		});
 
+		it("keeps branch worktrees usable when another checkout has a detached HEAD", () => {
+			assert.deepEqual(
+				__herdrTest__.parseHerdrWorktreeList(JSON.stringify({ result: {
+					type: "worktree_list",
+					worktrees: [
+						{ path: "/tmp/detached", is_detached: true, is_linked_worktree: true },
+						{ branch: "replica/check-source", path: "/tmp/replica", open_workspace_id: "w9", is_linked_worktree: true },
+					],
+				} })),
+				[{ branch: "replica/check-source", path: "/tmp/replica", workspaceId: "w9", isLinkedWorktree: true }],
+			);
+		});
+
+		it("still rejects a missing branch without detached HEAD evidence", () => {
+			assert.throws(() => __herdrTest__.parseHerdrWorktreeList(JSON.stringify({ result: {
+				type: "worktree_list", worktrees: [{ path: "/tmp/unknown", is_linked_worktree: true }],
+			} })), /Unexpected herdr worktree list entry/);
+		});
 		it("parses the recovered root pane for a worktree workspace", () => {
 			assert.deepEqual(
 				__herdrTest__.parseHerdrPaneList(

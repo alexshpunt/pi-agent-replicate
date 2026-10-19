@@ -284,6 +284,24 @@ for (const backend of getAvailableBackends()) {
 				assert.equal(entries(launch.message.details.sessionFile).filter((row) => row.type === "session_info").at(-1).name, expected);
 			}
 		});
+		it("cleans an applied replica beside an unrelated detached checkout", async () => {
+			const detached = join(env.dir, ".pi", "agent", "detached-checkout");
+			execFileSync("git", ["worktree", "add", "--detach", detached, "HEAD"], { cwd: env.dir });
+			writeFileSync(join(detached, "keep.txt"), "unrelated work");
+			const parentFile = join(env.dir, "detached-original.jsonl");
+			const parent = createTrackedSurface(env, "detached-original");
+			await waitForPaneReady(parent);
+			startPi(parent, env.dir, 'Call the replicate tool once with name: "check-source", task: "Return exactly DETACHED_CLEANUP_DONE"', { extraArgs: `--session ${shellQuote(parentFile)}` });
+			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "replica result must reach the parent");
+			const result = entries(parentFile).find((row) => row.customType === "subagent_result");
+			assert.equal(result.details.integration.status, "applied");
+			const binding = readSessionBinding(result.details.sessionFile)!;
+			await waitUntil(() => readReplicaWork(binding.child!.environment.PI_SUBAGENT_REPLICA_WORK_FILE).cleaned === true, "detached checkout must not block replica cleanup");
+			assert.equal(existsSync(result.details.worktreePath), false);
+			await assertReplicaSurfaceClosed(result);
+			assert.equal(readFileSync(join(detached, "keep.txt"), "utf8"), "unrelated work");
+			assert.equal(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: detached, encoding: "utf8" }).trim(), "HEAD");
+		});
 		it("joins two isolated siblings without dropping current parent work or staging", async () => {
 			const parentFile = join(env.dir, "siblings-original.jsonl"), capability = join(env.dir, "siblings-capability.ts");
 			const gate = join(env.dir, ".pi", "agent", "siblings-gate"), markers = gate + ".started";
