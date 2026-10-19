@@ -1,4 +1,4 @@
-# Pi LPT Herdr Subagents
+# Pi Agent Replicate
 
 An experimental session-replication extension for [Pi](https://github.com/earendil-works/pi) in [Herdr](https://herdr.dev).
 
@@ -6,8 +6,10 @@ An agent can run a defined part of its task in parallel with another copy of its
 
 ## Install
 
+After the first npm release:
+
 ```bash
-pi install npm:pi-lpt-herdr-subagents
+pi install npm:pi-agent-replicate
 ```
 
 Start Pi inside Herdr, then restart Pi or run `/reload`.
@@ -165,7 +167,7 @@ See [Worktree subagents](docs/worktree-subagents.md) for review and cleanup comm
 Other Pi extensions can import the side-effect-free package root:
 
 ```typescript
-import { createSubagentTree, attachSubagentTree } from "pi-lpt-herdr-subagents";
+import { createSubagentTree, attachSubagentTree } from "pi-agent-replicate";
 ```
 
 The tree API supports nested ownership, exact-parent reattachment, cancellation, worktree children, and one final callback. Its child runtime retains role frontmatter, then parent inheritance; this is separate from session replication. See [Public subagent tree API](docs/public-subagent-tree-api.md).

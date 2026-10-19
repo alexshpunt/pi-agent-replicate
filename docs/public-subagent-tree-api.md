@@ -1,6 +1,6 @@
 # Public subagent tree API
 
-`@alexshp/pi-lpt-herdr-subagents` exports a registration-free API for installed Pi extensions running in Herdr. Importing the package root does not register model-facing tools.
+`pi-agent-replicate` exports a registration-free API for installed Pi extensions running in Herdr. Importing the package root does not register model-facing tools.
 
 ## Create and launch
 
@@ -10,7 +10,7 @@ The model-facing `replicate` tool uses source-snapshot worktrees and host-owned 
 import {
   createSubagentTree,
   type SubagentTreeResult,
-} from "@alexshp/pi-lpt-herdr-subagents";
+} from "pi-agent-replicate";
 
 const tree = createSubagentTree({ pi, ctx, metadata: { requestId: "search-1" } });
 const child = await tree.launchChild({

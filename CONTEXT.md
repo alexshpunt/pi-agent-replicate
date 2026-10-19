@@ -1,6 +1,6 @@
 # Project context
 
-`pi-lpt-herdr-subagents` lets an agent split independent work into copies of its current Pi session in Herdr.
+`pi-agent-replicate` lets an agent split independent work into copies of its current Pi session in Herdr.
 
 ## Shipped surface
 
