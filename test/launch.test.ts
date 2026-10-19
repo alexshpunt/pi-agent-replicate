@@ -108,10 +108,13 @@ describe("Pi launch", () => {
 				},
 			};
 
+			request.executionOwner = { toolCallId: "nested-leaf", parentToolCallId: "visible-root" };
 			const running = await launchPiSubagent(request, operations);
 
 			assert.deepEqual(events, ["create", "ready", "run"]);
 			assert.equal(running.id, "child-1");
+			assert.deepEqual(running.executionOwner, request.executionOwner);
+			assert.deepEqual(reduceLineage(running.lineage!.rootDir).nodes.get(running.id)?.executionOwner, request.executionOwner);
 			assert.equal(running.surface, "pane-1");
 			assert.equal(running.launchScriptFile, scriptPath);
 			assert.ok(running.sessionFile.startsWith(join(agentDir, "sessions")));

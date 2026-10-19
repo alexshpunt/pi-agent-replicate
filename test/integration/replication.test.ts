@@ -143,6 +143,10 @@ for (const backend of getAvailableBackends()) {
 				const result = results[0];
 				assert.match(result.content, /Replica .* error/);
 				assert.match(result.content, task === "REPLICATION_FAIL_WITH_HISTORY" ? /deterministic replica terminal failure/ : /no required summary/);
+				const launchCall = entries(parentFile).find(row => row.message?.role === "toolResult" && row.message.toolName === "replicate")?.message.toolCallId;
+				assert.ok(launchCall);
+				assert.equal(result.details.parentToolCallId, launchCall);
+				assert.equal(result.details.originatingToolCallId, launchCall);
 				const history = readFileSync(result.details.historyPath, "utf8");
 				assert.doesNotMatch(history, /INHERITED_ANSWER_NOT_HISTORY|TOOL_OUTPUT_NOT_AN_ANSWER|echo TOOL_OUTPUT|Call the replicate tool/);
 				if (task === "REPLICATION_FAIL_WITH_HISTORY") assert.match(history, /REPLICA_FIRST_ANSWER/);

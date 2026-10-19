@@ -209,6 +209,10 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
 
+	if (names.has("replication_output_wrapper") && lastRole !== "tool" && /Call the replica output wrapper/i.test(user)) {
+		const task = quotedValue(user, "task");
+		if (task) return { toolCalls: [{ name: "replication_output_wrapper", arguments: { name: quotedValue(user, "name"), task } }] };
+	}
 	if (names.has("replicate") && lastRole !== "tool" && /Call the replicate tool/i.test(user)) {
 		const task = quotedValue(user, "task");
 		if (task) {

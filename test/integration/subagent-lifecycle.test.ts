@@ -56,6 +56,8 @@ const backends = getAvailableBackends();
 
 
 interface IntegrationResultDetails {
+	parentToolCallId?: unknown;
+	originatingToolCallId?: unknown;
 	kind?: unknown;
 	outcome?: unknown;
 	childId?: unknown;
@@ -1606,6 +1608,10 @@ for (const backend of backends) {
 			const firstEntries = await waitForCustomResultCount(parentSession, 1);
 			const first = customResultEntries(firstEntries)[0]?.details ?? {};
 			assert.equal(first.kind, "help-request");
+			const launchCall = readSessionEntries(parentSession).find(entry => entry.message?.role === "toolResult" && entry.message.toolName === "subagent")?.message.toolCallId;
+			assert.ok(launchCall);
+			assert.equal(first.parentToolCallId, launchCall);
+			assert.equal(first.originatingToolCallId, launchCall);
 			assert.equal(typeof first.sessionFile, "string");
 			assert.equal(typeof first.resultPath, "string");
 			assert.match(readFileSync(first.resultPath as string, "utf8"), /Status: help-request/);
@@ -1634,6 +1640,7 @@ for (const backend of backends) {
 			const finalResults = customResultEntries(readSessionEntries(parentSession));
 			assert.equal(finalResults.filter((entry) => entry.details?.kind === "help-request").length, 2);
 			assert.equal(finalResults.length, 3, "explicit completion publishes exactly one terminal result");
+			for (const result of finalResults) assert.equal(result.details?.parentToolCallId, launchCall);
 			assert.match(String(finalResults[2]?.details?.resultContent), /SETTLED_TWO/);
 		});
 

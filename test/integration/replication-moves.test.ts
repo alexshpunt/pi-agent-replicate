@@ -84,6 +84,10 @@ for (const backend of getAvailableBackends()) {
 				}
 				assert.equal(results(receiverFile)[0].details.integration.status, "applied", JSON.stringify(results(receiverFile)[0].details.integration));
 				assert.match(results(receiverFile)[0].content, /HELD_SUMMARY/);
+				const launchCall = entries(receiverFile).find(row => row.message?.role === "toolResult" && row.message.toolName === "replicate")?.message.toolCallId;
+				assert.ok(launchCall);
+				assert.equal(results(receiverFile)[0].details.parentToolCallId, launchCall);
+				assert.equal(results(receiverFile)[0].details.originatingToolCallId, launchCall);
 				assert.equal(readFileSync(join(env.dir, "held.txt"), "utf8"), "HELD_SOURCE");
 				assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: env.dir, encoding: "utf8" }), head);
 				assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);

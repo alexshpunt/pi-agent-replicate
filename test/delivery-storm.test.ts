@@ -125,7 +125,7 @@ function publishQueuedResult(options: {
 		CHILD_ID,
 		DELIVERY_ID,
 		{ sessionId: PARENT_SESSION_ID, sessionFile: options.parentSessionFile },
-		{ kind: "terminal", resultContent: RESULT, status: "completed" },
+		{ kind: "terminal", executionOwner: { toolCallId: "nested-launch", parentToolCallId: "outer-launch" }, resultContent: RESULT, status: "completed" },
 	);
 	return lineage.rootDir;
 }
@@ -167,6 +167,9 @@ describe("one queued result stays one queued result", () => {
 
 		await __test__.restorePendingLineageInboxes(harness.ctx);
 		assert.equal(harness.sends.length, 1, "the first recovery pass queues the result once");
+		assert.equal(harness.sends[0].details.parentToolCallId, "outer-launch");
+		assert.equal(harness.sends[0].details.originatingToolCallId, "nested-launch");
+		assert.ok(harness.sends[0].content.includes(RESULT));
 
 		// The parent is still streaming, so the steer is only queued.
 		await __test__.restorePendingLineageInboxes(harness.ctx);
