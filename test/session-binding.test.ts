@@ -45,6 +45,15 @@ test("a fork carrying copied binding entries cannot take the original ownership"
 	assert.deepEqual(discoverLineageRoots(f.destinationDir, f.moved), []);
 });
 
+test("bound discovery does not walk unrelated historical sessions", () => {
+	const f = fixture();
+	seedSessionBinding(f.source, { version: 1, storeDir: f.storeDir });
+	registerSessionLineage(f.storeDir, "parent", f.lineage.rootDir);
+	const unrelated = registerLineage({ artifactDir: join(f.root, "artifacts", "old-session"), nodeId: "unrelated", parentSessionId: "other-parent" });
+	writeFileSync(join(f.root, "old.jsonl"), JSON.stringify({ type: "session", id: "other-parent" }) + "\n");
+	writeFileSync(join(f.root, "old.jsonl.lineage.json"), JSON.stringify(unrelated));
+	assert.deepEqual(discoverLineageRoots(f.root, f.source), [f.lineage.rootDir]);
+});
 test("pending delivery follows the parent key, not the old file path", () => {
 	const f = fixture();
 	appendLineageInbox(f.lineage.rootDir, "worker", "terminal:worker", { sessionId: "parent", sessionFile: f.source }, { resultContent: "answer" });
