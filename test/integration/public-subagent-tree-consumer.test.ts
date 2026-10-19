@@ -35,7 +35,7 @@ import {
 } from "./harness.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const scopedPackageName = "@alexshp/pi-lpt-herdr-subagents";
+const packageName = "pi-agent-replicate";
 const forbiddenTools = [
 	"subagent",
 	"subagent_interrupt",
@@ -52,26 +52,11 @@ interface PaneRecord {
 }
 
 function installPackedConsumer(env: TestEnv): void {
-	const sourcePack = JSON.parse(
-		execFileSync(
-			"npm",
-			["pack", "--json", "--pack-destination", env.dir],
-			{ cwd: root, encoding: "utf8" },
-		),
-	)[0] as { filename: string };
-	const staging = join(env.dir, "scoped-package");
-	mkdirSync(staging, { recursive: true });
-	execFileSync("tar", ["-xzf", join(env.dir, sourcePack.filename), "-C", staging]);
-	const stagedRoot = join(staging, "package");
-	const manifestPath = join(stagedRoot, "package.json");
-	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-	manifest.name = scopedPackageName;
-	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 	const packed = JSON.parse(
 		execFileSync(
 			"npm",
 			["pack", "--json", "--pack-destination", env.dir],
-			{ cwd: stagedRoot, encoding: "utf8" },
+			{ cwd: root, encoding: "utf8" },
 		),
 	)[0] as { filename: string };
 	const tarball = join(env.dir, packed.filename);
@@ -81,7 +66,7 @@ function installPackedConsumer(env: TestEnv): void {
 			name: "ale-46-real-pi-consumer",
 			private: true,
 			type: "module",
-			dependencies: { [scopedPackageName]: `file:${tarball}` },
+			dependencies: { [packageName]: `file:${tarball}` },
 		}, null, 2)}\n`,
 	);
 	execFileSync(
@@ -116,7 +101,7 @@ function consumerExtensionSource(options: {
 }): string {
 	return [
 		`import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";`,
-		`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+		`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(packageName)};`,
 		`const files = ${JSON.stringify(options.files)};`,
 
 		`let herdrDisabled = false;`,

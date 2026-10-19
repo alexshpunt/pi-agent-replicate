@@ -7,7 +7,7 @@ import { after, before, describe, it } from "node:test";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = join(root, ".agents", "tmp");
-const scopedPackageName = "@alexshp/pi-lpt-herdr-subagents";
+const packageName = "pi-agent-replicate";
 const typescriptVersion = "5.9.2";
 const modelFacingTools = [
 	"subagent",
@@ -27,26 +27,11 @@ let packageFiles: Set<string>;
 before(() => {
 	mkdirSync(temporaryRoot, { recursive: true });
 	runDirectory = mkdtempSync(join(temporaryRoot, "ale-46-packed-consumer-"));
-	const sourcePack = JSON.parse(
-		execFileSync(
-			"npm",
-			["pack", "--json", "--pack-destination", runDirectory],
-			{ cwd: root, encoding: "utf8" },
-		),
-	)[0] as { filename: string };
-	const staging = join(runDirectory, "scoped-package");
-	mkdirSync(staging, { recursive: true });
-	execFileSync("tar", ["-xzf", join(runDirectory, sourcePack.filename), "-C", staging]);
-	const stagedRoot = join(staging, "package");
-	const stagedManifestPath = join(stagedRoot, "package.json");
-	const stagedManifest = JSON.parse(readFileSync(stagedManifestPath, "utf8"));
-	stagedManifest.name = scopedPackageName;
-	writeFileSync(stagedManifestPath, `${JSON.stringify(stagedManifest, null, 2)}\n`);
 	const pack = JSON.parse(
 		execFileSync(
 			"npm",
 			["pack", "--json", "--pack-destination", runDirectory],
-			{ cwd: stagedRoot, encoding: "utf8" },
+			{ cwd: root, encoding: "utf8" },
 		),
 	)[0] as {
 		filename: string;
@@ -64,7 +49,7 @@ before(() => {
 				name: "ale-46-installed-typescript-consumer",
 				private: true,
 				type: "module",
-				dependencies: { [scopedPackageName]: `file:${tarballPath}` },
+				dependencies: { [packageName]: `file:${tarballPath}` },
 				devDependencies: { typescript: typescriptVersion },
 			},
 			null,
@@ -113,11 +98,11 @@ describe("public subagent tree package boundary", () => {
 		}
 	});
 
-	it("imports the packed scoped package root without extension registration side effects", () => {
+	it("imports the packed package root without extension registration side effects", () => {
 		const imported = runInstalledProbe(
 			"import-probe",
 			[
-				`const api = await import(${JSON.stringify(scopedPackageName)});`,
+				`const api = await import(${JSON.stringify(packageName)});`,
 				`if (typeof api.createSubagentTree !== "function") throw new Error("missing createSubagentTree export");`,
 				`if (typeof api.attachSubagentTree !== "function") throw new Error("missing attachSubagentTree export");`,
 				`if ("default" in api) throw new Error("package root must not export the Pi extension initializer");`,
@@ -147,7 +132,7 @@ describe("public subagent tree package boundary", () => {
 		const probed = runInstalledProbe(
 			"fork-context-probe",
 			[
-				`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+				`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(packageName)};`,
 				`const probeRoot = ${JSON.stringify(probeRoot)};`,
 				`const oldSession = ${JSON.stringify(oldSession)};`,
 				`const invalidSession = ${JSON.stringify(invalidSession)};`,
@@ -258,7 +243,7 @@ describe("public subagent tree package boundary", () => {
 		writeFileSync(forkSession, `${JSON.stringify({ type: "session", id: "fork", version: 3, cwd: probeRoot, parentSession: oldSession })}\n`);
 		writeFileSync(newSession, `${JSON.stringify({ type: "session", id: "new", version: 3, cwd: probeRoot })}\n`);
 		const probed = runInstalledProbe("accepted-fork-resume-probe", [
-			`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+			`import { createSubagentTree, attachSubagentTree } from ${JSON.stringify(packageName)};`,
 			`const root = ${JSON.stringify(probeRoot)}; const oldSession = ${JSON.stringify(oldSession)}; const forkSession = ${JSON.stringify(forkSession)}; const newSession = ${JSON.stringify(newSession)};`,
 			`function context(sessionFile) { return { cwd: root, model: { provider: "sentinel", id: "probe" }, sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => sessionFile.split("/").pop().replace(".jsonl", ""), getSessionDir: () => root } }; }`,
 			`const pi = { getThinkingLevel: () => "low" };`,
@@ -276,7 +261,7 @@ describe("public subagent tree package boundary", () => {
 		const probeRoot = join(consumerDirectory, "mid-launch-cancel-probe");
 		mkdirSync(probeRoot, { recursive: true });
 		const probed = runInstalledProbe("mid-launch-cancel-probe", [
-			`import { createSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+			`import { createSubagentTree } from ${JSON.stringify(packageName)};`,
 			`import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";`,
 			`import { join } from "node:path";`,
 			`const probeRoot = ${JSON.stringify(probeRoot)};`,
@@ -321,7 +306,7 @@ describe("public subagent tree package boundary", () => {
 		const probeRoot = join(consumerDirectory, "surfaced-stale-inflight-probe");
 		mkdirSync(probeRoot, { recursive: true });
 		const probed = runInstalledProbe("surfaced-stale-inflight-probe", [
-			`import { createSubagentTree } from ${JSON.stringify(scopedPackageName)};`,
+			`import { createSubagentTree } from ${JSON.stringify(packageName)};`,
 			`import { spawn } from "node:child_process";`,
 			`import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";`,
 			`import { join } from "node:path";`,
@@ -376,7 +361,7 @@ describe("public subagent tree package boundary", () => {
 				`  type SubagentTreeResult,`,
 				`  type SubagentChildHandle,`,
 				`  type SubagentChildResult,`,
-				`} from ${JSON.stringify(scopedPackageName)};`,
+				`} from ${JSON.stringify(packageName)};`,
 				`declare const pi: any;`,
 				`declare const ctx: any;`,
 				`const created: SubagentTreeHandle = createSubagentTree({`,
