@@ -2,6 +2,7 @@ import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdi
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.js";
+import { readExecutionOwner } from "./execution-owner.js";
 function safeId(value) {
     return Buffer.from(value, "utf8").toString("base64url");
 }
@@ -185,6 +186,7 @@ export function reduceLineage(rootDir) {
             const runStart = typeof event.startTime === "number" ? event.startTime : 0;
             if (node.startTime !== undefined && runStart < node.startTime)
                 continue;
+            node.executionOwner = readExecutionOwner(event.executionOwner);
             if (typeof event.name === "string")
                 node.name = event.name;
             if (typeof event.task === "string")

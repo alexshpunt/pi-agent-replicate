@@ -15,6 +15,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
 import type { WorktreeLaunch } from "./launch.ts";
+import { readExecutionOwner, type ExecutionOwner } from "./execution-owner.ts";
 
 /** Durable launch registration and recursive ownership projection. */
 export interface LineageRegistration {
@@ -28,6 +29,8 @@ export interface LineageRegistration {
 }
 
 export interface LineageNodeState {
+  /** Attempt-specific tool ownership survives receiver recovery and movement. */
+  executionOwner?: ExecutionOwner;
   /** Preserve replica lifecycle when restoring a watcher. */
   replication?: boolean;
   /** Work/checkpoint ownership must survive moved or deleted session files. */
@@ -262,6 +265,7 @@ export function reduceLineage(rootDir: string): LineageState {
       // this comparison is deterministic and does not use event publication time.
       const runStart = typeof event.startTime === "number" ? event.startTime : 0;
       if (node.startTime !== undefined && runStart < node.startTime) continue;
+      node.executionOwner = readExecutionOwner(event.executionOwner);
       if (typeof event.name === "string") node.name = event.name;
       if (typeof event.task === "string") node.task = event.task;
       if (typeof event.agent === "string") node.agent = event.agent;
