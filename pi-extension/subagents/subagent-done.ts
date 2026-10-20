@@ -316,7 +316,20 @@ export function buildSkillInitialization(
   };
 }
 
-export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
+/** Install child lifecycle only after this runtime opens its own persisted binding. */
+export default function subagentLifecycle(pi: ExtensionAPI, initialContext?: ExtensionContext): void {
+  const start = (ctx: ExtensionContext) => {
+    const file = ctx.sessionManager.getSessionFile();
+    const binding = file ? readSessionBinding(file) : undefined;
+    // Startup checks inherit the child's environment, not ownership of its session.
+    if (!binding?.child || binding.sessionId !== ctx.sessionManager.getSessionId()) return;
+    installChildLifecycle(pi, ctx);
+  };
+  if (initialContext) start(initialContext);
+  else pi.on("session_start", (_event, ctx) => start(ctx));
+}
+
+function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContext): void {
   if (hasChildLifecycle(pi)) return;
   lifecycles.add(pi.events);
   const lifecycleSession = process.env.PI_SUBAGENT_SESSION;
@@ -429,6 +442,8 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
 
   let agentStarted = false;
   let movePending = false;
+  let reloadPending = false;
+  let runtimeActive = true;
   let intervened = false;
   const mechanicalInterruptPath = process.env.PI_SUBAGENT_SESSION
     ? `${process.env.PI_SUBAGENT_SESSION}.mechanical-interrupt`
@@ -535,7 +550,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
       const descendants = !!lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId);
       const idle = ctx.isIdle();
       const pendingMessages = ctx.hasPendingMessages();
-      if (!idle || pendingMessages || movePending || descendants) { idleSince = undefined; return; }
+      if (!idle || pendingMessages || movePending || reloadPending || descendants) { idleSince = undefined; return; }
       if (!latestAgentEndMessages && !stopPayload) return;
       idleSince ??= Date.now();
       if (!replicaStopDue({ now: Date.now(), idleSince, idle, pendingMessages, moving: movePending, descendants })) return;
@@ -573,6 +588,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
       : false;
     if (shouldWaitForDescendants) await waitForDescendantDrain();
     if (treeOwner) await waitForOwnedChildren();
+    if (!runtimeActive || reloadPending) { exitRequested = false; return; }
     const sessionFile = process.env.PI_SUBAGENT_SESSION;
     if (sessionFile) {
       try {
@@ -608,6 +624,8 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
 
 
   on("agent_settled", (_event, ctx) => {
+    // A queued self-reload owns the next continuation, not this acknowledgement.
+    if (reloadPending || !runtimeActive) return;
     const outcome = classifyAutoExitOutcome(
       latestAgentEndMessages,
       interruptRequested,
@@ -725,6 +743,7 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   });
 
   on("tool_result", (event, ctx) => {
+    if (event.toolName === "pi_extension_dev_reload_self" && !event.isError && (event.details as { queued?: boolean } | undefined)?.queued) reloadPending = true;
     if (event.toolName === "teleport" && event.isError) { movePending = false; bindSessionRuntime(pi, ctx); }
     recorder.toolResult((event as any).toolCallId, (event as any).toolName);
   });
@@ -737,12 +756,15 @@ export default function (pi: ExtensionAPI, initialContext?: ExtensionContext) {
   });
 
   on("message_end", (event, ctx) => {
-    if ((event.message as { customType?: string }).customType === "pi-agent-teleport-failure") {
+    const message = event.message as { customType?: string; details?: { status?: string } };
+    if (message.customType === "pi-reload-self" && message.details?.status === "blocked") reloadPending = false;
+    if (message.customType === "pi-agent-teleport-failure") {
       movePending = false;
       bindSessionRuntime(pi, ctx);
     }
   });
   on("session_shutdown", (event) => {
+    runtimeActive = false;
     if (stopTimer) clearInterval(stopTimer);
     if (replication && event.reason === "quit" && !movePending) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
