@@ -38,6 +38,7 @@ import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
 import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages, type ReplicateToolControls } from "./replication.ts";
 import { snapshotSource } from "./source-state.ts";
+import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
 import { runReplicaBackground } from "./replica-background.ts";
 import { reserveReplicaBranch } from "./replica-branch.ts";
 import { getHerdrCurrentPaneTitle } from "./herdr.ts";
@@ -482,7 +483,12 @@ function sendSubagentResult(
 ): void {
 	const childId = typeof details.childId === "string" ? details.childId : undefined;
 	const running = childId ? runningSubagents.get(childId) : undefined;
-	const resultContent = running?.deliveryPayload ??
+	// A replay must keep its saved payload, file and owner together.
+	const savedDelivery = Object.hasOwn(details, "executionOwner");
+	const executionOwner = savedDelivery
+		? readExecutionOwner(details.executionOwner)
+		: running?.executionOwner;
+	const resultContent = (savedDelivery ? undefined : running?.deliveryPayload) ??
 		(typeof details.resultContent === "string"
 			? details.resultContent
 			: boundResultPresentation(content, ""));
@@ -501,8 +507,9 @@ function sendSubagentResult(
 			display: true,
 			details: {
 				...details,
+				...linkedOutputDetails(executionOwner),
 				resultContent,
-				...(running?.resultPath ? { resultPath: running.resultPath } : {}),
+				...(!savedDelivery && running?.resultPath ? { resultPath: running.resultPath } : {}),
 			},
 		},
 		{ triggerTurn: true, deliverAs: "steer" },
@@ -633,6 +640,7 @@ interface PendingTerminalDelivery {
  * State for a launched (but not yet completed) subagent.
  */
 interface RunningSubagent {
+	executionOwner?: ExecutionOwner;
 	/** Current-session replica, not a named-role launch. */
 	replication?: boolean;
 	replicaWorkFile?: string;
@@ -714,6 +722,7 @@ interface InflightDelivery {
 }
 
 interface SubagentRuntime {
+	resolveExecutionOwner?: (id: string) => ExecutionOwner | undefined;
 	replicateTool?: ReplicateToolControls;
 	runningSubagents: Map<string, RunningSubagent>;
 	resultDeliveryQueue: ResultDeliveryQueue;
@@ -863,6 +872,7 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 			try {
 				sendSubagentResult(runtime.pi, resultContent, {
 					...inbox.payload,
+					executionOwner: readExecutionOwner(inbox.payload.executionOwner),
 					kind,
 					childId: inbox.nodeId,
 					sessionFile: childSessionFile,
@@ -951,7 +961,7 @@ function startRecoveredWatcher(running: RunningSubagent): void {
     if (running.replication) { finishReplicationResult(running, result); return; }
     if (result.ping) {
       queueTerminalDelivery(running, undefined, () => {
-        if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
+        if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { ...linkedOutputDetails(running.executionOwner), name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
       }, result.ping.message);
       return;
     }
@@ -1010,6 +1020,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
       };
       const running: RunningSubagent = {
         lineage,
+        executionOwner: node.executionOwner,
         id: node.nodeId,
         name: node.name ?? node.nodeId,
         task: node.task ?? "recovered subagent",
@@ -1779,7 +1790,7 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
         if (!appendLineageInbox(running.lineage.rootDir, running.id, deliveryId, {
           sessionId: running.lineage.parentSessionId,
           sessionFile: running.lineage.parentSessionFile,
-        }, { kind: "terminal", resultContent: durable.payload, resultPath: durable.resultPath, status: durable.status })) {
+        }, { kind: "terminal", executionOwner: running.executionOwner, resultContent: durable.payload, resultPath: durable.resultPath, status: durable.status })) {
           throw new Error("Unable to publish terminal inbox");
         }
 
@@ -2099,6 +2110,7 @@ function recoveredLineageRunning(
       launchKind: (node.launchKind as LineageRegistration["launchKind"]) ?? "fresh",
     },
     id: node.nodeId,
+    executionOwner: node.executionOwner,
     name: node.name ?? node.nodeId,
     task: node.task ?? "destroyed descendant",
     agent: node.agent,
@@ -2137,6 +2149,7 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
         sessionFile: node.parentSessionFile,
       }, {
         kind: "terminal",
+        executionOwner: node.executionOwner,
         ...(node.terminal?.resultContent ? { resultContent: node.terminal.resultContent } : {}),
       });
       appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
@@ -2168,7 +2181,7 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
         if (!appendLineageInbox(rootDir, node.nodeId, deliveryId, {
           sessionId: node.parentSessionId,
           sessionFile: node.parentSessionFile,
-        }, { kind: "terminal", resultContent })) continue;
+        }, { kind: "terminal", executionOwner: node.executionOwner, resultContent })) continue;
         appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
         progressed = true;
         continue;
@@ -2477,6 +2490,7 @@ async function launchSubagent(
 	parentThinking: ThinkingLevel,
 	options?: {
 		surface?: string;
+		executionOwner?: ExecutionOwner;
 		runtimePlan?: ResolvedRuntimePlan;
 		id?: string;
 	},
@@ -2517,6 +2531,7 @@ async function launchSubagent(
 	const running = await launchPiSubagent({
 		kind: "fresh",
 		id,
+		executionOwner: options?.executionOwner,
 		name: params.name,
 		task: params.task,
 		agent: params.agent,
@@ -2581,7 +2596,7 @@ async function deliverHelpRequest(
 				sessionId: running.lineage.parentSessionId,
 				sessionFile: running.lineage.parentSessionFile,
 			},
-			{ kind: "help-request", resultContent: durable.payload, resultPath: durable.resultPath, status: "help-request" },
+			{ kind: "help-request", executionOwner: running.executionOwner, resultContent: durable.payload, resultPath: durable.resultPath, status: "help-request" },
 		)) throw new Error("Unable to publish help-request inbox");
 
 		acknowledgePingSidecar(running.sessionFile, ping.id);
@@ -2700,6 +2715,7 @@ async function attemptRecovery(
 	try {
 		const resumed = await launchPiSubagent({
 			kind: "resume",
+			executionOwner: running.executionOwner,
 			id: running.id,
 			name: running.name,
 			sessionFile: running.sessionFile,
@@ -3019,6 +3035,7 @@ async function watchSubagent(
 
 function installSubagentRuntime(pi: ExtensionAPI) {
 	runtime.pi = pi;
+	runtime.resolveExecutionOwner = trackExecutionOwners(pi);
 	// Capture the UI context for widget updates and restore presentation for
 	// subagents whose watchers survived a reload.
 	pi.on("session_start", (_event, ctx) => {
@@ -3087,7 +3104,8 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 
 /** Start the one-tool replication surface while retaining the legacy adapters internally. */
 export default function subagentsExtension(pi: ExtensionAPI) {
-	runtime.replicateTool = registerReplicateTool(pi, async (params, ctx) => {
+	runtime.replicateTool = registerReplicateTool(pi, async (params, ctx, toolCallId) => {
+		const executionOwner = runtime.resolveExecutionOwner?.(toolCallId);
 		if (!isTerminalAvailable()) throw new Error("Replication requires Herdr.");
 		const file = ctx.sessionManager.getSessionFile();
 		if (!file || !ctx.model) throw new Error("Replication requires a persisted session and selected model.");
@@ -3137,7 +3155,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			saveReplicaRuntime(recordFile, inherited);
 			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
 			const child = await launchPiSubagent({
-				kind: "fresh", id, name, task: replicationAssignment(params.task),
+				kind: "fresh", id, name, task: replicationAssignment(params.task), executionOwner,
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
 				worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit },
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
@@ -3274,7 +3292,7 @@ function registerLegacySubagentTools(pi: ExtensionAPI) {
             `Unsupported parent thinking level: ${parentThinking}`,
           );
 				}
-				const running = await launchSubagent(params, ctx, parentThinking);
+				const running = await launchSubagent(params, ctx, parentThinking, { executionOwner: runtime.resolveExecutionOwner?.(_toolCallId) });
 
 				// Create a separate AbortController for the watcher
 				// (the tool's signal completes when we return)
@@ -3315,6 +3333,7 @@ function registerLegacySubagentTools(pi: ExtensionAPI) {
 									details: {
                       name: ping.name,
                       message: ping.message,
+                      ...linkedOutputDetails(running.executionOwner),
 										agent: running.agent,
 										sessionFile: result.sessionFile,
 										...(result.worktree ? { worktree: result.worktree } : {}),
@@ -3736,6 +3755,7 @@ function registerLegacySubagentTools(pi: ExtensionAPI) {
 
 				const running: RunningSubagent = await launchPiSubagent({
 					kind: "resume",
+					executionOwner: runtime.resolveExecutionOwner?.(_toolCallId),
 					id,
 					name,
 					sessionFile: params.sessionPath,
@@ -3777,6 +3797,7 @@ function registerLegacySubagentTools(pi: ExtensionAPI) {
 									details: {
                       name: ping.name,
                       message: ping.message,
+                      ...linkedOutputDetails(running.executionOwner),
 										sessionFile: params.sessionPath,
 									},
 								},
@@ -3883,17 +3904,16 @@ function registerSubagentRenderers(pi: ExtensionAPI) {
 				const errorMessage =
 					typeof details.errorMessage === "string" ? details.errorMessage : "";
 				const failed = exitCode !== 0 || !!errorMessage || ["error", "crashed", "recovery-failed", "cancelled"].includes(details.status);
+				const needsHelp = details.kind === "help-request" || details.status === "help-request";
 				const elapsed =
 					details.elapsed == null ? "?" : formatElapsed(details.elapsed);
-				const bgFn = failed
-					? (text: string) => theme.bg("toolErrorBg", text)
-					: (text: string) => theme.bg("toolSuccessBg", text);
-				const icon = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const bgFn = (text: string) => theme.bg(failed ? "toolErrorBg" : needsHelp ? "customMessageBg" : "toolSuccessBg", text);
+				const icon = failed ? theme.fg("error", "✗") : needsHelp ? theme.fg("warning", "?") : theme.fg("success", "✓");
 				const status = errorMessage
 					? "failed (provider/agent error)"
 					: failed
 						? `failed (exit ${exitCode})`
-						: "completed";
+						: needsHelp ? "needs help" : "completed";
 				const agentTag = details.agent
 					? theme.fg("dim", ` (${details.agent})`)
 					: "";
@@ -3928,7 +3948,7 @@ function registerSubagentRenderers(pi: ExtensionAPI) {
 					// Full view: complete summary + session info
 					if (summary) {
 						for (const line of summary.split("\n")) {
-							contentLines.push(line.slice(0, width - 6));
+							contentLines.push(line);
 						}
 					}
 					if (details.sessionFile) {

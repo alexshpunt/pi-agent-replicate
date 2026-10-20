@@ -27,7 +27,7 @@ export interface ReplicateToolControls {
 }
 
 /** Register one parallel-work tool; durable result entries restore its disclosed surface. */
-export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext) => Promise<{ id: string; name: string; sessionFile: string }>): ReplicateToolControls {
+export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext, toolCallId: string) => Promise<{ id: string; name: string; sessionFile: string }>): ReplicateToolControls {
 	let recovery = false;
 	let sessionId: string | undefined;
 	const publish = () => pi.registerTool({
@@ -43,13 +43,13 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 			"Results arrive automatically. Do not poll for completion.",
 		],
 		parameters: recovery ? ReplicateRecoveryParams : ReplicateParams,
-		async execute(_id, input, _signal, _update, ctx) {
+		async execute(toolCallId, input, _signal, _update, ctx) {
 			const params = input as ReplicateRequest;
 			if (typeof params.name !== "string" || !namePattern.test(params.name)) throw new Error("Replication needs a lowercase kebab-case name.");
 			if (!params.task.trim()) throw new Error("Replication needs a nonempty task.");
 			if ((params.continuation || params.mode) && (!recovery || sessionId !== ctx.sessionManager.getSessionId())) throw new Error("Recovery is not available in this session.");
 			if (!!params.continuation !== !!params.mode) throw new Error("Continuation and mode must be supplied together.");
-			const child = await launch(params, ctx);
+			const child = await launch(params, ctx, toolCallId);
 			return {
 				content: [{ type: "text", text: `${child.name} started. Its result will arrive here automatically.` }],
 				details: { ...child, status: "running" },

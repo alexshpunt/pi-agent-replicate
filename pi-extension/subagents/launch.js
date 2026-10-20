@@ -85,6 +85,7 @@ async function launchFreshPiSubagent(request, operations) {
         if (resolved.lineage) {
             appendLineageEvent(resolved.lineage.rootDir, `metadata:${resolved.id}:${resolved.startTime}`, "launch_metadata", resolved.id, {
                 name: request.name,
+                executionOwner: request.executionOwner,
                 task: request.task,
                 agent: request.agent,
                 surface: artifacts.surface,
@@ -387,6 +388,7 @@ function startPiProcess(resolved, artifacts, command, operations) {
 function createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline) {
     return {
         lineage: resolved.lineage,
+        executionOwner: resolved.request.executionOwner,
         ...(resolved.request.replication ? { replication: true, replicaWorkFile: resolved.request.replication.recordFile } : {}),
         id: resolved.id,
         name: resolved.request.name,
@@ -438,6 +440,7 @@ async function launchResumedPiSubagent(request, operations) {
     const storeDir = sessionBindingStore(request.parent.sessionFile);
     registerSessionLineage(storeDir, request.parent.sessionId, lineage.rootDir);
     const interactive = request.behavior?.interactive ?? !autoExit;
+    const executionOwner = request.executionOwner;
     const startTime = Date.now();
     const surface = request.surface ?? operations.createPane(request.name, request.workspace);
     const allocatedSurface = request.surface === undefined;
@@ -451,6 +454,7 @@ async function launchResumedPiSubagent(request, operations) {
         if (lineage) {
             appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
                 name: request.name,
+                executionOwner,
                 task: request.message ?? "resumed session",
                 surface,
                 sessionFile: request.sessionFile,
@@ -526,6 +530,7 @@ async function launchResumedPiSubagent(request, operations) {
         });
         return {
             lineage,
+            executionOwner,
             id,
             name: request.name,
             task: request.message ?? "resumed session",

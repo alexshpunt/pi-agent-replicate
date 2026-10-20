@@ -48,6 +48,7 @@ import {
 
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore } from "./session-binding.ts";
 import type { ReplicationSnapshot } from "./replication.ts";
+import type { ExecutionOwner } from "./execution-owner.ts";
 import { attachReplicaWork } from "./replica-work.ts";
 import { sourceRepositoryAnchor } from "./source-state.ts";
 
@@ -78,6 +79,8 @@ export interface WorktreeHandoff extends WorktreeLaunch {
 
 export interface FreshPiLaunchRequest {
 	kind: "fresh";
+	/** Real initiating tool ownership; absent for command/API launches. */
+	executionOwner?: ExecutionOwner;
 	id?: string;
 	name: string;
 	task: string;
@@ -118,6 +121,8 @@ export interface FreshPiLaunchRequest {
 
 export interface ResumePiLaunchRequest {
 	kind: "resume";
+	/** Explicit continuations get a new owner; watchdog recovery preserves the old one. */
+	executionOwner?: ExecutionOwner;
 	id?: string;
 	name: string;
 	sessionFile: string;
@@ -141,6 +146,7 @@ export interface ResumePiLaunchRequest {
 export type PiLaunchRequest = FreshPiLaunchRequest | ResumePiLaunchRequest;
 
 export interface PiRunningChild {
+	executionOwner?: ExecutionOwner;
 	lineage?: LineageRegistration;
 	/** Distinguish replication settlement from retained role-based launches. */
 	replication?: boolean;
@@ -296,6 +302,7 @@ async function launchFreshPiSubagent(
 		if (resolved.lineage) {
 			appendLineageEvent(resolved.lineage.rootDir, `metadata:${resolved.id}:${resolved.startTime}`, "launch_metadata", resolved.id, {
 				name: request.name,
+				executionOwner: request.executionOwner,
 				task: request.task,
 				agent: request.agent,
 				surface: artifacts.surface,
@@ -672,6 +679,7 @@ function createRunningChild(
 ): PiRunningChild {
 	return {
 		lineage: resolved.lineage,
+		executionOwner: resolved.request.executionOwner,
 		...(resolved.request.replication ? { replication: true, replicaWorkFile: resolved.request.replication.recordFile } : {}),
 		id: resolved.id,
 		name: resolved.request.name,
@@ -726,6 +734,7 @@ async function launchResumedPiSubagent(
 	const storeDir = sessionBindingStore(request.parent.sessionFile);
 	registerSessionLineage(storeDir, request.parent.sessionId, lineage.rootDir);
 	const interactive = request.behavior?.interactive ?? !autoExit;
+	const executionOwner = request.executionOwner;
 	const startTime = Date.now();
 	const surface = request.surface ?? operations.createPane(request.name, request.workspace);
 	const allocatedSurface = request.surface === undefined;
@@ -740,6 +749,7 @@ async function launchResumedPiSubagent(
 		if (lineage) {
 			appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
 				name: request.name,
+				executionOwner,
 				task: request.message ?? "resumed session",
 				surface,
 				sessionFile: request.sessionFile,
@@ -828,6 +838,7 @@ async function launchResumedPiSubagent(
 		);
 		return {
 			lineage,
+			executionOwner,
 			id,
 			name: request.name,
 			task: request.message ?? "resumed session",
