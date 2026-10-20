@@ -16,6 +16,8 @@ These boundaries do not publish parent results. A persistent child can settle ma
 
 For a replica, a clean nonempty response can record terminal intent only after the last descendant result is processed. Earlier responses stay local. A terminal provider error, Escape, an empty required summary or an unsaved close records failure, saves completion evidence and closes after descendant drain. User input does not suppress replica completion. A saved final response without settlement evidence is preserved as history, never promoted to success. Its original receives error facts and a file of all post-fork textual assistant answers, excluding inherited answers, tooling and hidden reasoning.
 
+If history export fails, the terminal result reports that error instead of retrying completion forever. An unknown inherited-answer boundary never authorizes exporting the whole conversation. If the session file cannot be checkpointed, terminal facts and source checkpointing still proceed. The checkout stays available, integration is blocked and no saved continuation is offered without a usable session checkpoint.
+
 A queued self-reload is unfinished work. The acknowledgement before reload is not a terminal answer, and the stopped-replica timer stays suspended until reload continues the session or reports that it was blocked. An old runtime must not publish completion after shutdown, even if its descendant wait finishes later.
 
 The retained non-replica lifecycle is unchanged: autonomous clean or empty boundaries can record terminal intent after the last descendant result; provider errors and aborts keep those children open.

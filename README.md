@@ -131,6 +131,8 @@ Host metadata retains the saved session and immutable Markdown result-file paths
 
 Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent can choose a continuation from the returned result.
 
+Missing or damaged answer history does not block a failure report or pane cleanup. The result explains why history is unavailable without exporting answers of unknown origin. If the session itself cannot be checkpointed, source work is still saved where possible and retained, but no continuation is offered and no changes are applied automatically.
+
 Normal settlement reports immediately. A ten-second safety net retries a missed handoff only while Pi is truly idle, with no queued work, movement or undrained descendants. Active tools, requests, retries and compaction are not subject to that deadline. Durable ownership restores pending results, join plans and cleanup after restart. The retained non-replica API keeps its existing recovery and interactive policies.
 
 The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
