@@ -937,7 +937,10 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
   if (work.integration.status === "pending" || !exactParentSessionActive(running)) return;
   const saved = work.completion;
   const failed = saved.exitCode !== 0 || !!saved.error || !!saved.errorMessage || !saved.summary.trim();
-  let summary = failed ? `Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}\n\nTextual answer history: ${saved.historyPath}` : saved.summary;
+  const history = saved.historyPath
+    ? `Textual answer history: ${saved.historyPath}`
+    : `Textual answer history unavailable: ${saved.historyError ?? "No saved history."}`;
+  let summary = failed ? `Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}\n\n${history}` : saved.summary;
   const report = replicaWorkReport(work);
   if (report) summary += `\n\n${report}`;
   running.pendingReplicaResult = undefined;
@@ -946,7 +949,7 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
       name: running.name, task: running.task, childId: running.id, sessionFile: work.sessionCheckpoint ?? running.sessionFile,
       deliveryId: `terminal:${running.id}`, resultContent: summary,
       exitCode: saved.exitCode, elapsed: saved.elapsed, replication: true,
-      ...(failed ? { errorMessage: saved.errorMessage, historyPath: saved.historyPath } : {}),
+      ...(failed ? { errorMessage: saved.errorMessage, historyPath: saved.historyPath, historyError: saved.historyError } : {}),
       continuationId: work.id, worktreePath: work.worktree?.path, checkpoint: work.checkpoint?.commit,
       integration: work.integration, recoveryAvailable: !!work.checkpoint && !!work.sessionCheckpoint,
     });

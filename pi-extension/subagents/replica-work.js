@@ -109,17 +109,22 @@ export function checkpointReplicaCompletion(file, cwd, sessionFile, completion) 
     const sessionDir = file + ".artifacts";
     mkdirSync(sessionDir, { recursive: true });
     const sessionCheckpoint = join(sessionDir, "session.jsonl");
-    writeFileSync(sessionCheckpoint, readFileSync(sessionFile), { mode: 0o600 });
-    for (const path of [sessionCheckpoint, sessionDir]) {
-        const fd = openSync(path, "r");
-        try {
-            fsyncSync(fd);
+    try {
+        writeFileSync(sessionCheckpoint, readFileSync(sessionFile), { mode: 0o600 });
+        for (const path of [sessionCheckpoint, sessionDir]) {
+            const fd = openSync(path, "r");
+            try {
+                fsyncSync(fd);
+            }
+            finally {
+                closeSync(fd);
+            }
         }
-        finally {
-            closeSync(fd);
-        }
+        record = { ...record, sessionCheckpoint };
     }
-    record = { ...record, sessionCheckpoint };
+    catch (error) {
+        record = { ...record, sessionCheckpointError: String(error) };
+    }
     try {
         const checkpoint = snapshotSource(cwd, join(file + ".artifacts", "source"));
         if (checkpoint.commonDir !== record.fork.commonDir)
@@ -130,7 +135,11 @@ export function checkpointReplicaCompletion(file, cwd, sessionFile, completion) 
         record = { ...record, checkpointError: String(error) };
     }
     const failed = completion.exitCode !== 0 || !!completion.error || !!completion.errorMessage || !completion.summary.trim();
-    record = { ...record, sessionFile, completion, integration: failed ? { status: "not-attempted", details: "The task failed; partial work was not applied." } : record.integration };
+    record = { ...record, sessionFile, completion, integration: failed
+            ? { status: "not-attempted", details: "The task failed; partial work was not applied." }
+            : record.sessionCheckpointError
+                ? { status: "blocked", details: `The session could not be saved: ${record.sessionCheckpointError}` }
+                : record.integration };
     writeBindingFile(file, record);
     return record;
 }

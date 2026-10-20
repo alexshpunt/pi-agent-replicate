@@ -17,6 +17,8 @@ export interface ReplicaCompletion {
 	error?: string;
 	errorMessage?: string;
 	historyPath?: string;
+	/** Why post-fork answers could not be safely exported; never blocks settlement. */
+	historyError?: string;
 }
 
 /** One owned attempt. Its source/session checkpoint survives worktree cleanup. */
@@ -31,6 +33,8 @@ export interface ReplicaWork {
 	sessionFile?: string;
 	/** Durable JSONL copy outside the disposable checkout. */
 	sessionCheckpoint?: string;
+	/** Session-copy failure; source work is still checkpointed and retained. */
+	sessionCheckpointError?: string;
 	worktreeLocation?: SessionLocation;
 	checkpoint?: SourceSnapshot;
 	checkpointError?: string;
@@ -140,12 +144,16 @@ export function checkpointReplicaCompletion(file: string, cwd: string, sessionFi
 	const sessionDir = file + ".artifacts";
 	mkdirSync(sessionDir, { recursive: true });
 	const sessionCheckpoint = join(sessionDir, "session.jsonl");
-	writeFileSync(sessionCheckpoint, readFileSync(sessionFile), { mode: 0o600 });
-	for (const path of [sessionCheckpoint, sessionDir]) {
-		const fd = openSync(path, "r");
-		try { fsyncSync(fd); } finally { closeSync(fd); }
+	try {
+		writeFileSync(sessionCheckpoint, readFileSync(sessionFile), { mode: 0o600 });
+		for (const path of [sessionCheckpoint, sessionDir]) {
+			const fd = openSync(path, "r");
+			try { fsyncSync(fd); } finally { closeSync(fd); }
+		}
+		record = { ...record, sessionCheckpoint };
+	} catch (error) {
+		record = { ...record, sessionCheckpointError: String(error) };
 	}
-	record = { ...record, sessionCheckpoint };
 	try {
 		const checkpoint = snapshotSource(cwd, join(file + ".artifacts", "source"));
 		if (checkpoint.commonDir !== record.fork.commonDir) throw new Error("Replica moved outside its source repository.");
@@ -154,7 +162,11 @@ export function checkpointReplicaCompletion(file: string, cwd: string, sessionFi
 		record = { ...record, checkpointError: String(error) };
 	}
 	const failed = completion.exitCode !== 0 || !!completion.error || !!completion.errorMessage || !completion.summary.trim();
-	record = { ...record, sessionFile, completion, integration: failed ? { status: "not-attempted", details: "The task failed; partial work was not applied." } : record.integration };
+	record = { ...record, sessionFile, completion, integration: failed
+		? { status: "not-attempted", details: "The task failed; partial work was not applied." }
+		: record.sessionCheckpointError
+			? { status: "blocked", details: `The session could not be saved: ${record.sessionCheckpointError}` }
+			: record.integration };
 	writeBindingFile(file, record);
 	return record;
 }

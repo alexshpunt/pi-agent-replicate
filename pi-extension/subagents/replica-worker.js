@@ -31,8 +31,15 @@ function execute(request) {
         const saved = readReplicaWork(request.file);
         const completion = { ...request.completion };
         const failed = completion.exitCode !== 0 || !!completion.error || !!completion.errorMessage || !completion.summary.trim();
-        if (failed)
-            completion.historyPath = saved.completion?.historyPath ?? materializeReplicationHistory(existsSync(request.sessionFile) ? request.sessionFile : saved.sessionCheckpoint, saved.id, completion.name);
+        if (failed && !saved.completion) {
+            try {
+                completion.historyPath = materializeReplicationHistory(existsSync(request.sessionFile) ? request.sessionFile : saved.sessionCheckpoint ?? request.sessionFile, saved.id, completion.name);
+            }
+            catch (error) {
+                // Missing history must not strand an otherwise reportable terminal failure.
+                completion.historyError = String(error);
+            }
+        }
         let work = checkpointReplicaCompletion(request.file, request.cwd, request.sessionFile, completion);
         if (!failed && request.parent && sameParent(request.file, request.parent)) {
             // Different Pi incarnations and siblings share this gate, not just an in-memory queue.
