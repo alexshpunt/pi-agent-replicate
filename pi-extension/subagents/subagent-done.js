@@ -249,7 +249,22 @@ export function buildSkillInitialization(event, requestedSkills, notify) {
         },
     };
 }
-export default function (pi, initialContext) {
+/** Install child lifecycle only after this runtime opens its own persisted binding. */
+export default function subagentLifecycle(pi, initialContext) {
+    const start = (ctx) => {
+        const file = ctx.sessionManager.getSessionFile();
+        const binding = file ? readSessionBinding(file) : undefined;
+        // Startup checks inherit the child's environment, not ownership of its session.
+        if (!binding?.child || binding.sessionId !== ctx.sessionManager.getSessionId())
+            return;
+        installChildLifecycle(pi, ctx);
+    };
+    if (initialContext)
+        start(initialContext);
+    else
+        pi.on("session_start", (_event, ctx) => start(ctx));
+}
+function installChildLifecycle(pi, initialContext) {
     if (hasChildLifecycle(pi))
         return;
     lifecycles.add(pi.events);
@@ -342,6 +357,8 @@ export default function (pi, initialContext) {
     let interruptRequested = false;
     let agentStarted = false;
     let movePending = false;
+    let reloadPending = false;
+    let runtimeActive = true;
     let intervened = false;
     const mechanicalInterruptPath = process.env.PI_SUBAGENT_SESSION
         ? `${process.env.PI_SUBAGENT_SESSION}.mechanical-interrupt`
@@ -451,7 +468,7 @@ export default function (pi, initialContext) {
             const descendants = !!lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId);
             const idle = ctx.isIdle();
             const pendingMessages = ctx.hasPendingMessages();
-            if (!idle || pendingMessages || movePending || descendants) {
+            if (!idle || pendingMessages || movePending || reloadPending || descendants) {
                 idleSince = undefined;
                 return;
             }
@@ -497,6 +514,10 @@ export default function (pi, initialContext) {
             await waitForDescendantDrain();
         if (treeOwner)
             await waitForOwnedChildren();
+        if (!runtimeActive || reloadPending) {
+            exitRequested = false;
+            return;
+        }
         const sessionFile = process.env.PI_SUBAGENT_SESSION;
         if (sessionFile) {
             try {
@@ -533,6 +554,9 @@ export default function (pi, initialContext) {
         recorder.agentEndWaiting();
     });
     on("agent_settled", (_event, ctx) => {
+        // A queued self-reload owns the next continuation, not this acknowledgement.
+        if (reloadPending || !runtimeActive)
+            return;
         const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
         const assistant = newestAssistantEntry(latestAgentEndMessages);
         if (!outcome || !assistant) {
@@ -623,6 +647,8 @@ export default function (pi, initialContext) {
         recorder.toolExecutionUpdate(event.toolCallId, event.toolName);
     });
     on("tool_result", (event, ctx) => {
+        if (event.toolName === "pi_extension_dev_reload_self" && !event.isError && event.details?.queued)
+            reloadPending = true;
         if (event.toolName === "teleport" && event.isError) {
             movePending = false;
             bindSessionRuntime(pi, ctx);
@@ -633,12 +659,16 @@ export default function (pi, initialContext) {
         recorder.toolExecutionEnd(event.toolCallId, event.toolName);
     });
     on("message_end", (event, ctx) => {
-        if (event.message.customType === "pi-agent-teleport-failure") {
+        const message = event.message;
+        if (message.customType === "pi-reload-self" && message.details?.status === "blocked")
+            reloadPending = false;
+        if (message.customType === "pi-agent-teleport-failure") {
             movePending = false;
             bindSessionRuntime(pi, ctx);
         }
     });
     on("session_shutdown", (event) => {
+        runtimeActive = false;
         if (stopTimer)
             clearInterval(stopTimer);
         if (replication && event.reason === "quit" && !movePending) {
