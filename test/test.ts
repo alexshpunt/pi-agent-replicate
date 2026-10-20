@@ -115,6 +115,36 @@ function createTestDir(): string {
 }
 
 
+function startMockChildLifecycle(api: any): void {
+	const dir = createTestDir();
+	const previousSession = process.env.PI_SUBAGENT_SESSION;
+	const previousPane = process.env.HERDR_PANE_ID;
+	const previousLauncher = process.env.PI_SUBAGENT_LAUNCHER_PID;
+	const previousSurface = process.env.PI_SUBAGENT_SURFACE;
+	const sessionId = "unit-child";
+	const sessionFile = createSessionFile(dir, [
+		{ type: "session", id: sessionId },
+		{ type: "custom", customType: "subagent-session-binding", data: {
+			version: 1, sessionId, storeDir: join(dir, "store"),
+			child: { lineage: { rootDir: join(dir, "lineage"), nodeId: "unit-child" }, environment: {} },
+		} },
+	]);
+	process.env.PI_SUBAGENT_SESSION = sessionFile;
+	delete process.env.HERDR_PANE_ID;
+	try {
+		subagentDoneExtension({ ...api, getActiveTools: () => [], setActiveTools() {} }, {
+			cwd: dir,
+			sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => sessionId, getBranch: () => [] },
+			ui: { setWidget() {} },
+		} as any);
+	} finally {
+		restoreEnvVar("PI_SUBAGENT_SESSION", previousSession);
+		restoreEnvVar("HERDR_PANE_ID", previousPane);
+		restoreEnvVar("PI_SUBAGENT_LAUNCHER_PID", previousLauncher);
+		restoreEnvVar("PI_SUBAGENT_SURFACE", previousSurface);
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
 function withFakeHerdrClose(
 	run: (logFile: string, executableDir: string) => void,
 ): void {
@@ -1949,7 +1979,7 @@ describe("subagent-done.ts", () => {
 			try {
 				const fake = createMockExtensionApi();
 				const notifications: Array<{ message: string; level: string }> = [];
-				subagentDoneExtension(fake.api);
+				startMockChildLifecycle(fake.api);
 				const handler = fake.eventHandlers.get("before_agent_start")?.[0];
 				assert.ok(handler, "before_agent_start hook must be registered");
 
@@ -2034,7 +2064,7 @@ describe("subagent-done.ts", () => {
 		process.env.PI_SUBAGENT_AUTO_EXIT = "1";
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			subagentDoneExtension(api);
+			startMockChildLifecycle(api);
 			assert.equal(registeredTools.some((tool) => tool.name === "caller_ping"), true);
 			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), false);
 		} finally {
@@ -2047,7 +2077,7 @@ describe("subagent-done.ts", () => {
 		delete process.env.PI_SUBAGENT_AUTO_EXIT;
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			subagentDoneExtension(api);
+			startMockChildLifecycle(api);
 			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), true);
 		} finally {
 			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
@@ -2059,7 +2089,7 @@ describe("subagent-done.ts", () => {
 		delete process.env.PI_SUBAGENT_AUTO_EXIT;
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			subagentDoneExtension(api);
+			startMockChildLifecycle(api);
 			const callerPing = registeredTools.find((tool) => tool.name === "caller_ping");
 			const subagentDone = registeredTools.find((tool) => tool.name === "subagent_done");
 			assert.equal(
@@ -2087,7 +2117,7 @@ describe("subagent-done.ts", () => {
 			process.env.PI_SUBAGENT_ID = "compact-hook-child";
 			process.env.PI_SUBAGENT_ACTIVITY_FILE = activityFile;
 			const fake = createMockExtensionApi();
-			subagentDoneExtension(fake.api);
+			startMockChildLifecycle(fake.api);
 
 			const before = fake.eventHandlers.get("session_before_compact")?.[0];
 			const succeeded = fake.eventHandlers.get("session_compact")?.[0];

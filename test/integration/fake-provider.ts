@@ -221,6 +221,9 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		}
 	}
 
+	if (names.has("pi_extension_dev_reload_self") && user.includes("Your assignment:\nSELF_RELOAD_OWNER")) {
+		return lastRole === "tool" ? { text: "REPLICA_RELOAD_SCHEDULED" } : { toolCalls: [{ name: "pi_extension_dev_reload_self", arguments: { blocked: user.includes("BLOCK_RELOAD") } }] };
+	}
 	if (lastRole === "tool" && user.startsWith("INTEGRATION_VISUAL_PARENT")) return { text: "REPLICATION_PARENT_WAITING" };
 	if (lastRole === "tool" && /Call the replicate tool/i.test(user) && user.includes("STOP_CHILD_SUMMARY")) return { text: "REPLICATION_PARENT_WAITING" };
 	if (names.has("replication_probe") && user.includes("Your assignment:") && /Use replication_probe/.test(user) && lastRole !== "tool") {
