@@ -42,6 +42,8 @@ Normal settlement is immediate. Ten continuously idle seconds provide a safety n
 
 Session identity, not a file path or pane ID, owns delivery. A binding inside each session carries its durable store and child settings. Teleport preserves that entry and session ID. The ownership index and lineage inboxes survive Pi and Herdr process replacement. Reopening the exact parent replays pending answers and starts a turn; a closed parent is never opened automatically. New-ID forks cannot claim the original answers. A delivery is acknowledged only after its exact result entry is saved, not merely queued. Cleanup requires the recorded shell incarnation to still own the pane.
 
+Each tool-launched attempt also retains its actual execution ID and visible outer root from Pi's execution events. Persist both with launch metadata and delivery inboxes; do not recover them from ID syntax, names, paths, completion order or timing. Publish the root as `parentToolCallId` on delayed result/help messages so existing consumers can group searchable output without rewriting history. Explicit continuations replace the owner; automatic recovery preserves it. Missing ownership stays missing. This display linkage must not change result payloads, consumption, wakeups or source integration.
+
 ## Retained launch paths
 
 For the internal launcher and package-root API, model and thinking resolve independently: use custom role frontmatter when present, otherwise inherit the parent. Role models must be exact authenticated `provider/model-id` values; fallback lists are unsupported.
