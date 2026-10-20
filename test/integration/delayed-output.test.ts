@@ -28,14 +28,17 @@ for (const backend of getAvailableBackends()) {
 		const capability = join(env.dir, "output-capability.ts");
 		const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
 		writeFileSync(capability, `import {Type} from ${JSON.stringify(typebox)};
-import {existsSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
+import {existsSync,readFileSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
 export default function(pi){
- if(process.env.PI_SUBAGENT_REPLICATION!=='1')pi.on('agent_settled',(_event,ctx)=>writeFileSync(join(${JSON.stringify(gate)},'settled'),String(ctx.sessionManager.getBranch().filter(row=>row.type==='custom_message'&&row.customType==='subagent_result').length)));
+ if(process.env.PI_SUBAGENT_REPLICATION!=='1'){
+ pi.on('agent_settled',(_event,ctx)=>{const branch=ctx.sessionManager.getBranch();writeFileSync(join(${JSON.stringify(gate)},'settled'),String(branch.filter(row=>row.type==='custom_message'&&row.customType==='subagent_result').length));writeFileSync(join(${JSON.stringify(gate)},'settled-launches'),String(branch.filter(row=>row.message?.role==='toolResult'&&['replicate','replication_output_wrapper'].includes(row.message.toolName)).length));});
+ pi.on('session_shutdown',async event=>{const gate=${JSON.stringify(gate)};if(event.reason!=='reload'||existsSync(join(gate,'fast.release')))return;writeFileSync(join(gate,'fast.release'),'go');const child=readFileSync(join(gate,'fast.started'),'utf8');const end=Date.now()+15000;while(!existsSync(child+'.exit')&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,25));if(!existsSync(child+'.exit'))throw Error('fast copy did not complete during parent reload');writeFileSync(join(gate,'fast.completed-during-reload'),'saved');});
+ }
  const parameters=Type.Object({name:Type.String(),task:Type.String()});
  for(const name of ['replication_output_wrapper','replication_output_inner'])pi.registerTool({name,label:name,description:'Exercise real nested replication',parameters,async execute(_id,args,signal,_update,ctx){const outcome=await ctx.executeTool(name==='replication_output_wrapper'?'replication_output_inner':'replicate',args,{signal});return {...outcome.result,isError:outcome.isError};}});
  pi.registerTool({name:'replication_probe',label:'Probe',description:'Hold this isolated copy',parameters:Type.Object({}),async execute(){
  const name=process.env.PI_SUBAGENT_NAME.includes('slow')?'slow':'fast';
- writeFileSync(join(${JSON.stringify(gate)},name+'.started'),'ready');
+ writeFileSync(join(${JSON.stringify(gate)},name+'.started'),process.env.PI_SUBAGENT_SESSION);
  const end=Date.now()+${PI_TIMEOUT * 2};while(!existsSync(join(${JSON.stringify(gate)},name+'.release'))&&Date.now()<end)await new Promise(r=>setTimeout(r,25));
  if(!existsSync(join(${JSON.stringify(gate)},name+'.release')))throw Error('gate timeout');
  return {content:[{type:'text',text:'released '+name}],details:{}};}});
@@ -52,12 +55,13 @@ export default function(pi){
 			runInPane(parent, 'Call the replica output wrapper with name: "fast-check", task: "Use replication_probe then Return exactly FAST_OUTPUT"');
 			await until(() => existsSync(join(gate, "fast.started")), "nested copy started");
 			const results = () => entries(parentFile).filter(row => row.customType === "subagent_result");
-			writeFileSync(join(gate, "fast.release"), "go");
-			await until(() => results().length === 1, "fast result delivered first");
-			assert.match(results()[0].content, /FAST_OUTPUT/);
-			await until(() => existsSync(join(gate, "settled")) && readFileSync(join(gate, "settled"), "utf8") === "1", "parent finishes consuming the first result before reload");
+			await until(() => existsSync(join(gate, "settled-launches")) && readFileSync(join(gate, "settled-launches"), "utf8") === "2", "parent finishes both launch turns before reload");
+			assert.equal(results().length, 0);
 			runInPane(parent, "/reload");
 			await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
+			assert.ok(existsSync(join(gate, "fast.completed-during-reload")), "the fast result is saved while parent restoration is suspended");
+			await until(() => results().length === 1, "fast result delivered first after parent restoration");
+			assert.match(results()[0].content, /FAST_OUTPUT/);
 			writeFileSync(join(gate, "slow.release"), "go");
 			await until(() => results().length === 2, "slow result recovered after reload");
 			const rows = entries(parentFile);
