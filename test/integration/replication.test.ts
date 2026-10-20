@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
@@ -16,10 +16,10 @@ function entries(path: string): any[] {
 	const complete = source.slice(0, source.lastIndexOf("\n") + 1).trim();
 	return complete ? complete.split("\n").map((line) => JSON.parse(line)) : [];
 }
-async function waitUntil(check: () => boolean, explanation: string): Promise<void> {
+async function waitUntil(check: () => boolean | Promise<boolean>, explanation: string): Promise<void> {
 	const deadline = Date.now() + PI_TIMEOUT;
 	while (Date.now() < deadline) {
-		if (check()) return;
+		if (await check()) return;
 		await sleep(50);
 	}
 	assert.fail(explanation);
@@ -129,6 +129,66 @@ for (const backend of getAvailableBackends()) {
 			});
 		}
 
+		it("reports a dead replica with a missing session once and removes its open row", async () => {
+			const parentFile = join(env.dir, "lost-session-original.jsonl"), capability = join(env.dir, "lost-session-capability.ts");
+			const started = join(env.dir, ".pi", "agent", "lost-session-started"), reloads = started + ".reloads";
+			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};
+import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path';
+export default function(pi){
+  if(!process.env.PI_SUBAGENT_ID) pi.on('session_start',()=>{
+    const file=${JSON.stringify(reloads)};
+    writeFileSync(file,String(existsSync(file)?Number(readFileSync(file,'utf8'))+1:1));
+  });
+  pi.registerTool({name:'replication_probe',label:'Probe',description:'Hold isolated partial work until process loss',parameters:Type.Object({}),async execute(){
+    writeFileSync(join(process.cwd(),'retained-partial.txt'),'PARTIAL_WORK');
+    writeFileSync(${JSON.stringify(started)},'ready');
+    await new Promise(()=>{});
+    return {content:[],details:{}};
+  }});
+}\n`);
+			const reloadCount = () => existsSync(reloads) ? Number(readFileSync(reloads, "utf8")) : 0;
+			const parent = createTrackedSurface(env, "lost-session-original");
+			await waitForPaneReady(parent);
+			startPi(parent, env.dir, "Return exactly LOST_SESSION_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
+			await waitUntil(() => entries(parentFile).some(row => row.message?.role === "assistant"), "parent ready");
+			runInPane(parent, "/reload");
+			await waitUntil(() => reloadCount() === 2, "first reload must load the tested extension");
+			await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
+			runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly NEVER_REACHED"');
+			const launchEntry = () => entries(parentFile).find(row => row.message?.role === "toolResult" && row.message.toolName === "replicate");
+			await waitUntil(() => existsSync(started) && !!launchEntry(), "replica must be active with saved partial work");
+			const launch = launchEntry().message.details;
+			const binding = readSessionBinding(launch.sessionFile)!;
+			const workFile = binding.child!.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+			const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
+			await waitForScreen(parent, /1 active/);
+			closePane(location.paneId!);
+			rmSync(launch.sessionFile, { force: true });
+			const results = () => entries(parentFile).filter(row => row.customType === "subagent_result");
+			await waitUntil(() => results().length === 1, "missing session must not block terminal delivery");
+			const result = results()[0];
+			assert.equal(result.details.exitCode, 1);
+			assert.equal(result.details.integration.status, "not-attempted");
+			assert.equal(result.details.recoveryAvailable, false);
+			assert.equal(result.details.historyPath, undefined);
+			assert.match(result.details.historyError, /boundary|ENOENT/);
+			assert.match(result.content, /Textual answer history unavailable/);
+			assert.doesNotMatch(result.content, /history: undefined/);
+			assert.equal(readFileSync(join(result.details.worktreePath, "retained-partial.txt"), "utf8"), "PARTIAL_WORK");
+			assert.equal(existsSync(join(env.dir, "retained-partial.txt")), false);
+			assert.ok(readReplicaWork(workFile).checkpoint, "source must be saved despite session loss");
+			assert.equal(await waitForPaneAbsence(location.paneId!, { timeoutMs: 10_000 }), true);
+			await waitUntil(() => readFileSync(parentFile, "utf8").includes(result.details.deliveryId), "parent must persist the terminal result");
+			await waitUntil(async () => !/\d+ (?:active|open)|delivery-failed terminal:/.test(await readPaneAsync(parent, 40)), "the delivered replica must leave the widget before reload");
+			runInPane(parent, "/reload");
+			await waitUntil(() => reloadCount() === 3, "second reload must reattach after terminal delivery");
+			await waitForScreen(parent, /Reloaded keybindings, extensions/, PI_TIMEOUT);
+			runInPane(parent, "Return exactly LOST_SESSION_RELOAD_CONFIRMED");
+			await waitUntil(() => entries(parentFile).some(row => row.message?.role === "assistant" && JSON.stringify(row.message.content).includes("LOST_SESSION_RELOAD_CONFIRMED")), "the restored parent must complete a fresh turn");
+			const screen = await readPaneAsync(parent, 60);
+			assert.doesNotMatch(screen, /\d+ (?:active|open)|delivery-failed terminal:/, "dead replica must not remain in the widget after reload");
+			assert.equal(results().length, 1, "reload must not deliver the same failure twice");
+		});
 		for (const task of ["REPLICATION_FAIL_WITH_HISTORY", "Return exactly EMPTY_COMPLETION"]) {
 			it(`reports ${task} as failure and retains its work`, async () => {
 				const parentFile = join(env.dir, "failure-original.jsonl");

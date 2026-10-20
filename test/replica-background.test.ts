@@ -8,6 +8,7 @@ import { runReplicaBackground } from "../pi-extension/subagents/replica-backgrou
 import { createReplicaWork, readReplicaWork } from "../pi-extension/subagents/replica-work.ts";
 import { snapshotSource } from "../pi-extension/subagents/source-state.ts";
 import { processIncarnationAlive } from "../pi-extension/subagents/lineage.ts";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
 it("does not keep durable ownership alive for a zombie PID", { skip: process.platform !== "linux", timeout: 5000 }, async () => {
 	const owner = spawn("python3", ["-c", "import os,sys\npid=os.fork()\nif pid==0: os._exit(0)\nprint(pid,flush=True)\nsys.stdin.read()\nos.waitpid(pid,0)"], { stdio: ["pipe", "pipe", "pipe"] });
@@ -69,6 +70,41 @@ it("waits without blocking and recovers a completion gate after its owner dies",
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+for (const sessionState of ["missing", "no-boundary", "invalid-boundary"]) {
+	it(`settles a failed replica with ${sessionState} history instead of retrying forever`, { timeout: 10_000 }, async () => {
+		const directory = mkdtempSync(join(tmpdir(), "replica-failed-history-"));
+		const repo = join(directory, "repo"), store = join(directory, "store");
+		mkdirSync(repo); mkdirSync(store);
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+		git("init", "-q"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+		writeFileSync(join(repo, "source.txt"), "base\n"); git("add", "."); git("commit", "-qm", "base");
+		const file = join(store, "attempt.json"), session = join(directory, "session.jsonl");
+		createReplicaWork(file, "attempt", "parent", snapshotSource(repo, store));
+		if (sessionState !== "missing") {
+			writeFileSync(session, JSON.stringify({ type: "session", version: 3, id: "child", cwd: repo }) + "\n" +
+				JSON.stringify({ type: "message", id: "unknown-origin", message: { role: "assistant", content: [{ type: "text", text: "DO_NOT_EXPORT_WITHOUT_BOUNDARY" }] } }) + "\n");
+			if (sessionState === "invalid-boundary") seedSessionBinding(session, { version: 1, storeDir: store, child: { lineage: { rootDir: join(directory, "lineage"), rootId: "attempt", nodeId: "attempt", launchKind: "fork" }, environment: { PI_SUBAGENT_REPLICATION_ASSISTANTS: "not json" } } });
+		}
+		writeFileSync(join(repo, "source.txt"), "retained partial work\n");
+		const request = { operation: "complete" as const, file, cwd: repo, sessionFile: session,
+			completion: { name: "attempt", task: "work", summary: "", exitCode: 1, elapsed: 1, errorMessage: "Process lost" } };
+		try {
+			const { work } = await runReplicaBackground(request);
+			assert.equal(work?.completion?.errorMessage, "Process lost");
+			assert.equal(work?.completion?.exitCode, 1);
+			assert.match(work!.completion!.historyError!, /boundary|ENOENT|JSON/);
+			assert.equal(work?.completion?.historyPath, undefined, "unknown-origin answers must not be exported");
+			assert.equal(work?.integration.status, "not-attempted");
+			assert.equal(git("show", `${work!.checkpoint!.commit}:source.txt`), "retained partial work");
+			if (sessionState === "missing") {
+				assert.equal(work?.sessionCheckpoint, undefined);
+				assert.match(work!.sessionCheckpointError!, /ENOENT/);
+			} else assert.ok(existsSync(work!.sessionCheckpoint!));
+			assert.deepEqual((await runReplicaBackground(request)).work, work, "settlement must remain durable on retry");
+		} finally { rmSync(directory, { recursive: true, force: true }); }
+	});
+}
 
 it("recovers the saved attempt after its background worker dies during checkpoint", { timeout: 30_000 }, async () => {
 	const directory = mkdtempSync(join(tmpdir(), "replica-interrupted-"));

@@ -42,6 +42,24 @@ it("retains failed work and allows only its owner one saved-state continuation",
 	} finally { cleanup(); }
 });
 
+it("saves task completion but blocks integration when the session checkpoint is lost", () => {
+	const child = savedFailure();
+	try {
+		const file = join(child.store, "lost-session.json");
+		createReplicaWork(file, "lost-session", "owner", child.source);
+		rmSync(child.session);
+		const record = checkpointReplicaCompletion(file, child.repo, child.session, { name: "lost-session", task: "work", summary: "done", exitCode: 0, elapsed: 1 });
+		assert.equal(record.completion?.summary, "done");
+		assert.equal(record.sessionCheckpoint, undefined);
+		assert.match(record.sessionCheckpointError!, /ENOENT/);
+		assert.equal(child.git("show", `${record.checkpoint!.commit}:source.txt`), "failed partial work");
+		writeFileSync(join(child.repo, "source.txt"), "parent later work\n");
+		assert.equal(joinReplicaWork(file, child.repo).integration.status, "blocked");
+		assert.equal(readFileSync(join(child.repo, "source.txt"), "utf8"), "parent later work\n");
+		assert.throws(() => reserveReplicaContinuation(file, "owner", "next"), /no usable saved/);
+	} finally { child.cleanup(); }
+});
+
 it("blocks a successful join into an unrelated repository without changing either source", () => {
 	const child = savedFailure(), parent = savedFailure();
 	try {
