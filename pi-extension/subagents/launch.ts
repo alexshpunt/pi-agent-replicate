@@ -527,10 +527,8 @@ function prepareTaskArtifacts(
 			: "";
 	const modeHint = request.behavior.autoExit
 		? "Complete your task autonomously."
-		: "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
-	const summaryInstruction = request.behavior.autoExit
-		? "Your FINAL assistant message should summarize what you accomplished."
-		: "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
+		: "Complete your task. The user can interact with you at any time.";
+	const summaryInstruction = "Your FINAL assistant message should summarize what you accomplished.";
 	const fullTask = resolved.sessionMode === "fork"
 		? request.task
 		: `${roleBlock}\n\n${modeHint}\n\n${request.task}\n\n${summaryInstruction}`;
@@ -870,21 +868,16 @@ async function launchResumedPiSubagent(
 
 export function buildSubagentToolAllowlist(
 	tools?: string,
-	autoExit = false,
-	includeControlTools = true,
+	_autoExit = false,
+	_includeControlTools = true,
 ): string | null {
 	const requested = (tools ?? "")
 		.split(",")
 		.map((tool) => tool.trim())
 		.filter(Boolean);
 	if (requested.length === 0) return null;
-	const allow = new Set(requested);
-	if (includeControlTools) {
-		allow.delete("subagent_done");
-		allow.add("caller_ping");
-		if (!autoExit) allow.add("subagent_done");
-	}
-	return [...allow].join(",");
+	const removed = new Set(["subagent", "subagent_resume", "subagent_interrupt", "subagent_cancel", "subagents_list", "caller_ping", "subagent_done"]);
+	return [...new Set(requested.filter((tool) => !removed.has(tool)))].join(",");
 }
 
 /** Normalize requested skill names for safe, deterministic child transport. */
