@@ -250,24 +250,3 @@ export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 	writeBindingFile(file, { ...record, cleaned: true });
 	return true;
 }
-
-/** Report work problems and disclose a saved copy without host bookkeeping. */
-export function replicaWorkReport(record: ReplicaWork): string {
-	if (record.integration.status === "applied") {
-		return record.checkpoint && record.sessionCheckpoint ? `Saved copy: ${JSON.stringify(record.id)}. You can continue it with replicate using continuation and mode.` : "";
-	}
-	const problem = record.integration.status === "conflict"
-		? "The copy finished, but its changes conflict with your current work and were not included."
-		: record.integration.status === "not-attempted"
-			? "The copy's unfinished work was not included in your work."
-			: "The copy finished, but its changes could not be safely included in your work.";
-	if (!record.checkpoint || !record.sessionCheckpoint) {
-		return `${problem}\nNo usable saved continuation is available.${record.worktree ? ` The copy's files remain at ${record.worktree.path}.` : ""}`;
-	}
-	return [
-		problem,
-		"Its work is saved. To continue it alongside your own independent work, use replicate with:",
-		`continuation: ${JSON.stringify(record.id)}, mode: "resume", task: "The exact work to finish and expected result".`,
-		"Use mode: \"fork\" to start a new copy from where it stopped instead.",
-	].join("\n");
-}

@@ -1,13 +1,12 @@
 /**
  * Extension loaded into sub-agents.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
- * - Provides a `subagent_done` tool for interactive agents to self-terminate
+ * - Saves completion and closes replicas only after their session work drains
  */
 import { stripFrontmatter, } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { SessionWork, workFacts } from "./session-work.js";
 import { replicaStopDue } from "./watchdog.js";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, writeBindingFile } from "./session-binding.js";
 const lifecycleKey = Symbol.for("pi-herdr-subagents.child-lifecycle");
@@ -289,6 +288,19 @@ function installChildLifecycle(pi, initialContext) {
     const inheritedBinding = process.env.PI_SUBAGENT_SESSION ? readSessionBinding(process.env.PI_SUBAGENT_SESSION) : undefined;
     const replication = process.env.PI_SUBAGENT_REPLICATION === "1" || inheritedBinding?.child?.environment.PI_SUBAGENT_REPLICATION === "1";
     const treeOwner = process.env.PI_SUBAGENT_TREE_OWNER === "1";
+    const savedWork = [...initialContext.sessionManager.getBranch()].reverse().find(entry => entry.type === "custom" && entry.customType === "replica-session-work");
+    const work = new SessionWork(initialContext.sessionManager.getSessionId(), savedWork?.type === "custom" ? savedWork.data : undefined);
+    let savedWorkText = JSON.stringify(work.snapshot());
+    let closureVersion = 0;
+    const persistWork = () => {
+        if (!replication || !runtimeActive)
+            return;
+        const snapshot = work.snapshot(), text = JSON.stringify(snapshot);
+        if (text !== savedWorkText) {
+            pi.appendEntry("replica-session-work", snapshot);
+            savedWorkText = text;
+        }
+    };
     const recorder = createSubagentActivityRecorder({
         runningChildId: process.env.PI_SUBAGENT_ID,
         activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
@@ -399,6 +411,7 @@ function installChildLifecycle(pi, initialContext) {
         });
     });
     on("input", () => {
+        closureVersion++;
         idleSince = undefined;
         resumeInputSeen = true;
         if (shouldMarkUserTookOver(agentStarted))
@@ -409,6 +422,7 @@ function installChildLifecycle(pi, initialContext) {
         settledChildResultId =
             settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
         if (replication) {
+            closureVersion++;
             clearStop();
             interruptRequested = false;
         }
@@ -439,6 +453,23 @@ function installChildLifecycle(pi, initialContext) {
     let stopTimer;
     let idleSince;
     let stopPayload;
+    let checkingWork = false;
+    const refreshWork = async () => {
+        const completed = await work.refreshProcesses();
+        if (!runtimeActive)
+            return;
+        persistWork();
+        if (completed.length) {
+            closureVersion++;
+            clearStop();
+            latestAgentEndMessages = undefined;
+            pi.sendMessage({
+                customType: "replica-work-completion", display: false,
+                content: `Session-owned processes exited: ${completed.join(", ")}. No exit status was recorded here. Inspect their saved output before giving your final result.`,
+                details: { pids: completed },
+            }, { triggerTurn: true, deliverAs: "followUp" });
+        }
+    };
     const stopFile = process.env.PI_SUBAGENT_SESSION
         ? `${process.env.PI_SUBAGENT_SESSION}.replica-stop`
         : undefined;
@@ -461,25 +492,37 @@ function installChildLifecycle(pi, initialContext) {
     const armStopTimer = (ctx) => {
         if (!replication || stopTimer)
             return;
-        stopTimer = setInterval(() => {
-            if (exitRequested || !resumeTurnStarted || !resumeInputSeen)
+        stopTimer = setInterval(async () => {
+            if (checkingWork || !runtimeActive || exitRequested || !resumeTurnStarted || !resumeInputSeen)
                 return;
-            const lineage = lineageFromEnvironment();
-            const descendants = !!lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId);
-            const idle = ctx.isIdle();
-            const pendingMessages = ctx.hasPendingMessages();
-            if (!idle || pendingMessages || movePending || reloadPending || descendants) {
-                idleSince = undefined;
-                return;
+            checkingWork = true;
+            try {
+                await refreshWork();
+                if (!runtimeActive)
+                    return;
+                const lineage = lineageFromEnvironment();
+                const descendants = !!lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId);
+                const idle = ctx.isIdle();
+                const pendingMessages = ctx.hasPendingMessages();
+                if (!idle || pendingMessages || movePending || reloadPending || descendants || work.pending) {
+                    idleSince = undefined;
+                    return;
+                }
+                if (!latestAgentEndMessages && !stopPayload)
+                    return;
+                idleSince ??= Date.now();
+                if (!replicaStopDue({ now: Date.now(), idleSince, idle, pendingMessages, moving: movePending, descendants }))
+                    return;
+                const payload = stopPayload ?? { type: "error", errorMessage: "Replica stopped without saved settlement evidence." };
+                rememberStop(payload);
+                void finishAfterDrain(ctx, payload);
             }
-            if (!latestAgentEndMessages && !stopPayload)
-                return;
-            idleSince ??= Date.now();
-            if (!replicaStopDue({ now: Date.now(), idleSince, idle, pendingMessages, moving: movePending, descendants }))
-                return;
-            const payload = stopPayload ?? { type: "error", errorMessage: "Replica stopped without saved settlement evidence." };
-            rememberStop(payload);
-            void finishAfterDrain(ctx, payload);
+            catch (error) {
+                ctx.ui.notify(`Session work could not be checked: ${String(error)}`, "error");
+            }
+            finally {
+                checkingWork = false;
+            }
         }, 1000);
         stopTimer.unref();
     };
@@ -503,38 +546,43 @@ function installChildLifecycle(pi, initialContext) {
     if (initialContext)
         restoreStopTimer(initialContext);
     const finishAfterDrain = async (ctx, payload) => {
-        if (exitRequested)
+        if (exitRequested || replication && work.pending)
             return;
         exitRequested = true;
-        const lineage = lineageFromEnvironment();
-        const shouldWaitForDescendants = lineage
-            ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
-            : false;
-        if (shouldWaitForDescendants)
-            await waitForDescendantDrain();
-        if (treeOwner)
-            await waitForOwnedChildren();
-        if (!runtimeActive || reloadPending) {
-            exitRequested = false;
-            return;
-        }
-        const sessionFile = process.env.PI_SUBAGENT_SESSION;
-        if (sessionFile) {
-            try {
-                // Publish completion only after descendants drain so the parent can
-                // observe this owner's settled turns before its terminal result.
-                writeBindingFile(`${sessionFile}.exit`, { ...payload, summary: payload.summary ?? newestAssistantEntry(latestAgentEndMessages)?.text });
-            }
-            catch (error) {
-                if (replication) {
-                    exitRequested = false;
-                    ctx.ui.notify(`Replica completion could not be saved: ${String(error)}`, "error");
+        const version = closureVersion;
+        try {
+            const lineage = lineageFromEnvironment();
+            if (lineage && hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId))
+                await waitForDescendantDrain();
+            if (treeOwner)
+                await waitForOwnedChildren();
+            if (replication) {
+                // Let queued completion input start its turn before the final ownership check.
+                await new Promise(resolve => setImmediate(resolve));
+                await refreshWork();
+                if (version !== closureVersion || work.pending || movePending || !ctx.isIdle() || ctx.hasPendingMessages())
                     return;
-                }
-                // Legacy callers can still use the wrapper sentinel.
             }
+            if (!runtimeActive || reloadPending)
+                return;
+            const sessionFile = process.env.PI_SUBAGENT_SESSION;
+            if (sessionFile) {
+                try {
+                    writeBindingFile(`${sessionFile}.exit`, { ...payload, summary: payload.summary ?? newestAssistantEntry(latestAgentEndMessages)?.text });
+                }
+                catch (error) {
+                    if (replication) {
+                        ctx.ui.notify(`Replica completion could not be saved: ${String(error)}`, "error");
+                        return;
+                    }
+                    // Retained callers can still use the wrapper sentinel.
+                }
+            }
+            ctx.shutdown();
         }
-        ctx.shutdown();
+        finally {
+            exitRequested = false;
+        }
     };
     on("agent_end", (event, ctx) => {
         armStopTimer(ctx);
@@ -624,6 +672,12 @@ function installChildLifecycle(pi, initialContext) {
         recorder.afterProviderResponse();
     });
     on("message_start", (event) => {
+        if (replication && work.message(event.message)) {
+            closureVersion++;
+            clearStop();
+            latestAgentEndMessages = undefined;
+            persistWork();
+        }
         settledChildResultId =
             settledChildIdFromMessage(event.message) ?? settledChildResultId;
     });
@@ -631,6 +685,10 @@ function installChildLifecycle(pi, initialContext) {
         recorder.messageUpdate(event.assistantMessageEvent?.type);
     });
     on("tool_execution_start", (event) => {
+        if (replication) {
+            closureVersion++;
+            work.toolStarted(event.toolCallId);
+        }
         recorder.toolExecutionStart(event.toolCallId, event.toolName);
     });
     on("tool_call", (event, ctx) => {
@@ -646,7 +704,17 @@ function installChildLifecycle(pi, initialContext) {
     on("tool_execution_update", (event) => {
         recorder.toolExecutionUpdate(event.toolCallId, event.toolName);
     });
-    on("tool_result", (event, ctx) => {
+    on("tool_result", async (event, ctx) => {
+        if (replication) {
+            for (const fact of workFacts(event)) {
+                // Inspection is not a process launch or proof of job ownership.
+                const inspection = ["read", "search", "select"].includes(event.toolName);
+                work.toolResult(fact, inspection);
+                if (!inspection)
+                    await work.trackProcesses(fact);
+            }
+            persistWork();
+        }
         if (event.toolName === "pi_extension_dev_reload_self" && !event.isError && event.details?.queued)
             reloadPending = true;
         if (event.toolName === "teleport" && event.isError) {
@@ -656,6 +724,8 @@ function installChildLifecycle(pi, initialContext) {
         recorder.toolResult(event.toolCallId, event.toolName);
     });
     on("tool_execution_end", (event) => {
+        if (replication)
+            work.toolEnded(event.toolCallId);
         recorder.toolExecutionEnd(event.toolCallId, event.toolName);
     });
     on("message_end", (event, ctx) => {
@@ -690,84 +760,6 @@ function installChildLifecycle(pi, initialContext) {
         handler: (ctx) => {
             expanded = !expanded;
             renderWidget(ctx, null);
-        },
-    });
-    if (replication)
-        return;
-    pi.registerTool({
-        name: "caller_ping",
-        label: "Caller Ping",
-        description: "Record a help request for the parent agent. " +
-            "The parent will be notified with your message after recursively owned descendants drain, and this session stays open. " +
-            "Use when you're stuck, need clarification, or need the parent to take action.",
-        parameters: Type.Object({
-            message: Type.String({ description: "What you need help with" }),
-        }),
-        async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-            const sessionFile = process.env.PI_SUBAGENT_SESSION;
-            if (!sessionFile) {
-                throw new Error("caller_ping is only available in subagent contexts. " +
-                    "PI_SUBAGENT_SESSION environment variable is not set.");
-            }
-            recorder.callerPing();
-            const exitData = {
-                type: "ping",
-                id: randomUUID(),
-                name: process.env.PI_SUBAGENT_NAME ?? "subagent",
-                message: params.message,
-            };
-            await waitForDescendantDrain();
-            writeBindingFile(`${sessionFile}.exit`, exitData);
-            await waitForPingAcknowledgement(sessionFile, exitData.id, _signal);
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: "Help request sent. The parent was notified; this session stays open.",
-                    },
-                ],
-                details: {},
-            };
-        },
-    });
-    if (autoExit)
-        return;
-    pi.registerTool({
-        name: "subagent_done",
-        label: "Subagent Done",
-        description: "Record interactive completion intent. " +
-            "Return results and close this session after recursively owned descendants drain. " +
-            "Your LAST assistant message before calling this becomes the summary returned to the caller.",
-        parameters: Type.Object({ summary: Type.Optional(Type.String({ description: "Optional final summary" })) }),
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            recorder.subagentDone();
-            const payload = {
-                type: "done",
-                ...(typeof params.summary === "string" && params.summary.trim()
-                    ? { summary: params.summary }
-                    : {}),
-            };
-            const lineage = lineageFromEnvironment();
-            const pendingDescendants = lineage
-                ? hasUndrainedDescendants(reduceLineage(lineage.rootDir), lineage.nodeId)
-                : false;
-            if (!pendingDescendants) {
-                const sessionFile = process.env.PI_SUBAGENT_SESSION;
-                if (sessionFile) {
-                    try {
-                        writeBindingFile(`${sessionFile}.exit`, payload);
-                    }
-                    catch { }
-                }
-                ctx.shutdown();
-            }
-            else {
-                await finishAfterDrain(ctx, payload);
-            }
-            return {
-                content: [{ type: "text", text: "Shutting down subagent session." }],
-                details: {},
-            };
         },
     });
 }

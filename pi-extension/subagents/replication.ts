@@ -13,24 +13,11 @@ export const ReplicateParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "The exact work this copy must complete and the result you expect back." }),
 }, { additionalProperties: false });
 
-/** Recovery choices are disclosed only after a result makes them relevant. */
-const ReplicateRecoveryParams = Type.Object({
-	...ReplicateParams.properties,
-	continuation: Type.Optional(Type.String({ minLength: 1, description: "The saved copy ID supplied with a previous result." })),
-	mode: Type.Optional(Type.Union([Type.Literal("resume"), Type.Literal("fork")], { description: "Continue the saved copy, or start a new copy from where it stopped." })),
-}, { additionalProperties: false });
-export type ReplicateRequest = Static<typeof ReplicateRecoveryParams>;
+export type ReplicateRequest = Static<typeof ReplicateParams>;
 
-/** Keep recovery visibility scoped to the exact receiving session. */
-export interface ReplicateToolControls {
-	reveal(ctx: ExtensionContext): void;
-}
-
-/** Register one parallel-work tool; durable result entries restore its disclosed surface. */
-export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext, toolCallId: string) => Promise<{ id: string; name: string; sessionFile: string }>): ReplicateToolControls {
-	let recovery = false;
-	let sessionId: string | undefined;
-	const publish = () => pi.registerTool({
+/** Register the single fresh-copy tool without model-facing continuation controls. */
+export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext, toolCallId: string) => Promise<{ id: string; name: string; sessionFile: string }>): void {
+	pi.registerTool({
 		name: "replicate", label: "Replicate",
 		description: "Run a clearly defined part of your task in parallel with another copy of yourself while you continue a different part. The copy's result returns automatically to this session.",
 		promptSnippet: "Run a defined part of your task in parallel with another copy of yourself while you continue a different part.",
@@ -42,13 +29,12 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 			"After finishing your own parallel work, you may end your turn and wait for the copy's automatic result.",
 			"Results arrive automatically. Do not poll for completion.",
 		],
-		parameters: recovery ? ReplicateRecoveryParams : ReplicateParams,
+		parameters: ReplicateParams,
 		async execute(toolCallId, input, _signal, _update, ctx) {
 			const params = input as ReplicateRequest;
+			if (Object.keys(params).some((key) => key !== "name" && key !== "task")) throw new Error("Replication accepts only name and task.");
 			if (typeof params.name !== "string" || !namePattern.test(params.name)) throw new Error("Replication needs a lowercase kebab-case name.");
-			if (!params.task.trim()) throw new Error("Replication needs a nonempty task.");
-			if ((params.continuation || params.mode) && (!recovery || sessionId !== ctx.sessionManager.getSessionId())) throw new Error("Recovery is not available in this session.");
-			if (!!params.continuation !== !!params.mode) throw new Error("Continuation and mode must be supplied together.");
+			if (typeof params.task !== "string" || !params.task.trim()) throw new Error("Replication needs a nonempty task.");
 			const child = await launch(params, ctx, toolCallId);
 			return {
 				content: [{ type: "text", text: `${child.name} started. Its result will arrive here automatically.` }],
@@ -56,23 +42,6 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 			};
 		},
 	});
-	const setRecovery = (enabled: boolean) => {
-		if (recovery === enabled) return;
-		recovery = enabled;
-		publish();
-	};
-	pi.on("session_start", (_event, ctx) => {
-		sessionId = ctx.sessionManager.getSessionId();
-		setRecovery(ctx.sessionManager.getBranch().some((entry) => {
-			const details = (entry as { details?: Record<string, unknown> }).details;
-			return entry.type === "custom_message" && entry.customType === "subagent_result" && details?.replication === true && details.recoveryAvailable === true && details.receiverSessionId === sessionId;
-		}));
-	});
-	publish();
-	return { reveal(ctx) {
-		sessionId = ctx.sessionManager.getSessionId();
-		setRecovery(true);
-	} };
 }
 
 /** Add the immediate parent's readable origin to the caller's task name. */
