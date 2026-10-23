@@ -8,6 +8,7 @@ import { seedReplicationSessionFile } from "../pi-extension/subagents/session.ts
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 import { materializeReplicationHistory, registerReplicateTool, replicationName } from "../pi-extension/subagents/replication.ts";
 import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
+import subagentsExtension from "../pi-extension/subagents/index.ts";
 
 it("reads the current pane name without falling back to another pane", () => {
 	assert.equal(getHerdrCurrentPaneTitle((args) => {
@@ -49,39 +50,38 @@ it("saves the copy name without changing inherited session entries", () => {
 		assert.equal(branch[0].name, "Настройки");
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
+it("registers only the fresh replication tool", () => {
+	const registered: string[] = [];
+	subagentsExtension({
+		registerTool: (tool: { name: string }) => registered.push(tool.name),
+		on: () => () => {},
+		registerMessageRenderer: () => {},
+	} as any);
+	assert.deepEqual(registered, ["replicate"]);
+});
 function toolSurface() {
 	let definition: any;
 	const handlers = new Map<string, Function>();
 	const pi = { registerTool: (tool: any) => { definition = tool; }, on: (event: string, handler: Function) => { handlers.set(event, handler); } };
 	const launches: any[] = [];
-	const controls = registerReplicateTool(pi as any, async (params) => {
+	registerReplicateTool(pi as any, async (params) => {
 		launches.push(params);
 		return { id: "copy", name: params.name, sessionFile: "/saved" };
 	});
 	const context = (id: string, branch: any[] = []): any => ({ sessionManager: { getSessionId: () => id, getBranch: () => branch } });
-	return { controls, handlers, context, launches, definition: () => definition };
+	return { handlers, context, launches, definition: () => definition };
 }
 
-it("requires a task name and reveals recovery for the current receiver", () => {
-	const surface = toolSurface();
-	surface.handlers.get("session_start")?.({}, surface.context("original"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
-	assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
-	surface.controls.reveal(surface.context("original"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task", "continuation", "mode"]);
-	assert.equal(surface.definition().name, "replicate");
-	assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
-});
-
-it("restores recovery from its own delivered result, not copied session history", () => {
+it("keeps name and task as its only parameters after delivered results and session changes", () => {
 	const surface = toolSurface();
 	const branch = [{ type: "custom_message", customType: "subagent_result", details: { replication: true, recoveryAvailable: true, receiverSessionId: "original" } }];
-	surface.handlers.get("session_start")?.({}, surface.context("original", branch));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task", "continuation", "mode"]);
-	surface.handlers.get("session_start")?.({}, surface.context("fresh-copy", branch));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
-	surface.handlers.get("session_start")?.({}, surface.context("unrelated"));
-	assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
+	for (const id of ["original", "fresh-copy", "unrelated"]) {
+		surface.handlers.get("session_start")?.({}, surface.context(id, branch));
+		assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
+		assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
+		assert.equal(surface.definition().parameters.additionalProperties, false);
+		assert.equal(surface.definition().name, "replicate");
+	}
 });
 
 it("rejects missing or non-kebab-case names before launching", async () => {
@@ -100,13 +100,19 @@ it("passes valid caller names unchanged to launch", async () => {
 		assert.equal(result.details.name, name);
 	}
 });
-it("does not launch undisclosed recovery through direct execution", async () => {
+it("rejects old continuation arguments through direct execution", async () => {
 	const surface = toolSurface(), ctx = surface.context("original");
-	surface.handlers.get("session_start")?.({}, ctx);
-	await assert.rejects(surface.definition().execute("call", { name: "continue-check", task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx), /not available/);
-	surface.controls.reveal(ctx);
-	const result = await surface.definition().execute("call", { name: "continue-check", task: "continue", continuation: "old", mode: "resume" }, undefined, undefined, ctx);
-	assert.equal(result.details.status, "running");
+	for (const extra of [
+		{ continuation: "old", mode: "resume" },
+		{ continuation: "old", mode: "fork" },
+		{ continuation: undefined },
+		{ mode: undefined },
+		{ resume: "old" },
+		{ fork: true },
+	]) {
+		await assert.rejects(surface.definition().execute("call", { name: "continue-check", task: "continue", ...extra }, undefined, undefined, ctx), /only name and task/);
+	}
+	assert.equal(surface.launches.length, 0);
 });
 it("copies only the captured branch and settles inherited pending calls without executing them", () => {
 	const dir = mkdtempSync(join(tmpdir(), "replication-contract-"));

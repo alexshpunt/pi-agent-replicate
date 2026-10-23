@@ -23,7 +23,7 @@ import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { installLegacySubagentExtension as subagentsExtension, __test__ } from "../pi-extension/subagents/index.ts";
+import subagentsExtension, { __test__ } from "../pi-extension/subagents/index.ts";
 import { createLifecycle } from "../pi-extension/subagents/lifecycle.ts";
 import { consumeRecoveryAttempt } from "../pi-extension/subagents/watchdog.ts";
 import {

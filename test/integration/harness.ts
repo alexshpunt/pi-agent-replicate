@@ -252,7 +252,7 @@ export function createTestEnv(backend: MuxBackend, options: { replication?: bool
     // agent directory so nested launches exercise the real extension as well.
     writeFileSync(
       join(agentDir, "extensions", "subagents-under-test.ts"),
-      `import extension, { installLegacySubagentExtension } from ${JSON.stringify(EXTENSION_SOURCE)};\n` +
+      `import extension from ${JSON.stringify(EXTENSION_SOURCE)};\n` +
       `import { existsSync, mkdirSync, writeFileSync } from "node:fs";\n` +
       `import { join } from "node:path";\n` +
       `export default function(pi) {\n` +
@@ -265,7 +265,7 @@ export function createTestEnv(backend: MuxBackend, options: { replication?: bool
       `      return send(message, options);\n` +
       `    };\n` +
       `  }\n` +
-      `  if (!(process.env.PI_DENY_TOOLS || '').split(',').includes('subagent')) ${options.replication ? 'extension' : '(process.env.PI_SUBAGENT_REPLICATION === "1" ? extension : installLegacySubagentExtension)'}(pi);\n` +
+      `  extension(pi);\n` +
       `  pi.on('session_start', (_event, ctx) => {\n` +
       `    const paneId = process.env.HERDR_PANE_ID;\n` +
       `    const agentDir = process.env.PI_CODING_AGENT_DIR;\n` +

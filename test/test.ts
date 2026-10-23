@@ -19,6 +19,7 @@ import {
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import rolePackExample from "../examples/role-pack/extension.ts";
+import { discoverAgentCatalog } from "../pi-extension/subagents/role-catalog.ts";
 import {
 	cleanupSubagentsForShutdown,
 	selectCompletionApi,
@@ -121,6 +122,7 @@ function startMockChildLifecycle(api: any): void {
 	const previousPane = process.env.HERDR_PANE_ID;
 	const previousLauncher = process.env.PI_SUBAGENT_LAUNCHER_PID;
 	const previousSurface = process.env.PI_SUBAGENT_SURFACE;
+	const previousReplication = process.env.PI_SUBAGENT_REPLICATION;
 	const sessionId = "unit-child";
 	const sessionFile = createSessionFile(dir, [
 		{ type: "session", id: sessionId },
@@ -131,6 +133,7 @@ function startMockChildLifecycle(api: any): void {
 	]);
 	process.env.PI_SUBAGENT_SESSION = sessionFile;
 	delete process.env.HERDR_PANE_ID;
+	delete process.env.PI_SUBAGENT_REPLICATION;
 	try {
 		subagentDoneExtension({ ...api, getActiveTools: () => [], setActiveTools() {} }, {
 			cwd: dir,
@@ -142,6 +145,7 @@ function startMockChildLifecycle(api: any): void {
 		restoreEnvVar("HERDR_PANE_ID", previousPane);
 		restoreEnvVar("PI_SUBAGENT_LAUNCHER_PID", previousLauncher);
 		restoreEnvVar("PI_SUBAGENT_SURFACE", previousSurface);
+		restoreEnvVar("PI_SUBAGENT_REPLICATION", previousReplication);
 		rmSync(dir, { recursive: true, force: true });
 	}
 }
@@ -1513,17 +1517,14 @@ describe("subagent discovery", () => {
 		);
 	});
 
-	it("buildSubagentToolAllowlist keeps explicit completion for interactive children", () => {
+	it("buildSubagentToolAllowlist keeps only requested supported tools", () => {
 		assert.equal(
 			testApi.buildSubagentToolAllowlist("read,bash,web_search"),
-			"read,bash,web_search,caller_ping,subagent_done",
+			"read,bash,web_search",
 		);
-	});
-
-	it("buildSubagentToolAllowlist omits explicit completion for auto-exit children", () => {
 		assert.equal(
-			testApi.buildSubagentToolAllowlist("read,bash,web_search,subagent_done", true),
-			"read,bash,web_search,caller_ping",
+			testApi.buildSubagentToolAllowlist("read,bash,caller_ping,subagent_done", true),
+			"read,bash",
 		);
 	});
 
@@ -1565,51 +1566,19 @@ describe("subagent discovery", () => {
 		);
 	});
 
-	it("discovers and launches a Pi package role pack without repeated role names", async () => {
+	it("discovers Pi package role metadata for the retained launcher", async () => {
 		await withIsolatedAgentEnv(async ({ projectDir }) => {
-			const rolePackDir = join(projectDir, "security-role-pack");
-			const rolesDir = join(rolePackDir, "roles");
+			const rolePackDir = join(projectDir, "security-role-pack"), rolesDir = join(rolePackDir, "roles");
 			mkdirSync(rolesDir, { recursive: true });
-			writeFileSync(
-				join(rolePackDir, "package.json"),
-				JSON.stringify({ name: "@acme/security-roles", version: "1.2.3" }),
-			);
-			writeAgentFile(
-				rolesDir,
-				"security-reviewer",
-				[
-					"description: Reviews changes for concrete security vulnerabilities",
-					"tools: read, bash",
-					"spawning: false",
-					"auto-exit: true",
-				].join("\n"),
-			);
-
-			const { api, registeredTools } = createMockExtensionApi();
-			api.events.on(
-				"pi-herdr-subagents:roles:discover:v1",
-				(request: { register(path: string): void }) =>
-					request.register(rolesDir),
-			);
-			(subagentsModule as any).installLegacySubagentExtension(api);
-
-			const listTool = registeredTools.find(
-				(tool) => tool.name === "subagents_list",
-			);
-			assert.ok(listTool, "expected subagents_list to be registered");
-			const result = await listTool.execute();
-			const role = result.details.agents.find(
-				(agent: any) => agent.name === "security-reviewer",
-			);
-			assert.ok(role, "expected role-pack definition to be listed");
+			writeFileSync(join(rolePackDir, "package.json"), JSON.stringify({ name: "@acme/security-roles", version: "1.2.3" }));
+			writeAgentFile(rolesDir, "security-reviewer", "description: Reviews concrete vulnerabilities\ntools: read, bash\nspawning: false\nauto-exit: true");
+			const { api } = createMockExtensionApi();
+			api.events.on("pi-herdr-subagents:roles:discover:v1", (request: { register(path: string): void }) => request.register(rolesDir));
+			const role = discoverAgentCatalog(api).agents.find(agent => agent.name === "security-reviewer");
+			assert.ok(role);
 			assert.equal(role.source, "package");
 			assert.equal(role.provider, "@acme/security-roles");
 			assert.equal(role.providerVersion, "1.2.3");
-			assert.match(
-				result.content[0].text,
-				/security-reviewer \(package:@acme\/security-roles\)/,
-			);
-
 			const loaded = testApi.loadAgentDefaults("security-reviewer", api);
 			assert.equal(loaded?.description, role.description);
 			assert.equal(loaded?.body, "You are a test agent.");
@@ -1618,345 +1587,99 @@ describe("subagent discovery", () => {
 
 	it("removes role-pack listeners when their extension instance shuts down", async () => {
 		await withIsolatedAgentEnv(async () => {
-			const eventBus = createEventBus();
-			const plugin = createMockExtensionApi(eventBus);
+			const eventBus = createEventBus(), plugin = createMockExtensionApi(eventBus), host = createMockExtensionApi(eventBus);
 			rolePackExample(plugin.api);
-			const host = createMockExtensionApi(eventBus);
-			(subagentsModule as any).installLegacySubagentExtension(host.api);
-			const listTool = host.registeredTools.find(
-				(tool) => tool.name === "subagents_list",
-			);
-
-			let result = await listTool.execute();
-			assert.equal(
-				result.details.agents.some(
-					(agent: any) => agent.name === "example-reviewer",
-				),
-				true,
-			);
-
+			const present = () => discoverAgentCatalog(host.api).agents.some(agent => agent.name === "example-reviewer");
+			assert.equal(present(), true);
 			const shutdown = plugin.eventHandlers.get("session_shutdown")?.[0];
-			assert.ok(shutdown, "expected role-pack cleanup handler");
+			assert.ok(shutdown);
 			await shutdown({ reason: "reload" }, {});
-			result = await listTool.execute();
-			assert.equal(
-				result.details.agents.some(
-					(agent: any) => agent.name === "example-reviewer",
-				),
-				false,
-				"stale role-pack listener must not survive reload",
-			);
-
-			const replacement = createMockExtensionApi(eventBus);
-			rolePackExample(replacement.api);
-			result = await listTool.execute();
-			assert.equal(
-				result.details.agents.some(
-					(agent: any) => agent.name === "example-reviewer",
-				),
-				true,
-			);
+			assert.equal(present(), false, "stale role-pack listener must not survive reload");
+			rolePackExample(createMockExtensionApi(eventBus).api);
+			assert.equal(present(), true);
 		});
 	});
 
 	it("rejects duplicate role-pack names while allowing any unique role name", async () => {
 		await withIsolatedAgentEnv(async ({ projectDir }) => {
-			const firstRoles = join(projectDir, "first-pack", "roles");
-			const secondRoles = join(projectDir, "second-pack", "roles");
-			for (const [rolesDir, packageName] of [[firstRoles, "@acme/first-roles"], [secondRoles, "@acme/second-roles"]] as const) {
+			const first = join(projectDir, "first-pack", "roles"), second = join(projectDir, "second-pack", "roles");
+			for (const [rolesDir, packageName] of [[first, "@acme/first-roles"], [second, "@acme/second-roles"]] as const) {
 				mkdirSync(rolesDir, { recursive: true });
 				writeFileSync(join(rolesDir, "..", "package.json"), JSON.stringify({ name: packageName, version: "1.0.0" }));
 				writeAgentFile(rolesDir, "duplicate-reviewer", "description: Duplicate package role");
 			}
-			writeAgentFile(firstRoles, "scout", "description: A role-pack scout");
-			const { api, registeredTools } = createMockExtensionApi();
-			api.events.on("pi-herdr-subagents:roles:discover:v1", (request: { register(path: string): void }) => {
-				request.register(firstRoles);
-				request.register(secondRoles);
-			});
-			(subagentsModule as any).installLegacySubagentExtension(api);
-			const result = await registeredTools.find((tool) => tool.name === "subagents_list").execute();
-			assert.equal(result.details.agents.some((agent: any) => agent.name === "duplicate-reviewer"), false);
-			assert.equal(result.details.agents.find((agent: any) => agent.name === "scout")?.provider, "@acme/first-roles");
-			assert.deepEqual(new Set(result.details.diagnostics.map((diagnostic: any) => diagnostic.code)), new Set(["duplicate-package-role"]));
+			writeAgentFile(first, "scout", "description: A role-pack scout");
+			const { api } = createMockExtensionApi();
+			api.events.on("pi-herdr-subagents:roles:discover:v1", (request: { register(path: string): void }) => { request.register(first); request.register(second); });
+			const catalog = discoverAgentCatalog(api);
+			assert.equal(catalog.agents.some(agent => agent.name === "duplicate-reviewer"), false);
+			assert.equal(catalog.agents.find(agent => agent.name === "scout")?.provider, "@acme/first-roles");
+			assert.deepEqual(new Set(catalog.diagnostics.map(diagnostic => diagnostic.code)), new Set(["duplicate-package-role"]));
 		});
 	});
 
 	it("keeps project and global overrides above contributed role packs", async () => {
-		await withIsolatedAgentEnv(
-			async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
-				const rolesDir = join(projectDir, "override-pack", "roles");
-				mkdirSync(rolesDir, { recursive: true });
-				writeFileSync(
-					join(rolesDir, "..", "package.json"),
-					JSON.stringify({ name: "@acme/override-roles" }),
-				);
-				writeAgentFile(
-					rolesDir,
-					"override-reviewer",
-					["description: Package role", "model: anthropic/package"].join("\n"),
-				);
-				writeAgentFile(
-					globalAgentsDir,
-					"override-reviewer",
-					["description: Global role", "model: anthropic/global"].join("\n"),
-				);
-				writeAgentFile(
-					projectAgentsDir,
-					"override-reviewer",
-					["description: Project role", "model: anthropic/project"].join("\n"),
-				);
-
-				const { api, registeredTools } = createMockExtensionApi();
-				api.events.on(
-					"pi-herdr-subagents:roles:discover:v1",
-					(request: { register(path: string): void }) =>
-						request.register(rolesDir),
-				);
-				(subagentsModule as any).installLegacySubagentExtension(api);
-
-				const listTool = registeredTools.find(
-					(tool) => tool.name === "subagents_list",
-				);
-				const result = await listTool.execute();
-				const role = result.details.agents.find(
-					(agent: any) => agent.name === "override-reviewer",
-				);
-				assert.equal(role.source, "project");
-				assert.equal(role.model, "anthropic/project");
-				assert.equal(role.provider, undefined);
-			},
-		);
+		await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir, globalAgentsDir }) => {
+			const rolesDir = join(projectDir, "override-pack", "roles");
+			mkdirSync(rolesDir, { recursive: true });
+			writeFileSync(join(rolesDir, "..", "package.json"), JSON.stringify({ name: "@acme/override-roles" }));
+			writeAgentFile(rolesDir, "override-reviewer", "description: Package role\nmodel: anthropic/package");
+			writeAgentFile(globalAgentsDir, "override-reviewer", "description: Global role\nmodel: anthropic/global");
+			writeAgentFile(projectAgentsDir, "override-reviewer", "description: Project role\nmodel: anthropic/project");
+			const { api } = createMockExtensionApi();
+			api.events.on("pi-herdr-subagents:roles:discover:v1", (request: { register(path: string): void }) => request.register(rolesDir));
+			const role = discoverAgentCatalog(api).agents.find(agent => agent.name === "override-reviewer");
+			assert.equal(role?.source, "project");
+			assert.equal(role.model, "anthropic/project");
+			assert.equal(role.provider, undefined);
+		});
 	});
 
-	it("labels visible global and project agents by source", async () => {
-		await withIsolatedAgentEnv(
-			async ({ projectAgentsDir, globalAgentsDir }) => {
-				writeAgentFile(
-					globalAgentsDir,
-					"global-discovery-test-agent",
-					[
-						"name: global-discovery-test-agent",
-						"description: Global test agent",
-					].join("\n"),
-				);
-				writeAgentFile(
-					projectAgentsDir,
-					"project-discovery-test-agent",
-					[
-						"name: project-discovery-test-agent",
-						"description: Project test agent",
-					].join("\n"),
-				);
-
-				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).installLegacySubagentExtension(api);
-
-				const tool = registeredTools.find(
-					(tool) => tool.name === "subagents_list",
-				);
-				assert.ok(tool, "expected subagents_list to be registered");
-
-				const result = await tool.execute();
-				const agents = result.details?.agents ?? [];
-				const sourceByName = new Map(
-					agents.map((agent: any) => [agent.name, agent.source]),
-				);
-
-				assert.equal(sourceByName.get("global-discovery-test-agent"), "global");
-				assert.equal(
-					sourceByName.get("project-discovery-test-agent"),
-					"project",
-				);
-				assert.match(
-					result.content[0].text,
-					/global-discovery-test-agent \(global\)/,
-				);
-				assert.match(
-					result.content[0].text,
-					/project-discovery-test-agent \(project\)/,
-				);
-			},
-		);
+	it("preserves global and project source labels in internal role discovery", async () => {
+		await withIsolatedAgentEnv(async ({ projectAgentsDir, globalAgentsDir }) => {
+			writeAgentFile(globalAgentsDir, "global-discovery-test-agent", "description: Global test agent");
+			writeAgentFile(projectAgentsDir, "project-discovery-test-agent", "description: Project test agent");
+			const sourceByName = new Map(discoverAgentCatalog().agents.map(agent => [agent.name, agent.source]));
+			assert.equal(sourceByName.get("global-discovery-test-agent"), "global");
+			assert.equal(sourceByName.get("project-discovery-test-agent"), "project");
+		});
 	});
 
-	it("rejects legacy external CLI roles before launch", async () => {
-		await withIsolatedAgentEnv(
-			async ({ globalAgentsDir, projectAgentsDir }) => {
-				writeAgentFile(
-					globalAgentsDir,
-					"external-cli-reviewer",
-					[
-						"description: Legacy external CLI review adapter",
-						"cli: claude",
-						"cli-model: sonnet",
-						"disable-model-invocation: true",
-					].join("\n"),
-				);
-				writeAgentFile(
-					projectAgentsDir,
-					"scout",
-					["description: Legacy scout override", "cli: claude"].join("\n"),
-				);
-				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).installLegacySubagentExtension(api);
-
-				const tool = registeredTools.find(
-					(tool) => tool.name === "subagents_list",
-				);
-				assert.ok(tool, "expected subagents_list to be registered");
-
-				const result = await tool.execute();
-				assert.equal(
-					result.details.agents.some(
-						(agent: any) =>
-							agent.name === "external-cli-reviewer" || agent.name === "scout",
-					),
-					false,
-				);
-				assert.equal(
-					result.details.diagnostics.some(
-						(diagnostic: any) =>
-							diagnostic.agentName === "external-cli-reviewer" &&
-							diagnostic.code === "external-cli-unsupported",
-					),
-					true,
-				);
-				assert.match(result.content[0].text, /Pi-only/i);
-				assert.match(result.content[0].text, /remove.*cli/i);
-				assert.equal(testApi.loadAgentDefaults("external-cli-reviewer"), null);
-
-				const subagentTool = registeredTools.find(
-					(tool) => tool.name === "subagent",
-				);
-				assert.ok(subagentTool, "expected subagent to be registered");
-				const previousHerdrEnv = process.env.HERDR_ENV;
-				delete process.env.HERDR_ENV;
-				try {
-					const launch = await subagentTool.execute(
-						"call-1",
-						{
-							name: "Legacy",
-							task: "Review this branch",
-							agent: "external-cli-reviewer",
-							worktree: { branch: "must-not-be-created" },
-						},
-						new AbortController().signal,
-						() => {},
-						{},
-					);
-					assert.equal(launch.details.error, "external-cli-unsupported");
-					assert.match(launch.content[0].text, /Pi-only/i);
-				} finally {
-					restoreEnvVar("HERDR_ENV", previousHerdrEnv);
-				}
-			},
-		);
+	it("rejects legacy external CLI roles before internal loading", async () => {
+		await withIsolatedAgentEnv(async ({ globalAgentsDir, projectAgentsDir }) => {
+			writeAgentFile(globalAgentsDir, "external-cli-reviewer", "description: Legacy external CLI review adapter\ncli: claude\ncli-model: sonnet\ndisable-model-invocation: true");
+			writeAgentFile(projectAgentsDir, "scout", "description: Legacy scout override\ncli: claude");
+			const catalog = discoverAgentCatalog();
+			assert.equal(catalog.agents.some(agent => ["external-cli-reviewer", "scout"].includes(agent.name)), false);
+			assert.equal(catalog.diagnostics.some(diagnostic => diagnostic.agentName === "external-cli-reviewer" && diagnostic.code === "external-cli-unsupported"), true);
+			assert.match(catalog.diagnostics.map(diagnostic => diagnostic.message).join("\n"), /Pi-only.*remove.*cli/i);
+			assert.equal(testApi.loadAgentDefaults("external-cli-reviewer"), null);
+		});
 	});
 
-	it("hides disable-model-invocation agents from listings but keeps direct loading", async () => {
+	it("keeps disable-model-invocation roles directly loadable without adding model tools", async () => {
 		await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
-			writeAgentFile(
-				projectAgentsDir,
-				"hidden-discovery-test-agent",
-				[
-					"name: hidden-discovery-test-agent",
-					"description: Hidden test agent",
-					"model: anthropic/test-hidden",
-					"disable-model-invocation: true",
-				].join("\n"),
-				"You are the hidden agent.",
-			);
-
-			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).installLegacySubagentExtension(api);
-
-			const tool = registeredTools.find(
-				(tool) => tool.name === "subagents_list",
-			);
-			assert.ok(tool, "expected subagents_list to be registered");
-
-			const result = await tool.execute();
-			const agents = result.details?.agents ?? [];
-
-			assert.equal(
-				agents.some(
-					(agent: any) => agent.name === "hidden-discovery-test-agent",
-				),
-				false,
-			);
-			assert.doesNotMatch(
-				result.content[0].text,
-				/hidden-discovery-test-agent/,
-			);
-
+			writeAgentFile(projectAgentsDir, "hidden-discovery-test-agent", "description: Hidden test agent\nmodel: anthropic/test-hidden\ndisable-model-invocation: true", "You are the hidden agent.");
 			const loaded = testApi.loadAgentDefaults("hidden-discovery-test-agent");
-			assert.ok(loaded, "expected hidden agent to remain directly loadable");
+			assert.ok(loaded);
 			assert.equal(loaded.model, "anthropic/test-hidden");
 			assert.equal(loaded.body, "You are the hidden agent.");
 			assert.equal(loaded.disableModelInvocation, true);
 		});
 	});
 
-	it("lets a hidden project agent shadow a visible global agent", async () => {
-		await withIsolatedAgentEnv(
-			async ({ projectAgentsDir, globalAgentsDir }) => {
-				writeAgentFile(
-					globalAgentsDir,
-					"shadowed-discovery-test-agent",
-					[
-						"name: shadowed-discovery-test-agent",
-						"description: Global visible agent",
-						"model: anthropic/test-global",
-					].join("\n"),
-					"You are the global visible agent.",
-				);
-				writeAgentFile(
-					projectAgentsDir,
-					"shadowed-discovery-test-agent",
-					[
-						"name: shadowed-discovery-test-agent",
-						"description: Project hidden agent",
-						"model: anthropic/test-project",
-						"disable-model-invocation: true",
-					].join("\n"),
-					"You are the project hidden agent.",
-				);
-
-				const { api, registeredTools } = createMockExtensionApi();
-				(subagentsModule as any).installLegacySubagentExtension(api);
-
-				const tool = registeredTools.find(
-					(tool) => tool.name === "subagents_list",
-				);
-				assert.ok(tool, "expected subagents_list to be registered");
-
-				const result = await tool.execute();
-				const agents = result.details?.agents ?? [];
-
-				assert.equal(
-					agents.some(
-						(agent: any) => agent.name === "shadowed-discovery-test-agent",
-					),
-					false,
-				);
-				assert.doesNotMatch(
-					result.content[0].text,
-					/shadowed-discovery-test-agent/,
-				);
-
-				const loaded = testApi.loadAgentDefaults(
-					"shadowed-discovery-test-agent",
-				);
-				assert.ok(
-					loaded,
-					"expected project override to remain directly loadable",
-				);
-				assert.equal(loaded.model, "anthropic/test-project");
-				assert.equal(loaded.body, "You are the project hidden agent.");
-				assert.equal(loaded.disableModelInvocation, true);
-			},
-		);
+	it("lets a hidden project agent shadow a visible global agent for internal loading", async () => {
+		await withIsolatedAgentEnv(async ({ projectAgentsDir, globalAgentsDir }) => {
+			writeAgentFile(globalAgentsDir, "shadowed-discovery-test-agent", "description: Global visible agent\nmodel: anthropic/test-global", "You are the global visible agent.");
+			writeAgentFile(projectAgentsDir, "shadowed-discovery-test-agent", "description: Project hidden agent\nmodel: anthropic/test-project\ndisable-model-invocation: true", "You are the project hidden agent.");
+			const role = discoverAgentCatalog().agents.find(agent => agent.name === "shadowed-discovery-test-agent");
+			assert.equal(role?.source, "project");
+			const loaded = testApi.loadAgentDefaults("shadowed-discovery-test-agent");
+			assert.ok(loaded);
+			assert.equal(loaded.model, "anthropic/test-project");
+			assert.equal(loaded.body, "You are the project hidden agent.");
+			assert.equal(loaded.disableModelInvocation, true);
+		});
 	});
 });
 describe("subagent-done.ts", () => {
@@ -2059,54 +1782,16 @@ describe("subagent-done.ts", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
-	it("does not register subagent_done for auto-exit children", () => {
+	it("registers no help or completion tools for autonomous or interactive children", () => {
 		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
-		process.env.PI_SUBAGENT_AUTO_EXIT = "1";
 		try {
-			const { api, registeredTools } = createMockExtensionApi();
-			startMockChildLifecycle(api);
-			assert.equal(registeredTools.some((tool) => tool.name === "caller_ping"), true);
-			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), false);
-		} finally {
-			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
-		}
-	});
-
-	it("registers subagent_done for interactive children", () => {
-		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
-		delete process.env.PI_SUBAGENT_AUTO_EXIT;
-		try {
-			const { api, registeredTools } = createMockExtensionApi();
-			startMockChildLifecycle(api);
-			assert.equal(registeredTools.some((tool) => tool.name === "subagent_done"), true);
-		} finally {
-			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
-		}
-	});
-
-	it("describes descendant-gated help and completion tools", () => {
-		const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
-		delete process.env.PI_SUBAGENT_AUTO_EXIT;
-		try {
-			const { api, registeredTools } = createMockExtensionApi();
-			startMockChildLifecycle(api);
-			const callerPing = registeredTools.find((tool) => tool.name === "caller_ping");
-			const subagentDone = registeredTools.find((tool) => tool.name === "subagent_done");
-			assert.equal(
-				callerPing.description,
-				"Record a help request for the parent agent. " +
-					"The parent will be notified with your message after recursively owned descendants drain, and this session stays open. " +
-					"Use when you're stuck, need clarification, or need the parent to take action.",
-			);
-			assert.equal(
-				subagentDone.description,
-				"Record interactive completion intent. " +
-					"Return results and close this session after recursively owned descendants drain. " +
-					"Your LAST assistant message before calling this becomes the summary returned to the caller.",
-			);
-		} finally {
-			restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
-		}
+			for (const autoExit of ["0", "1"]) {
+				process.env.PI_SUBAGENT_AUTO_EXIT = autoExit;
+				const { api, registeredTools } = createMockExtensionApi();
+				startMockChildLifecycle(api);
+				assert.deepEqual(registeredTools, []);
+			}
+		} finally { restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit); }
 	});
 	it("wires Pi compaction hooks into child activity without forcing a turn", async () => {
 		const dir = createTestDir();
@@ -2968,151 +2653,35 @@ describe("completion.ts", () => {
 
 
 describe("tool registration", () => {
-	it("requires a named role and hides the bare system prompt from the launch schema", () => {
-		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-		const tool = registeredTools.find((tool) => tool.name === "subagent");
-
-		assert.ok(tool.parameters.required.includes("agent"));
-		assert.equal(tool.parameters.properties.agent.minLength, 1);
-		assert.equal(tool.parameters.properties.systemPrompt, undefined);
-	});
-
-	it("rejects missing and blank roles before reading launch context", async () => {
-		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-		const tool = registeredTools.find((tool) => tool.name === "subagent");
-
-		for (const agent of [undefined, "", "   "]) {
-			await assert.rejects(
-				tool.execute("role-required", { name: "A", task: "T", agent }),
-				/A named role is required.*subagents_list/,
-			);
-		}
-	});
-
-	it("exposes only the five agent-facing lifecycle tools and no user commands", () => {
+	it("exposes only fresh replication and no user commands", () => {
 		const { api, registeredTools, registeredCommands } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-		assert.deepEqual(
-			registeredTools.map((tool) => tool.name).sort(),
-			["subagent", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagents_list"],
-		);
+		subagentsModule.default(api);
+		assert.deepEqual(registeredTools.map(tool => tool.name), ["replicate"]);
 		assert.deepEqual(registeredCommands, []);
-		const subagent = registeredTools.find((tool) => tool.name === "subagent");
-		assert.equal(subagent.parameters.properties.model, undefined);
-		assert.equal(subagent.parameters.properties.thinking, undefined);
+		const schema = registeredTools[0].parameters;
+		assert.deepEqual(schema.required, ["name", "task"]);
+		assert.deepEqual(Object.keys(schema.properties), ["name", "task"]);
 	});
 
-	it("ignores an inherited deny list in a parent process", () => {
-		delete process.env.PI_SUBAGENT_ID;
-		process.env.PI_DENY_TOOLS =
-			"subagent,subagent_interrupt,subagent_resume,subagents_list";
-		try {
-			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).installLegacySubagentExtension(api);
-			assert.equal(
-				registeredTools.some((tool) => tool.name === "subagent"),
-				true,
-			);
-			assert.equal(
-				registeredTools.some((tool) => tool.name === "subagent_interrupt"),
-				true,
-			);
-		} finally {
-			delete process.env.PI_DENY_TOOLS;
-		}
-	});
-
-	it("applies the deny list inside a child subagent process", () => {
+	it("does not restore removed tools from an inherited legacy deny list", () => {
+		const previousId = process.env.PI_SUBAGENT_ID, previousDeny = process.env.PI_DENY_TOOLS;
 		process.env.PI_SUBAGENT_ID = "child-test";
-		process.env.PI_DENY_TOOLS = "subagent,subagent_interrupt";
+		process.env.PI_DENY_TOOLS = "subagent,subagent_interrupt,subagent_resume,subagents_list";
 		try {
 			const { api, registeredTools } = createMockExtensionApi();
-			(subagentsModule as any).installLegacySubagentExtension(api);
-			assert.equal(
-				registeredTools.some((tool) => tool.name === "subagent"),
-				false,
-			);
-			assert.equal(
-				registeredTools.some((tool) => tool.name === "subagent_interrupt"),
-				false,
-			);
-			assert.equal(
-				registeredTools.some((tool) => tool.name === "subagents_list"),
-				true,
-			);
+			subagentsModule.default(api);
+			assert.deepEqual(registeredTools.map(tool => tool.name), ["replicate"]);
 		} finally {
-			delete process.env.PI_SUBAGENT_ID;
-			delete process.env.PI_DENY_TOOLS;
+			restoreEnvVar("PI_SUBAGENT_ID", previousId);
+			restoreEnvVar("PI_DENY_TOOLS", previousDeny);
 		}
 	});
 
-	it("expands spawning false to deny subagent interruption", () => {
-		const testApi = (subagentsModule as any).__test__;
-		const denied = testApi.resolveDenyTools({ spawning: false });
-
+	it("keeps spawning restrictions available to the retained internal launcher", () => {
+		const denied = subagentsModule.__test__.resolveDenyTools({ spawning: false });
 		assert.equal(denied.has("subagent"), true);
 		assert.equal(denied.has("subagent_interrupt"), true);
 		assert.equal(denied.has("subagent_resume"), true);
-	});
-
-	it("exposes worktree branch and optional base on the subagent tool", () => {
-		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-
-		const subagentTool = registeredTools.find(
-			(tool) => tool.name === "subagent",
-		);
-		const worktreeSchema = subagentTool.parameters.properties.worktree;
-
-		assert.deepEqual(worktreeSchema.required, ["branch"]);
-		assert.equal(worktreeSchema.properties.branch.minLength, 1);
-		assert.equal(worktreeSchema.properties.base.type, "string");
-		assert.match(subagentTool.description, /retain.*parent review/i);
-	});
-
-
-	it("renders partial subagent tool-call args without throwing", () => {
-		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-
-		const subagentTool = registeredTools.find(
-			(tool) => tool.name === "subagent",
-		);
-		assert.ok(subagentTool, "expected subagent tool to be registered");
-
-		const theme = {
-			fg(_color: string, text: string) {
-				return text;
-			},
-			bold(text: string) {
-				return text;
-			},
-		};
-		const rendered = subagentTool.renderCall({}, theme);
-		const output = rendered.render(80).join("\n");
-
-		assert.match(output, /\(unnamed\)/);
-	});
-
-	it("registers subagent_resume with an autoExit override", () => {
-		const { api, registeredTools } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
-
-		const resumeTool = registeredTools.find(
-			(tool) => tool.name === "subagent_resume",
-		);
-		assert.ok(resumeTool, "expected subagent_resume tool to be registered");
-
-		const autoExitSchema = resumeTool.parameters.properties.autoExit;
-		assert.equal(autoExitSchema.type, "boolean");
-		assert.equal(
-			autoExitSchema.description,
-			"Whether a clean or empty response records auto-exit intent. " +
-				"Delivery and closure for the resumed session occur only after recursively owned descendants drain. " +
-				"Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
-		);
 	});
 });
 
@@ -3436,15 +3005,10 @@ describe("subagent interruption", () => {
 		};
 	}
 
-	it("registers subagent_interrupt in the main session extension", () => {
+	it("keeps interruption internal rather than registering a model control", () => {
 		const { api, registeredTools } = createMockExtensionApi();
-
-		(subagentsModule as any).installLegacySubagentExtension(api);
-
-		assert.equal(
-			registeredTools.some((tool) => tool.name === "subagent_interrupt"),
-			true,
-		);
+		subagentsModule.default(api);
+		assert.equal(registeredTools.some(tool => tool.name === "subagent_interrupt"), false);
 	});
 
 	it("resolves interrupt targets by exact id and reports name ambiguity", () => {
@@ -4172,7 +3736,7 @@ describe("subagent status renderer", () => {
 
 	it("keeps recovery session details in expanded unexpected-error results", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
+		subagentsModule.default(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_result",
@@ -4207,7 +3771,7 @@ describe("subagent status renderer", () => {
 
 	it("renders result details while keeping the custom message context small", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
+		subagentsModule.default(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_result",
@@ -4243,7 +3807,7 @@ describe("subagent status renderer", () => {
 
 	it("renders only capped lines plus overflow", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
+		subagentsModule.default(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_status",
@@ -4285,7 +3849,7 @@ describe("subagent status renderer", () => {
 
 	it("stays within narrow widths", () => {
 		const { api, registeredMessageRenderers } = createMockExtensionApi();
-		(subagentsModule as any).installLegacySubagentExtension(api);
+		subagentsModule.default(api);
 
 		const rendererEntry = registeredMessageRenderers.find(
 			(entry) => entry.name === "subagent_status",
