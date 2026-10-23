@@ -16,9 +16,13 @@ These boundaries do not publish parent results. A persistent child can settle ma
 
 For a replica, a clean nonempty response can record terminal intent only after the last descendant result is processed. Earlier responses stay local. A terminal provider error, Escape, an empty required summary or an unsaved close records failure, saves completion evidence and closes after descendant drain. User input does not suppress replica completion. A saved final response without settlement evidence is preserved as history, never promoted to success. Its original receives error facts and a file of all post-fork textual assistant answers, excluding inherited answers, tooling and hidden reasoning.
 
-If history export fails, the terminal result reports that error instead of retrying completion forever. An unknown inherited-answer boundary never authorizes exporting the whole conversation. If the session file cannot be checkpointed, terminal facts and source checkpointing still proceed. The checkout stays available, integration is blocked and no saved continuation is offered without a usable session checkpoint.
+If history export fails, the terminal result reports that error instead of retrying completion forever. An unknown inherited-answer boundary never authorizes exporting the whole conversation. If the session file cannot be checkpointed, terminal facts and source checkpointing still proceed. The checkout stays available, integration is blocked without advertising a saved-copy continuation.
 
 A queued self-reload is unfinished work. The acknowledgement before reload is not a terminal answer, and the stopped-replica timer stays suspended until reload continues the session or reports that it was blocked. An old runtime must not publish completion after shutdown, even if its descendant wait finishes later.
+
+A stopped model does not imply finished session work. Replicas wait for active tools, background terminal completion messages, pending background request receipts, reported live Linux descendant PIDs and their observed children, and their own replicas. The copy processes completion messages before returning. New work invalidates an older shutdown decision, including one already waiting for descendants. The idle safety timer cannot bypass this guard. Terminal completion remains authoritative for its exit status; observing the same PID exit must not replace it with a status-less duplicate.
+
+Receipt and process ownership persists for the exact session through reload. Unreported daemons, unsupported native process identities and remote jobs without completion receipts are not discoverable by this guard. It does not adopt unrelated processes or idle runtime helpers.
 
 The retained non-replica lifecycle is unchanged: autonomous clean or empty boundaries can record terminal intent after the last descendant result; provider errors and aborts keep those children open.
 
@@ -26,7 +30,7 @@ Manual and automatic context compaction are active child work. `session_before_c
 
 ## One terminal result
 
-A child publishes only when it reaches a terminal lifecycle outcome, such as auto-exit, `subagent_done`, cancellation, confirmed pane loss, or recovery failure.
+A child publishes only when it reaches a terminal lifecycle outcome, such as auto-exit, cancellation, confirmed pane loss, or recovery failure. No model-facing completion or help tool is registered.
 
 The terminal path:
 
@@ -43,7 +47,7 @@ Old pending `settled` inbox entries are acknowledged without being sent. This pr
 
 Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. A delivered child leaves the widget immediately; a rejected Herdr close retries a few times with backoff and then stops with a delivery-log record. Its result is not sent again.
 
-Replicas do not automatically restart after process loss or inactivity. Their parent receives a failure and decides whether to continue the saved copy. Normal settlement reports immediately. Ten continuous seconds with Pi idle and no pending messages, movement or undrained descendants retry a missed completion. A saved settlement checkpoint survives reload; without settlement evidence, this safety net reports failure and preserves the answers. Active requests, tools, retries and compaction do not count as stopped time.
+Replicas do not automatically restart after process loss or inactivity. Their parent receives a failure with available answer/error facts and can create a fresh copy. Normal settlement reports only after session work drains. Ten continuous seconds with Pi idle and no pending messages, movement or undrained descendants retry a missed completion. A saved settlement checkpoint survives reload; without settlement evidence, this safety net reports failure and preserves the answers. Active requests, tools, retries and compaction do not count as stopped time.
 
 Retained non-replica recovery is bounded to three attempts across crash and stale causes. An exhausted child is not killed, resumed or re-delivered on later watchdog passes.
 A recovery watcher starts only after the replacement registers its own session and pane. The old closed pane must not become a manual-cancellation result for the new process.

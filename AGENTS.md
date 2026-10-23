@@ -8,9 +8,9 @@ Read `README.md`, `CONTEXT.md`, `docs/public-subagent-tree-api.md`, and `docs/wo
 
 ## Public surface
 
-Keep exactly one model-facing tool: `replicate`. A normal task forks into an isolated worktree; owned continuation IDs can resume or fork the latest saved state. Do not register the retained legacy tools or expose child completion/help tools to replication clones. Do not add user commands, bundled roles, review workflows, or orchestration skills.
+Keep exactly one model-facing tool: `replicate`. Each invocation creates a fresh copy in an isolated worktree. Do not register legacy tools, continuation choices or child completion/help tools. Do not add user commands, bundled roles, review workflows, or orchestration skills.
 
-Replication inherits the parent's runtime, system prompt and active conversation. Put the parallel-copy identity, bounded assignment and summary requirement in a normal task message, never in the system prompt. Keep internal session references in host metadata. One invocation starts one isolated continuation. Keep task completion separate from integration outcome. Require a final summary, then close the clone after durable settlement and descendant drain. Terminal model failures return error facts and a file of post-fork textual assistant answers, without tooling or hidden reasoning.
+Replication inherits the parent's runtime, system prompt and active conversation. Put the parallel-copy identity, bounded assignment and summary requirement in a normal task message, never in the system prompt. Keep internal session references in host metadata. One invocation starts one fresh isolated copy. Keep task completion separate from integration outcome. Require a final summary, then close the clone after durable settlement and session-work drain. Wait for active tools, background completions, reported owned processes and descendants. Let the copy process completion results before returning; new work must cancel stale shutdown. Terminal model failures return error facts and a file of post-fork textual assistant answers, without tooling or hidden reasoning.
 
 The retained internal and package-root launch paths still resolve custom role runtime values independently, then inherit the parent. Keep project, global, and installable role-pack discovery for those paths.
 
@@ -18,7 +18,7 @@ The extension is fire-and-forget. Never add polling guidance.
 
 Explain replicate as parallel work, not delegation. Callers must already understand the task and intended working location, identify independent parts, specify the expected result, and keep separate work for themselves. No immediate waiting instead of doing the work. Later waiting after useful parallel work is fine.
 
-Require `name` and `task` in the initial tool schema. The caller chooses a task-specific name in lowercase kebab-case; the runtime adds the parent origin to visible titles. Disclose continuation choices after a saved result, scoped to the exact receiving session. Keep host mechanics out of the tool description, prompt guidelines and routine replies. Do not test prompt wording; verify schema and execution behavior through real requests and results.
+Keep only `name` and `task` in the tool schema. The caller chooses a task-specific name in lowercase kebab-case; the runtime adds the parent origin to visible titles. Keep host mechanics out of the tool description, prompt guidelines and routine replies. Do not test prompt wording; verify schema and execution behavior through real requests and results.
 
 ## Code map
 

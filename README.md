@@ -26,7 +26,7 @@ Use it only from a task-ready state: the agent is already in the intended workin
 
 This is parallel work by one agent, not a tool for handing off a task. Do not replicate while still deciding the task, its scope, or where to work. If the next step would be waiting for the copy, do the work yourself. After finishing real parallel work, the original may end its turn and wait for automatic delivery. Do not poll.
 
-The initial schema requires `name` and `task`. A saved result reveals its copy ID and adds `continuation` and `mode` to the same tool. Reload restores those choices only in the session that received the result; a new-ID copy does not inherit them. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
+The schema always requires only `name` and `task`. Each call starts a fresh copy with the caller's current context. After a result, continue in the original session or create another copy. Routine replies omit host paths and checkpoint details. A work problem is explained when it occurs.
 
 The caller must choose a task-specific `name` in lowercase kebab-case, such as `check-auth-risks`. The runtime adds the origin: `check-auth-risks ← Settings`. The origin comes from the parent's session name, then its current Herdr pane name, then the project directory name. The same combined title appears in the copy's session, Herdr workspace and pane, active status, and result. There is no automatic numbering. Internal IDs remain separate.
 
@@ -40,18 +40,11 @@ Each call copies the current active conversation, including the current user tur
 
 A fresh call requires `name` and `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
 
-After a saved result discloses an owned continuation ID, the same tool can continue the latest saved source and conversation:
-
-```typescript
-replicate({ name: "continue-auth-check", continuation: "saved-id", mode: "resume", task: "Continue with this new information." });
-replicate({ name: "try-auth-alternative", continuation: "saved-id", mode: "fork", task: "Try an independent continuation." });
-```
-
-`resume` preserves the saved session identity; `fork` creates a new one. Both use fresh per-attempt artifacts and an isolated worktree. Only the immediate parent can address its continuation. Active attempts cannot be continued concurrently. Removed successful worktrees can be rebuilt from their saved checkpoints. Arbitrary historical checkpoint selection is not supported.
+There are no model-facing continuation, resume or fork choices. Saved sessions and source checkpoints remain recovery evidence; the tool always creates a fresh copy.
 
 A copy can call `replicate` for an independent part of its assignment. It must wait for its own copies and return a nonempty final summary. The runtime delivers that summary and closes its pane and empty Herdr workspace after descendants drain and the process exits. Failed and conflicted copies close too; their files and saved sessions stay available for recovery. Copies do not get `caller_ping` or `subagent_done`.
 
-The former `subagent`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel` and `subagents_list` implementations remain internal and are not registered by default. The package-root API is unchanged. The package ships no workflows, skills or built-in roles.
+The old subagent tools and child completion/help tools are removed. The internal launcher and package-root API remain available without registering model-facing controls. The package ships no workflows, skills or built-in roles.
 
 ## Retained runtime policy
 
@@ -125,15 +118,19 @@ A role-pack extension must remove its listener on `session_shutdown`.
 
 `replicate` is fire-and-forget. Do not poll, sleep, tail session files or check panes to wait for it. Continue independent work or end your turn until automatic delivery starts the next turn.
 
-Delayed result and help cards keep the launch call that owns that attempt. In Stereo fullscreen they appear beside that call in Activity, not as a second Conversation card. Nested calls link to their actual visible outer call; resume and fork link to their new invocation. Saved ownership follows delivery through reload, receiver recovery and Teleport. Older or API-launched work without a recorded tool owner stays unlinked. This changes presentation only: the parent still receives the complete result, and saved history stays chronological.
+Delayed result and help cards keep the launch call that owns that attempt. In Stereo fullscreen they appear beside that call in Activity, not as a second Conversation card. Nested calls link to their actual visible outer call. Saved ownership follows delivery through reload, receiver recovery and Teleport. Older or API-launched work without a recorded tool owner stays unlinked. This changes presentation only: the parent still receives the complete result, and saved history stays chronological.
 
-Host metadata retains the saved session and immutable Markdown result-file paths. Routine model-visible results carry the copy's summary and saved-copy choice, not those internal references. Terminal model failures report error facts; host metadata also retains a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
+Host metadata retains the saved session and immutable Markdown result-file paths. Routine model-visible results carry the copy's summary, without saved-copy choices or internal references. Terminal model failures report error facts; host metadata also retains a separate file containing every post-fork textual assistant answer in order. That file excludes the original's answers, tool calls, tool results and hidden reasoning. Answers are not truncated. An empty required summary is a failure, not success.
 
-Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent can choose a continuation from the returned result.
+Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent continues with the returned information or creates a fresh copy.
 
-Missing or damaged answer history does not block a failure report or pane cleanup. The result explains why history is unavailable without exporting answers of unknown origin. If the session itself cannot be checkpointed, source work is still saved where possible and retained, but no continuation is offered and no changes are applied automatically.
+Missing or damaged answer history does not block a failure report or pane cleanup. The result explains why history is unavailable without exporting answers of unknown origin. If the session itself cannot be checkpointed, source work is still saved where possible and retained, and no changes are applied automatically.
 
-Normal settlement reports immediately. A ten-second safety net retries a missed handoff only while Pi is truly idle, with no queued work, movement or undrained descendants. Active tools, requests, retries and compaction are not subject to that deadline. Durable ownership restores pending results, join plans and cleanup after restart. The retained non-replica API keeps its existing recovery and interactive policies.
+Automatic closure waits for active tools, pending background terminal completions, background request receipts, reported Linux child PIDs and their observed descendants, and owned replicas. Completion messages wake the copy so it can process the result before returning. New input or work cancels a stale shutdown decision. This ownership state follows the exact session through reload.
+
+The process guard uses reported descendant PIDs, not every process in the terminal or every runtime helper. It cannot discover unreported daemonized jobs or remote CI jobs without a background receipt/completion message. A running open-ended job keeps its copy open until stopped.
+
+Once session work is finished, settlement reports without an extra model confirmation. A ten-second safety net retries a missed handoff only while Pi is truly idle, with no queued work, movement or undrained descendants. Active tools, requests, retries and compaction are not subject to that deadline. Durable ownership restores pending results, join plans and cleanup after restart. The retained non-replica API keeps its existing recovery and interactive policies.
 
 The binding is saved inside the Pi session and follows its stable session ID through Teleport. A new file, cwd, process, or pane does not change the receiver. A fork with a new session ID does not inherit pending answers. Children restore their own lifecycle and follow their moved immediate parent, including nested launches. A move suspends source-side delivery and completion while the replacement binds; an abandoned child handoff has a bounded recovery gate.
 
@@ -141,16 +138,13 @@ Ownership and current locations are indexed under `$PI_CODING_AGENT_DIR/subagent
 
 Keep the binding store, session artifacts, and saved sessions together when backing up or moving to another machine. Pane IDs alone are never permission to close a pane after a restart.
 
-The retained API's non-replica children may receive lifecycle tools:
-
-- `subagent_done` records completion intent for an interactive child.
-- `caller_ping` records a help request and returns it after descendants drain.
+No child receives a model-facing completion or help tool.
 
 ## Managed worktrees
 
 Replication always creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially through durable ownership gates. Checkpointing, Git joins and owned cleanup run in background host processes, not Pi's input thread. The host revalidates the original session before applying files and delivering its result. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
 
-Task completion and integration are separate outcomes: `applied`, `conflict`, `blocked`, or `not-attempted`. Conflicts do not apply any of the child's files to the parent. Failed or empty-summary children never auto-join partial work. Their worktrees stay available, and the parent gets the continuation ID and checkpoint. Continuing unjoined work includes its outstanding changes; continuing already-applied work joins only new changes.
+Task completion and integration are separate outcomes: `applied`, `conflict`, `blocked`, or `not-attempted`. Conflicts do not apply any of the child's files to the parent. Failed or empty-summary children never auto-join partial work. Their worktrees, sessions and checkpoints stay available for recovery. A new replica starts from the current parent's context and files.
 
 Successful worktrees are removed only after durable integration and source/session checkpointing, with ownership, process-exit and unchanged-source checks. Unknown ownership or later edits keep the worktree. Saved sessions and GC-protected source refs remain recoverable. If the parent is closed, successful integration waits for its exact session to reopen; no replacement parent is opened automatically.
 
