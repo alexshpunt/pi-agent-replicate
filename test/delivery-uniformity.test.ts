@@ -90,7 +90,7 @@ function propertyNames(schema: any, seen = new Set<string>()): Set<string> {
 }
 
 describe("TS-09 uniform delivery contract", () => {
-	it("TS-09 exposes no delivery or watchdog switch on the subagent tool", () => {
+	it("TS-09 exposes no delivery or watchdog switch on the replicate tool", () => {
 		const registeredTools: Array<any> = [];
 		const api = {
 			events: { on() {} },
@@ -107,10 +107,10 @@ describe("TS-09 uniform delivery contract", () => {
 				return [];
 			},
 		} as any;
-		(subagentsModule as any).installLegacySubagentExtension(api);
+		subagentsModule.default(api);
 
-		const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
-		assert.ok(subagentTool, "the subagent tool is registered");
+		const subagentTool = registeredTools.find((tool) => tool.name === "replicate");
+		assert.ok(subagentTool, "the replicate tool is registered");
 		const names = [...propertyNames(subagentTool.parameters)].filter((name) =>
 			FORBIDDEN.test(name),
 		);

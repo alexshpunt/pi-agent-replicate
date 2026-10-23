@@ -5,24 +5,24 @@ import { join } from "node:path";
 import { it } from "node:test";
 import { registerReplicateTool } from "../pi-extension/subagents/replication.ts";
 import { appendLineageEvent, registerLineage, reduceLineage } from "../pi-extension/subagents/lineage.ts";
-import { __test__ as __test, installLegacySubagentExtension } from "../pi-extension/subagents/index.ts";
+import subagentsExtension, { __test__ as __test } from "../pi-extension/subagents/index.ts";
 import { trackExecutionOwners } from "../pi-extension/subagents/execution-owner.ts";
 
-it("passes the actual invocation ID for fresh, resume and fork attempts", async () => {
+it("passes each fresh invocation's actual ID without accepting old continuation controls", async () => {
 	let tool: any;
 	const calls: unknown[] = [];
 	const pi: any = { registerTool: (value: any) => { tool = value; }, on() {} };
-	const controls = registerReplicateTool(pi, async (_params, _ctx, callId) => {
+	registerReplicateTool(pi, async (_params, _ctx, callId) => {
 		calls.push(callId);
 		return { id: "child", name: "check", sessionFile: "/saved" };
 	});
 	const ctx: any = { sessionManager: { getSessionId: () => "parent" } };
-	await tool.execute("fresh", { name: "check", task: "check" }, undefined, undefined, ctx);
-	controls.reveal(ctx);
+	await tool.execute("first", { name: "check", task: "check" }, undefined, undefined, ctx);
+	await tool.execute("second", { name: "check-again", task: "check again" }, undefined, undefined, ctx);
 	for (const mode of ["resume", "fork"]) {
-		await tool.execute(mode, { name: "check", task: "check", continuation: "child", mode }, undefined, undefined, ctx);
+		await assert.rejects(tool.execute(mode, { name: "check", task: "check", continuation: "child", mode }, undefined, undefined, ctx));
 	}
-	assert.deepEqual(calls, ["fresh", "resume", "fork"]);
+	assert.deepEqual(calls, ["first", "second"]);
 });
 
 it("retains invocation ownership in durable launch metadata without reusing an older attempt", () => {
@@ -76,7 +76,7 @@ it("follows real nested edges, keeps concurrent roots separate, and discards fin
 
 function renderCard(content: string, kind?: string) {
 	const renderers = new Map<string, Function>();
-	installLegacySubagentExtension({
+	subagentsExtension({
 		on() {}, registerTool() {}, registerMessageRenderer: (name: string, render: Function) => { renderers.set(name, render); },
 	} as any);
 	const theme = { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value, bold: (value: string) => value };

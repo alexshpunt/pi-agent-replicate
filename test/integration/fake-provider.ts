@@ -208,6 +208,9 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const source = requestText(request);
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
+	if (user.includes("BACKGROUND_WORK_COMPLETED") || user.startsWith("Session-owned processes exited:")) {
+		return { text: user.includes("exit 7") ? "BACKGROUND_WORK_FAILED" : "BACKGROUND_WORK_PROCESSED" };
+	}
 
 	if (names.has("replication_output_wrapper") && lastRole !== "tool" && /Call the replica output wrapper/i.test(user)) {
 		const task = quotedValue(user, "task");

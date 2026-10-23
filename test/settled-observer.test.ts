@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
-import { installLegacySubagentExtension as subagents, __test__ } from "../pi-extension/subagents/index.ts";
+import subagents, { __test__ } from "../pi-extension/subagents/index.ts";
 import { createLifecycle, markInterruptRequested } from "../pi-extension/subagents/lifecycle.ts";
 
 import {

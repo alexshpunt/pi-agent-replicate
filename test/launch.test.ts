@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
 	launchPiSubagent,
+	buildSubagentToolAllowlist,
 	type FreshPiLaunchRequest,
 	type PiLaunchOperations,
 	type ResumePiLaunchRequest,
@@ -79,6 +80,15 @@ function withFixture(
 }
 
 describe("Pi launch", () => {
+	it("never adds or inherits removed model-facing controls", () => {
+		for (const autoExit of [false, true]) {
+			for (const includeControlTools of [false, true]) {
+				assert.equal(buildSubagentToolAllowlist("read,bash,caller_ping,subagent_done,subagent,subagent_resume,subagent_interrupt,subagent_cancel,subagents_list", autoExit, includeControlTools), "read,bash");
+			}
+		}
+		assert.equal(buildSubagentToolAllowlist(undefined), null);
+		assert.equal(buildSubagentToolAllowlist(""), null);
+	});
 	it("launches an ordinary child through one transaction", async () => {
 		await withFixture(async ({ request, project, agentDir }) => {
 			const projectAgentDir = join(project, ".pi", "agent");
@@ -123,7 +133,7 @@ describe("Pi launch", () => {
 			assert.match(command, /PI_SUBAGENT_LAUNCHER_PID=\$\$/);
 			assert.match(command, /--model 'fake\/worker'/);
 			assert.match(command, /--thinking 'high'/);
-			assert.match(command, /--tools 'read,bash,caller_ping'/);
+			assert.match(command, /--tools 'read,bash'/);
 			assert.doesNotMatch(command, /subagent_done/);
 			assert.match(command, /PI_DENY_TOOLS='subagent,subagent_resume'/);
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
@@ -195,7 +205,7 @@ describe("Pi launch", () => {
 			);
 
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=0/);
-			assert.match(command, /--tools 'read,bash,caller_ping,subagent_done'/);
+			assert.match(command, /--tools 'read,bash'/);
 		});
 	});
 
