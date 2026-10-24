@@ -26,6 +26,15 @@ async function fixture(run: (test: { emit: (name: string, value?: any) => Promis
 }
 const answer = (text: string) => ({ messages: [{ id: text, role: "assistant", stopReason: "stop", content: [{ type: "text", text }] }] });
 
+it("requests shutdown before the settled hook returns to Pi's interactive mode", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("agent_end", answer("final review summary"));
+    await test.emit("agent_settled");
+    // Pi checks its shutdown-request flag immediately after awaiting this hook.
+    assert.equal(test.shutdowns(), 1);
+    assert.equal(existsSync(test.file + ".exit"), true);
+  });
+});
 it("does not close a settled replica before its background terminal completion is processed", { timeout: 5_000 }, async () => {
   await fixture(async test => {
     await test.emit("tool_execution_start", { toolCallId: "background", toolName: "bash" });
