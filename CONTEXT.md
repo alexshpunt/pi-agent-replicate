@@ -40,7 +40,11 @@ Routine supervision must leave the parent's input and tools responsive while cop
 
 A missing or damaged answer-history boundary must not prevent terminal failure delivery or pane cleanup. Report the export error rather than guessing which answers belong to the copy. A failed session checkpoint must not prevent saving terminal facts and source work; retain the checkout and block integration when no usable session checkpoint exists.
 
+A replica may fail before it can register its own runtime. Record the allocated shell's boot and process incarnation from the parent before dispatch. A confirmed failed startup can close that owned pane without a child location record, while retaining its checkout. Include available loader diagnostics in the parent error. A native launch tool error already saved in the parent is not delivered again as a recovered replica result. An ambiguous dispatch error must not declare a process finished if it actually started.
+
 Replica shutdown requires a stopped agent, no active tools, no pending background terminal/request receipts or queued results, no reported live Linux descendants, and drained child replicas. Background completions are processed by the copy before it returns; a new run invalidates an older closure attempt. Persist receipt/process ownership only for the exact session so reload does not abandon its work or transfer another session's jobs. Count reported child processes and their observed descendants, not the host shell or unrelated runtime helpers. Unreported daemons and remote jobs without receipts are outside this guard.
+
+Return the settled hook's finalization promise to Pi. Request shutdown before interactive mode checks the settled boundary; an async request started without that promise can leave a finished copy idle forever.
 
 Normal settlement follows this drain without an extra model confirmation. Ten continuously idle seconds provide a safety net for missed handoff, not a limit on active work. Queued messages, requests, tools, retries, compaction, movement and descendant drain suspend that clock. A saved settlement can be retried after reload; missing settlement evidence cannot become success. The retained non-replica recovery and intervention policies remain separate.
 

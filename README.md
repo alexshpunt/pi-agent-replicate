@@ -124,6 +124,8 @@ Host metadata retains the saved session and immutable Markdown result-file paths
 
 Every fully stopped replica reports and closes, including after user input or Escape. An interrupted copy reports interruption; an unsaved close or process loss reports failure with preserved answers, not success or an automatic restart. The parent continues with the returned information or creates a fresh copy.
 
+If Pi fails while loading extensions or before its session initializes, the parent uses its saved launch ownership to close the failed attempt pane and reports the available startup error. It does not wait for completion hooks that never started. The failed checkout stays available. A warning alone or a terminal marker printed while Pi is still running does not count as process failure.
+
 Missing or damaged answer history does not block a failure report or pane cleanup. The result explains why history is unavailable without exporting answers of unknown origin. If the session itself cannot be checkpointed, source work is still saved where possible and retained, and no changes are applied automatically.
 
 Automatic closure waits for active tools, pending background terminal completions, background request receipts, reported Linux child PIDs and their observed descendants, and owned replicas. Completion messages wake the copy so it can process the result before returning. New input or work cancels a stale shutdown decision. This ownership state follows the exact session through reload.
