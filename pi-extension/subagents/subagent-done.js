@@ -656,7 +656,8 @@ function installChildLifecycle(pi, initialContext) {
             : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
         if (replication)
             rememberStop(payload);
-        void finishAfterDrain(ctx, payload);
+        // Pi checks the shutdown flag after awaiting its settled handlers.
+        return finishAfterDrain(ctx, payload);
     });
     on("turn_start", (event) => {
         latestTurnIndex = event.turnIndex;

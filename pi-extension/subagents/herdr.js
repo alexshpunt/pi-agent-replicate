@@ -68,8 +68,10 @@ function extractHerdrTabSurface(output, context) {
     const parsed = parseHerdrJson(output);
     const paneId = parsed?.result?.root_pane?.pane_id;
     const tabId = parsed?.result?.tab?.tab_id ?? parsed?.result?.root_pane?.tab_id;
-    if (typeof paneId !== "string" || !paneId ||
-        typeof tabId !== "string" || !tabId) {
+    if (typeof paneId !== "string" ||
+        !paneId ||
+        typeof tabId !== "string" ||
+        !tabId) {
         throw new Error(`Unexpected herdr ${context} output: ${output.trim() || "(empty)"}`);
     }
     return { paneId, tabId };
@@ -318,13 +320,13 @@ export function readHerdrScreen(surface, lines = 50) {
         String(lines),
     ]);
 }
-export async function readHerdrScreenAsync(surface, lines = 50) {
+export async function readHerdrScreenAsync(surface, lines = 50, source = "visible") {
     return herdrExecAsync([
         "pane",
         "read",
         surface,
         "--source",
-        "visible",
+        source,
         "--lines",
         String(lines),
     ]);

@@ -40,9 +40,9 @@ import { snapshotSource } from "./source-state.ts";
 import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
 import { runReplicaBackground } from "./replica-background.ts";
 import { reserveReplicaBranch } from "./replica-branch.ts";
-import { getHerdrCurrentPaneTitle } from "./herdr.ts";
-import { replicaWorkFile, createReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
-import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive } from "./session-binding.ts";
+import { getHerdrCurrentPaneTitle, readHerdrScreenAsync } from "./herdr.ts";
+import { replicaWorkFile, createReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, replicaLaunchFailureReported, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
+import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive, launchOwnsPane, type LaunchPaneOwnership } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
 import { createDeliveryLog } from "./delivery-log.ts";
@@ -121,6 +121,7 @@ import {
 import {
   appendLineageEvent,
   appendLineageInbox,
+  acknowledgeReportedLaunchFailure,
   claimLineageInboxMaterialization,
   completeLineageInboxMaterialization,
   releaseLineageInboxMaterialization,
@@ -578,6 +579,8 @@ interface SubagentResult {
 }
 
 interface PendingTerminalDelivery {
+  /** Its exact native tool error already reached the parent session. */
+  alreadyReported?: boolean;
   finalAssistant?: SettledDeliveryIdentity;
   resultContent?: string;
 
@@ -594,6 +597,8 @@ interface RunningSubagent {
 	/** Current-session replica, not a named-role launch. */
 	replication?: boolean;
 	replicaWorkFile?: string;
+	launchPane?: LaunchPaneOwnership;
+	launchError?: string;
 	/** Settled task waiting for its exact parent before integration. */
 	pendingReplicaResult?: ReplicaCompletion;
 	/** In-flight background work must not be resubmitted by status ticks or reload. */
@@ -858,10 +863,10 @@ function replicaRecordFor(running: RunningSubagent): string | undefined {
 }
 function finishReplicationResult(running: RunningSubagent, result: SubagentResult): void {
   if (running.pendingTerminalDelivery || running.replicaFinishing || (running.replicaRetryAt ?? 0) > Date.now()) return;
-  const failed = result.exitCode !== 0 || !!result.errorMessage || !!result.error || !result.summary?.trim();
+  const failed = !!running.launchError || result.exitCode !== 0 || !!result.errorMessage || !!result.error || !result.summary?.trim();
   const completion: ReplicaCompletion = {
     name: running.name, task: running.task, summary: result.summary ?? "", exitCode: failed ? 1 : 0, elapsed: result.elapsed,
-    ...(failed ? { errorMessage: result.errorMessage ?? result.error ?? "Replica failed." } : {}),
+    ...(failed ? { errorMessage: running.launchError ?? result.errorMessage ?? result.error ?? "Replica failed." } : {}),
   };
   running.pendingReplicaResult = completion;
   running.replicaFinishing = true;
@@ -869,6 +874,25 @@ function finishReplicationResult(running: RunningSubagent, result: SubagentResul
     recordDeliveryFailure(running, `terminal:${running.id}`, error, "replica-completion");
     running.replicaRetryAt = Date.now() + 2_000;
   }).finally(() => { running.replicaFinishing = false; });
+}
+/** Retire resource work without sending a second result over an already saved tool error. */
+function acknowledgeFailedLaunch(running: RunningSubagent, error: string): void {
+  queueTerminalDelivery(running, undefined, () => {}, error, "error", true);
+}
+
+/** An ambiguous dispatch error cannot settle a process that actually started. */
+function launchFailureProcessActive(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  if (location && sessionLocationAlive(location)) return true;
+  if (!running.surface) return false;
+  try {
+    const info = getPaneProcessInfo(running.surface);
+    const owned = location ? sessionOwnsPane(location, running.surface, info.shellPid)
+      : running.launchPane ? launchOwnsPane(running.launchPane, running.surface, info.shellPid) : true;
+    return !owned || info.pids.some(pid => pid !== info.shellPid);
+  } catch (error) {
+    return !/pane_not_found|pane.*not found/i.test(String(error));
+  } // Unknown failures still leave pane/process loss to the ordinary observer.
 }
 async function completeReplicaInBackground(running: RunningSubagent, completion: ReplicaCompletion): Promise<void> {
   const recordFile = replicaRecordFor(running);
@@ -885,6 +909,11 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
   running.pendingReplicaResult = work.completion;
   if (work.integration.status === "pending" || !exactParentSessionActive(running)) return;
   const saved = work.completion;
+  if (work.launchError && ctx && replicaLaunchFailureReported(work, ctx.sessionManager.getBranch(), running.executionOwner)) {
+    running.pendingReplicaResult = undefined;
+    acknowledgeFailedLaunch(running, work.launchError);
+    return;
+  }
   const failed = saved.exitCode !== 0 || !!saved.error || !!saved.errorMessage || !saved.summary.trim();
   const history = saved.historyPath
     ? `Textual answer history: ${saved.historyPath}`
@@ -959,13 +988,17 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
     for (const node of state.nodes.values()) {
       const cancellationPending = !!node.cancellation?.intent && !node.terminal;
       if (node.parentSessionId !== sessionId) continue;
-      if (!node.sessionFile || !node.surface) continue;
-      if (!cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
+      const earlyWork = node.replication && node.replicaWorkFile ? readReplicaWork(node.replicaWorkFile) : undefined;
+      const failedLaunch = !!earlyWork?.launchError;
+      if (!failedLaunch && (!node.sessionFile || !node.surface)) continue;
+      if (!failedLaunch && !cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
+      const recoveredSession = node.sessionFile ?? earlyWork?.sessionFile ?? "";
+      const recoveredWorktree = node.worktree ?? earlyWork?.worktree;
       const drained = node.terminal && node.terminalDelivered;
       if (drained && !node.cleanupPending) continue;
       if (runningSubagents.has(node.nodeId)) continue;
       let baseline: SessionBaselineCursor;
-      try { baseline = captureSessionBaseline(node.sessionFile); } catch { baseline = { sessionFile: node.sessionFile, entryCount: 0, leafId: null, assistantEntryIds: [] }; }
+      try { baseline = captureSessionBaseline(recoveredSession); } catch { baseline = { sessionFile: recoveredSession, entryCount: 0, leafId: null, assistantEntryIds: [] }; }
       const lineage: LineageRegistration = {
         rootDir,
         rootId: state.rootId,
@@ -982,10 +1015,10 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         name: node.name ?? node.nodeId,
         task: node.task ?? "recovered subagent",
         agent: node.agent,
-        surface: node.surface,
+        surface: node.surface ?? recoveredWorktree?.paneId ?? "",
         startTime: node.startTime ?? Date.now(),
         ...(node.tabId ? { tabId: node.tabId } : {}),
-        sessionFile: node.sessionFile,
+        sessionFile: recoveredSession,
         activityFile: node.activityFile,
         settledEventsFile: node.settledEventsFile,
         sessionBaseline: baseline,
@@ -994,7 +1027,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         ...(node.workspaceId && node.cwd
           ? { recoveryWorkspace: { id: node.workspaceId, cwd: node.cwd } }
           : {}),
-        ...(node.worktree ? { worktree: node.worktree } : {}),
+        ...(recoveredWorktree ? { worktree: recoveredWorktree } : {}),
         ...(node.replication ? { replication: true, replicaWorkFile: node.replicaWorkFile } : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
@@ -1007,7 +1040,31 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
       if (running.lineage) running.lineage.parentSessionFile = sessionFile;
       if (running.tabId) rememberPaneTab(running.surface, running.tabId);
       const recordFile = running.replication && replicaRecordFor(running);
-      const savedReplica = recordFile ? readReplicaWork(recordFile).completion : undefined;
+      const savedWork = earlyWork ?? (recordFile ? readReplicaWork(recordFile) : undefined);
+      running.launchPane = savedWork?.launchPane;
+      running.launchError = savedWork?.launchError;
+      const savedReplica = savedWork?.completion;
+      if (savedWork?.launchError && !savedReplica && !drained && !launchFailureProcessActive(running)) {
+        const reported = replicaLaunchFailureReported(savedWork, manager.getBranch(), node.executionOwner);
+        if (reported) {
+          acknowledgeFailedLaunch(running, savedWork.launchError);
+          continue;
+        } else if (!running.worktree) {
+          const summary = `Replica failed during launch: ${savedWork.launchError}`;
+          queueTerminalDelivery(running, undefined, () => {
+            if (runtime.pi) sendSubagentResult(runtime.pi, summary, {
+              name: running.name, childId: running.id, replication: true, exitCode: 1,
+              errorMessage: savedWork.launchError, resultContent: summary,
+              deliveryId: `terminal:${running.id}`, integration: { status: "not-attempted" },
+            });
+          }, summary, "error");
+          continue;
+        } else {
+          finishReplicationResult(running, { name: running.name, task: running.task, summary: "", exitCode: 1,
+            elapsed: Math.floor((Date.now() - running.startTime) / 1000), errorMessage: savedWork.launchError });
+          continue;
+        }
+      }
       if (savedReplica && !drained) {
         finishReplicationResult(running, savedReplica);
       } else if (cancellationPending) {
@@ -1027,6 +1084,11 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         if (tryCleanupSubagentSurface(running)) runningSubagents.delete(running.id);
       }
     }
+  }
+  if (runningSubagents.size > 0 && runtime.pi) {
+    startWidgetRefresh();
+    startStatusRefresh(runtime.pi);
+    updateWidget();
   }
 }
 
@@ -1071,6 +1133,9 @@ export function selectCompletionApi<T>(previous: T, current: T | undefined): T {
 }
 
 // ── Widget management ──
+
+// Native tool errors become durable before agent_end; reconcile failed launch nodes then.
+let launchFailurePending = false;
 
 /** Interval timer for widget re-renders. */
 let widgetInterval: ReturnType<typeof setInterval> | null = null;
@@ -1536,8 +1601,13 @@ function childMovePending(running: RunningSubagent): boolean {
 /** Never operate on a pane ID reused by a restarted Herdr server. */
 function childPaneOwned(running: RunningSubagent): boolean {
   const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
-  if (!location) return true; // Legacy launches have no incarnation record.
-  try { return sessionOwnsPane(location, running.surface, getPaneProcessInfo(running.surface).shellPid); }
+  try {
+    if (!location) {
+      const owner = running.launchPane;
+      return owner ? launchOwnsPane(owner, running.surface, getPaneProcessInfo(running.surface).shellPid) : true;
+    }
+    return sessionOwnsPane(location, running.surface, getPaneProcessInfo(running.surface).shellPid);
+  }
   catch { return false; }
 }
 function exactParentSessionActive(running: RunningSubagent): boolean {
@@ -1627,7 +1697,7 @@ function prepareDurableDelivery(
 	const replicaFile = running.replication && replicaRecordFor(running);
 	const savedSession = replicaFile ? readReplicaWork(replicaFile).sessionCheckpoint : undefined;
 	const handle = materializeResultFile({
-		sessionsDir: dirname(savedSession ?? running.sessionFile),
+		sessionsDir: savedSession || running.sessionFile ? dirname(savedSession ?? running.sessionFile) : join(replicaFile + ".artifacts", "sessions"),
 		childSessionId: running.id,
 		deliveryId,
 		status: resolvedStatus,
@@ -1732,6 +1802,13 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
       // published its terminal-delivered event. Wait here rather than relying
       // on another tick from a pane that may already be gone.
       await waitForDescendantDrain(running);
+      if (pending.alreadyReported) {
+        if (!running.lineage) throw new Error("Reported launch has no lineage ownership.");
+        acknowledgeReportedLaunchFailure(running.lineage, pending.resultContent ?? "Replica launch failed.");
+        running.lifecycle = markDelivery(running.lifecycle, "delivered");
+        retireDeliveredSubagent(running);
+        return;
+      }
       const deliveryId = `terminal:${running.id}`;
 
       const durable = prepareDurableDelivery(running, deliveryId, pending.resultContent, pending.status);
@@ -1862,9 +1939,10 @@ function queueTerminalDelivery(
   finalize: () => void | Promise<void>,
   resultContent?: string,
   status?: DeliveryStatus,
+  alreadyReported = false,
 ): void {
   if (running.pendingTerminalDelivery) return;
-  running.pendingTerminalDelivery = { finalAssistant, resultContent, status, queued: false, finalize };
+  running.pendingTerminalDelivery = { finalAssistant, resultContent, status, alreadyReported, queued: false, finalize };
   attemptPendingTerminalDelivery(running);
 }
 
@@ -2761,7 +2839,21 @@ async function watchSubagent(
 				intervalMs: 1000,
 				sessionFile,
 				resolveSessionFile: () => { refreshChildLocation(running); return running.sessionFile; },
-				readTerminalTail: () => { refreshChildLocation(running); return !childMovePending(running) && childPaneOwned(running) ? readPaneAsync(running.surface, 5) : Promise.resolve(""); },
+				readTerminalTail: () => {
+					refreshChildLocation(running);
+					const active = running.replication ? launchFailureProcessActive(running) : !childPaneOwned(running);
+					return !childMovePending(running) && !active ? readPaneAsync(running.surface, 5) : Promise.resolve("");
+				},
+				confirmTerminalExit: running.replication ? () => !childMovePending(running) && !launchFailureProcessActive(running) : undefined,
+				readFailureOutput: running.replication ? async () => {
+					refreshChildLocation(running);
+					if (childMovePending(running) || !childPaneOwned(running)) return "";
+					try {
+						const output = await readHerdrScreenAsync(running.surface, 100, "recent-unwrapped");
+						if (output.trim()) return output;
+					} catch { /* The visible tail remains useful if scrollback is unavailable. */ }
+					return readPaneAsync(running.surface, 100);
+				} : undefined,
 				inspectPane: async () => {
 					refreshChildLocation(running);
 					if (childMovePending(running)) return { kind: "unavailable" as const, error: "Waiting for the Teleport replacement to bind" };
@@ -2812,7 +2904,10 @@ async function watchSubagent(
 					continue;
 				}
 				if (running.replication && result.reason === "sentinel") {
-					result = { reason: "error" as const, exitCode: 1, errorMessage: "Replica process closed without a saved completion." };
+					const errorMessage = result.errorMessage
+						? `Replica process exited with code ${result.exitCode} before saving completion.\n\n${result.errorMessage}`
+						: "Replica process closed without a saved completion.";
+					result = { reason: "error" as const, exitCode: 1, errorMessage };
 					break;
 				}
 				if (result.reason === "sentinel" && result.exitCode !== 0 && !result.errorMessage) {
@@ -3017,7 +3112,11 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 
 	// A session-start replay can race the parent's startup turn. Retry after the
 	// agent becomes idle so an "already processing" steer stays durable and pending.
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
+		if (launchFailurePending) {
+			launchFailurePending = false;
+			restoreLineageRuntime(ctx);
+		}
 		setTimeout(() => {
 			if (runtime.latestCtx) void restorePendingLineageInboxes(runtime.latestCtx);
 		}, 0);
@@ -3100,7 +3199,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			startRecoveredWatcher(child);
 			return { id, name, sessionFile: child.sessionFile, worktreePath: child.worktree?.path };
 		} catch (error) {
-			if (existsSync(recordFile)) failReplicaLaunch(recordFile, error);
+			if (existsSync(recordFile)) {
+				failReplicaLaunch(recordFile, error, toolCallId);
+				launchFailurePending = true;
+			}
 			throw error;
 		}
 	});

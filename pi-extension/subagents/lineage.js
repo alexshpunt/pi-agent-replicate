@@ -3,6 +3,21 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.js";
 import { readExecutionOwner } from "./execution-owner.js";
+/** Acknowledge an exact-parent native launch error without sending a second result. */
+export function acknowledgeReportedLaunchFailure(lineage, error, publishEvent = appendLineageEvent) {
+    const { rootDir, nodeId } = lineage;
+    if (hasUndrainedDescendants(reduceLineage(rootDir), nodeId))
+        throw new Error("Replica descendants have not drained.");
+    const publish = (eventId, type, fields = {}) => {
+        if (!publishEvent(rootDir, eventId, type, nodeId, fields) && !hasLineageEvent(rootDir, eventId, type)) {
+            throw new Error(`Unable to publish reported launch acknowledgement: ${type}`);
+        }
+    };
+    publish(`terminal:${nodeId}`, "terminal", { outcome: "error", resultContent: error });
+    // A crash after delivery must leave resource cleanup discoverable.
+    publish(`cleanup-pending:${nodeId}`, "cleanup_pending");
+    publish(`terminal-delivered:${nodeId}`, "terminal_delivered", { deliveryId: `terminal:${nodeId}` });
+}
 function safeId(value) {
     return Buffer.from(value, "utf8").toString("base64url");
 }

@@ -261,6 +261,25 @@ function startTime(pid) {
         return undefined;
     }
 }
+/** Capture the allocated shell without claiming that its Pi session has started. */
+export function captureLaunchPaneOwnership(paneId, shellPid) {
+    if (!shellPid || !Number.isInteger(shellPid) || shellPid <= 0)
+        return undefined;
+    try {
+        const shellStart = startTime(shellPid);
+        const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+        return shellStart && bootId ? { paneId, shellPid, shellStart, bootId } : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+/** An old launch cannot take ownership of a reused shell or another machine boot. */
+export function launchOwnsPane(owner, paneId, shellPid) {
+    const current = captureLaunchPaneOwnership(paneId, shellPid);
+    return !!current && owner.paneId === current.paneId && owner.shellPid === current.shellPid &&
+        owner.shellStart === current.shellStart && owner.bootId === current.bootId;
+}
 /** Publish one startup's exact file and pane, surviving both Teleport and Herdr restarts. */
 export function publishSessionLocation(binding, input) {
     const location = {
