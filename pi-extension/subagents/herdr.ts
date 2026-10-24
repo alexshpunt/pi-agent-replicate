@@ -454,13 +454,14 @@ export function readHerdrScreen(surface: string, lines = 50): string {
 export async function readHerdrScreenAsync(
 	surface: string,
 	lines = 50,
+	source: "visible" | "recent-unwrapped" = "visible",
 ): Promise<string> {
 	return herdrExecAsync([
 		"pane",
 		"read",
 		surface,
 		"--source",
-		"visible",
+		source,
 		"--lines",
 		String(lines),
 	]);

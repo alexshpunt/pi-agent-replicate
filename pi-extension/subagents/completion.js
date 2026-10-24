@@ -70,6 +70,16 @@ function terminalExitCode(screen) {
     const match = screen.match(TERMINAL_SENTINEL);
     return match ? Number.parseInt(match[1], 10) : null;
 }
+/** Keep the last concrete error block, not shell prompts or unrelated startup warnings. */
+function failureDiagnostic(output) {
+    const lines = output.replace(/\r/g, "").split("\n");
+    const start = lines.map(line => /^\s*(?:[A-Za-z]*Error:|Failed to load extension|Cannot find module)/.test(line)).lastIndexOf(true);
+    if (start < 0)
+        return undefined;
+    const block = lines.slice(start);
+    const end = block.findIndex(line => /^\s*(?:Warning:|Hint:)/.test(line) || TERMINAL_SENTINEL.test(line));
+    return block.slice(0, end < 0 ? block.length : end).join("\n").trim().slice(0, 8192) || undefined;
+}
 function completionArtifact(options) {
     return consumeExitSidecar(options.resolveSessionFile?.() ?? options.sessionFile);
 }
@@ -120,7 +130,24 @@ export async function waitForCompletion(signal, options) {
                 const sidecarResult = options.sessionFile
                     ? await waitForDisappearanceArtifacts(signal, options)
                     : null;
-                return sidecarResult ?? { reason: "sentinel", exitCode };
+                if (sidecarResult)
+                    return sidecarResult;
+                if (options.confirmTerminalExit && !await options.confirmTerminalExit()) {
+                    await abortableDelay(options.intervalMs, signal);
+                    continue;
+                }
+                let errorMessage;
+                if (options.readFailureOutput) {
+                    try {
+                        errorMessage = failureDiagnostic(await options.readFailureOutput());
+                    }
+                    catch { /* Confirmed exit still reports without an invented diagnostic. */ }
+                }
+                if (options.confirmTerminalExit && !await options.confirmTerminalExit()) {
+                    await abortableDelay(options.intervalMs, signal);
+                    continue;
+                }
+                return { reason: "sentinel", exitCode, ...(errorMessage ? { errorMessage } : {}) };
             }
         }
         catch {

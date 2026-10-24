@@ -16,6 +16,10 @@ export interface CompletionResult {
 export interface CompletionOptions {
   intervalMs: number;
   readTerminalTail: () => Promise<string>;
+  /** Replica-only diagnostic read after confirmed exit, never a failure trigger itself. */
+  readFailureOutput?: () => Promise<string>;
+  /** Revalidate replica process exit after races with sidecars or replacement startup. */
+  confirmTerminalExit?: () => boolean | Promise<boolean>;
   inspectPane?: () => Promise<import("./lifecycle.ts").PaneInspection>;
   /** Bounded artifact grace after terminal or pane completion evidence. Default: 500ms. */
   paneDisappearanceGraceMs?: number;
@@ -107,6 +111,15 @@ function terminalExitCode(screen: string): number | null {
   return match ? Number.parseInt(match[1], 10) : null;
 }
 
+/** Keep the last concrete error block, not shell prompts or unrelated startup warnings. */
+function failureDiagnostic(output: string): string | undefined {
+  const lines = output.replace(/\r/g, "").split("\n");
+  const start = lines.map(line => /^\s*(?:[A-Za-z]*Error:|Failed to load extension|Cannot find module)/.test(line)).lastIndexOf(true);
+  if (start < 0) return undefined;
+  const block = lines.slice(start);
+  const end = block.findIndex(line => /^\s*(?:Warning:|Hint:)/.test(line) || TERMINAL_SENTINEL.test(line));
+  return block.slice(0, end < 0 ? block.length : end).join("\n").trim().slice(0, 8192) || undefined;
+}
 function completionArtifact(options: CompletionOptions): CompletionResult | null {
   return consumeExitSidecar(options.resolveSessionFile?.() ?? options.sessionFile);
 }
@@ -166,7 +179,21 @@ export async function waitForCompletion(
         const sidecarResult = options.sessionFile
           ? await waitForDisappearanceArtifacts(signal, options)
           : null;
-        return sidecarResult ?? { reason: "sentinel", exitCode };
+        if (sidecarResult) return sidecarResult;
+        if (options.confirmTerminalExit && !await options.confirmTerminalExit()) {
+          await abortableDelay(options.intervalMs, signal);
+          continue;
+        }
+        let errorMessage: string | undefined;
+        if (options.readFailureOutput) {
+          try { errorMessage = failureDiagnostic(await options.readFailureOutput()); }
+          catch { /* Confirmed exit still reports without an invented diagnostic. */ }
+        }
+        if (options.confirmTerminalExit && !await options.confirmTerminalExit()) {
+          await abortableDelay(options.intervalMs, signal);
+          continue;
+        }
+        return { reason: "sentinel", exitCode, ...(errorMessage ? { errorMessage } : {}) };
       }
     } catch {
       // Terminal reads are only sentinel/output probes; Herdr status is polled

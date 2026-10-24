@@ -72,6 +72,20 @@ export interface LineageNodeState {
   };
 }
 
+/** Acknowledge an exact-parent native launch error without sending a second result. */
+export function acknowledgeReportedLaunchFailure(lineage: Pick<LineageRegistration, "rootDir" | "nodeId">, error: string, publishEvent: typeof appendLineageEvent = appendLineageEvent): void {
+  const { rootDir, nodeId } = lineage;
+  if (hasUndrainedDescendants(reduceLineage(rootDir), nodeId)) throw new Error("Replica descendants have not drained.");
+  const publish = (eventId: string, type: string, fields: Record<string, unknown> = {}) => {
+    if (!publishEvent(rootDir, eventId, type, nodeId, fields) && !hasLineageEvent(rootDir, eventId, type)) {
+      throw new Error(`Unable to publish reported launch acknowledgement: ${type}`);
+    }
+  };
+  publish(`terminal:${nodeId}`, "terminal", { outcome: "error", resultContent: error });
+  // A crash after delivery must leave resource cleanup discoverable.
+  publish(`cleanup-pending:${nodeId}`, "cleanup_pending");
+  publish(`terminal-delivered:${nodeId}`, "terminal_delivered", { deliveryId: `terminal:${nodeId}` });
+}
 export interface LineageState {
   rootId: string;
   nodes: Map<string, LineageNodeState>;

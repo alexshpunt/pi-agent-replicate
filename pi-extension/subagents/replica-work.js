@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readlinkSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { writeBindingFile, readSessionBinding, childSessionLocation, sessionLocationAlive, sessionOwnsPane } from "./session-binding.js";
+import { writeBindingFile, readSessionBinding, childSessionLocation, sessionLocationAlive, sessionOwnsPane, launchOwnsPane } from "./session-binding.js";
 import { closeHerdrSurface, getHerdrPaneProcessInfo, listHerdrWorktrees } from "./herdr.js";
 import { applySourceJoin, planSourceJoin, snapshotSource } from "./source-state.js";
 import { processIncarnationAlive, withLineageMutationGate } from "./lineage.js";
@@ -84,13 +84,44 @@ export function saveReplicaRuntime(file, runtime) {
     writeBindingFile(file, { ...readReplicaWork(file), runtime });
 }
 /** Preserve failed allocation facts and release a reservation without discarding evidence. */
-export function failReplicaLaunch(file, error) {
-    writeBindingFile(file, { ...readReplicaWork(file), launchError: String(error), integration: { status: "not-attempted", details: "Launch failed; saved work was not applied." } });
+export function failReplicaLaunch(file, error, toolCallId) {
+    writeBindingFile(file, { ...readReplicaWork(file), launchError: String(error), ...(toolCallId ? { launchErrorToolCallId: toolCallId } : {}), integration: { status: "not-attempted", details: "Launch failed; saved work was not applied." } });
+}
+/** A persisted native tool error already delivered this pre-acknowledgement failure. */
+export function replicaLaunchFailureReported(record, entries, owner) {
+    if (!record.launchError)
+        return false;
+    const ids = new Set([record.launchErrorToolCallId, owner?.toolCallId].filter(Boolean));
+    const diagnostic = record.launchError.replace(/^(?:Error:\s*)+/, "");
+    return entries.some(entry => {
+        const row = entry;
+        const message = row?.message;
+        if (row?.type !== "message" || message?.role !== "toolResult" || message.isError !== true)
+            return false;
+        if (ids.has(message.toolCallId))
+            return true;
+        // An outer script may fail for another call. Require this launch's actual facts.
+        return !!owner?.parentToolCallId && message.toolCallId === owner.parentToolCallId && !!diagnostic && Array.isArray(message.content) &&
+            message.content.some(block => typeof block.text === "string" &&
+                (block.text.includes(diagnostic) || block.text.includes(JSON.stringify(diagnostic).slice(1, -1))));
+    });
 }
 /** Bind allocated worktree and session before the child process can start. */
 export function attachReplicaWork(file, worktree, sessionFile) {
     const record = readReplicaWork(file);
-    writeBindingFile(file, { ...record, worktree, sessionFile });
+    writeBindingFile(file, { ...record, worktree, ...(sessionFile ? { sessionFile } : {}) });
+}
+/** Save launch ownership before the child can fail during extension loading. */
+export function captureReplicaLaunchPane(file, owner) {
+    const record = readReplicaWork(file);
+    if (!record.worktree || record.worktree.paneId !== owner.paneId)
+        throw new Error("Launch ownership does not match the replica pane.");
+    if (record.launchPane) {
+        if (!launchOwnsPane(record.launchPane, owner.paneId, owner.shellPid))
+            throw new Error("Replica launch shell incarnation changed.");
+        return;
+    }
+    writeBindingFile(file, { ...record, launchPane: owner });
 }
 /** Preserve the launch workspace's process incarnation even if the session later teleports. */
 export function captureReplicaWorkLocation(file, location) {
@@ -211,14 +242,21 @@ export function cleanupReplicaWork(file, parentCwd) {
             return false; // Never discard edits made after settlement.
     }
     if (observed.workspaceId) {
-        if (observed.workspaceId !== worktree.workspaceId || !record.worktreeLocation)
+        if (observed.workspaceId !== worktree.workspaceId)
+            return false;
+        const failedLaunch = !record.worktreeLocation && !!record.launchPane &&
+            (!!record.launchError || (record.completion != null && record.completion.exitCode !== 0));
+        if (!record.worktreeLocation && !failedLaunch)
             return false;
         const response = JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", observed.workspaceId], { encoding: "utf8" }));
         const panes = response?.result?.panes;
         if (!Array.isArray(panes) || panes.length !== 1 || panes[0].pane_id !== worktree.paneId)
             return false;
         const info = getHerdrPaneProcessInfo(worktree.paneId);
-        if (!sessionOwnsPane(record.worktreeLocation, worktree.paneId, info.shellPid) || info.pids.some((pid) => pid !== info.shellPid))
+        const owned = record.worktreeLocation
+            ? sessionOwnsPane(record.worktreeLocation, worktree.paneId, info.shellPid)
+            : launchOwnsPane(record.launchPane, worktree.paneId, info.shellPid);
+        if (!owned || info.pids.some((pid) => pid !== info.shellPid))
             return false;
         if (!removeWorktree) {
             closeHerdrSurface(worktree.paneId);

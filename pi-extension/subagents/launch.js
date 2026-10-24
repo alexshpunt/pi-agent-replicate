@@ -4,14 +4,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, } from 
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { appendLineageEvent, lineageFromEnvironment, lineageEnvironment, registerLineage, isLineageNodeDrained, reduceLineage, } from "./lineage.js";
+import { appendLineageEvent, hasLineageEvent, lineageFromEnvironment, lineageEnvironment, registerLineage, isLineageNodeDrained, reduceLineage, } from "./lineage.js";
 import { getSubagentActivityFile, getSubagentSettledEventsFile, } from "./activity.js";
 import { createLifecycle } from "./lifecycle.js";
 import { HerdrWorktreeCreateError } from "./herdr.js";
 import { captureSessionBaseline, seedStandaloneSessionFile, seedSubagentSessionFile, seedReplicationSessionFile, } from "./session.js";
-import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
-import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore } from "./session-binding.js";
-import { attachReplicaWork } from "./replica-work.js";
+import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, getPaneProcessInfo, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
+import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore, captureLaunchPaneOwnership } from "./session-binding.js";
+import { attachReplicaWork, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.js";
 import { sourceRepositoryAnchor } from "./source-state.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
@@ -19,6 +19,7 @@ const defaultOperations = {
         ? createSubagentPaneInWorkspace(name, workspace.cwd, workspace.id)
         : createSubagentPane(name),
     closePane,
+    getPaneProcessInfo,
     createWorktree: createSubagentWorktree,
     waitForShellReady,
     runScript: runScriptInPane,
@@ -52,7 +53,24 @@ async function launchFreshPiSubagent(request, operations) {
     const abort = new AbortController();
     const signal = request.signal ?? abort.signal;
     try {
+        if (request.replication) {
+            const metadataId = `metadata:${resolved.id}:reserved`;
+            if (!appendLineageEvent(resolved.lineage.rootDir, metadataId, "launch_metadata", resolved.id, {
+                name: request.name,
+                task: request.task,
+                startTime: resolved.startTime,
+                executionOwner: request.executionOwner,
+                replication: true,
+                replicaWorkFile: request.replication.recordFile,
+            }) && !hasLineageEvent(resolved.lineage.rootDir, metadataId, "launch_metadata")) {
+                throw new Error("Unable to publish replica launch recovery metadata.");
+            }
+        }
         surface = prepareLaunchSurface(resolved, operations);
+        if (request.replication?.recordFile && surface.worktree) {
+            attachReplicaWork(request.replication.recordFile, surface.worktree);
+            captureLaunchSurface(resolved, surface, operations);
+        }
         const session = prepareChildSession(resolved, surface);
         const artifacts = prepareTaskArtifacts(resolved, session);
         seedSessionBinding(artifacts.sessionFile, {
@@ -104,6 +122,7 @@ async function launchFreshPiSubagent(request, operations) {
         }
         // Publish recovery evidence before waiting on external shell startup.
         await confirmShellReady(session, operations, signal);
+        captureLaunchSurface(resolved, surface, operations);
         if (signal.aborted)
             throw new Error("subagent launch aborted");
         const command = buildPiCommand(resolved, artifacts);
@@ -112,6 +131,12 @@ async function launchFreshPiSubagent(request, operations) {
     }
     catch (error) {
         abort.abort();
+        if (request.replication?.recordFile) {
+            try {
+                failReplicaLaunch(request.replication.recordFile, error);
+            }
+            catch { /* Preserve the original launch failure. */ }
+        }
         if (surface && !surface.worktree) {
             try {
                 operations.closePane?.(surface.surface);
@@ -120,12 +145,42 @@ async function launchFreshPiSubagent(request, operations) {
         }
         if (!surface?.worktree)
             throw error;
+        if (request.replication?.recordFile) {
+            try {
+                captureLaunchSurface(resolved, surface, operations);
+                cleanupReplicaWork(request.replication.recordFile, resolved.sourceCwd);
+            }
+            catch { /* Unknown ownership keeps the failed work recoverable. */ }
+            try {
+                persistWorktreeResult(surface.worktree, "failed");
+            }
+            catch { /* The work record also retains the failure. */ }
+            throw new Error(`Failed to launch replica; worktree retained at ${surface.worktree.path}: ${errorMessage(error)}`);
+        }
         const handoff = captureWorktreeHandoff(surface.worktree);
         try {
             persistWorktreeResult(surface.worktree, "failed", handoff);
         }
         catch { /* launch error remains authoritative */ }
         throw new Error(`Failed to launch subagent; worktree retained at ${surface.worktree.path} (workspace ${surface.worktree.workspaceId}): ${errorMessage(error)}`);
+    }
+}
+/** Record the shell before dispatch; child startup may never reach session_start. */
+function captureLaunchSurface(resolved, surface, operations) {
+    const file = resolved.request.replication?.recordFile;
+    if (!file || !surface.worktree || !operations.getPaneProcessInfo)
+        return;
+    let shellPid;
+    try {
+        shellPid = operations.getPaneProcessInfo(surface.surface).shellPid;
+    }
+    catch {
+        return;
+    } // A shell may still be starting; retry after readiness.
+    const owner = captureLaunchPaneOwnership(surface.surface, shellPid);
+    if (owner) {
+        captureReplicaLaunchPane(file, owner);
+        resolved.launchPane = owner;
     }
 }
 function resolveLaunchRequest(request) {
@@ -387,6 +442,7 @@ function createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseli
     return {
         lineage: resolved.lineage,
         executionOwner: resolved.request.executionOwner,
+        ...(resolved.launchPane ? { launchPane: resolved.launchPane } : {}),
         ...(resolved.request.replication ? { replication: true, replicaWorkFile: resolved.request.replication.recordFile } : {}),
         id: resolved.id,
         name: resolved.request.name,
