@@ -24,9 +24,17 @@ A stopped model does not imply finished session work. Replicas wait for active t
 
 Receipt and process ownership persists for the exact session through reload. Unreported daemons, unsupported native process identities and remote jobs without completion receipts are not discoverable by this guard. It does not adopt unrelated processes or idle runtime helpers.
 
+The settled handler returns its finalization promise. Pi must see the shutdown request before it checks that settled boundary; saving a result or starting detached finalization is not proof that the Pi process exited.
+
 The retained non-replica lifecycle is unchanged: autonomous clean or empty boundaries can record terminal intent after the last descendant result; provider errors and aborts keep those children open.
 
 Manual and automatic context compaction are active child work. `session_before_compact` protects the child from stale recovery until `session_compact` or `session_compact_failed` ends that state. Compaction never publishes or repeats a parent result.
+
+## Failed replica startup
+
+The parent records the allocated pane's shell incarnation before starting Pi. If extension loading or an earlier launch step fails, cleanup can use that launch record without waiting for child session initialization. Only a verified owned idle shell is closed; a changed boot, reused shell or live process blocks that cleanup. Keep failed source and session evidence.
+
+A terminal marker is process-exit evidence only after the replica process has stopped. Revalidate it after sidecar and diagnostic-read races. Report available startup diagnostics, not unrelated warnings or an inherited parent answer. A native launch error already saved in the exact parent counts as its outcome and is not replayed as another automatic result. A warning without process failure does not terminate a copy.
 
 ## One terminal result
 
