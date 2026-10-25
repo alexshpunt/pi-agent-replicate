@@ -5,6 +5,7 @@ export interface SessionWorkSnapshot {
   sessionId: string;
   terminals: string[];
   requests: string[];
+  searches?: string[];
   processes: OwnedProcess[];
 }
 const record = (value: unknown): Record<string, any> | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : undefined;
@@ -14,6 +15,8 @@ export class SessionWork {
   private readonly tools = new Set<string>();
   private readonly terminals = new Set<string>();
   private readonly requests = new Set<string>();
+  private readonly searches = new Set<string>();
+  private readonly searchWaits = new Map<string, Set<string>>();
   private readonly completedTerminals = new Set<string>();
   private readonly completedRequests = new Set<string>();
   private readonly processes = new Map<number, OwnedProcess>();
@@ -23,18 +26,32 @@ export class SessionWork {
     if (saved?.sessionId !== sessionId) return;
     for (const source of saved.terminals ?? []) if (typeof source === "string") this.terminals.add(source);
     for (const id of saved.requests ?? []) if (typeof id === "string") this.requests.add(id);
+    for (const id of saved.searches ?? []) if (this.requests.has(id)) this.searches.add(id);
     for (const identity of saved.processes ?? []) if (Number.isInteger(identity.pid) && identity.pid > 0 && typeof identity.start === "string" && typeof identity.boot === "string") this.processes.set(identity.pid, identity);
   }
   get pending(): boolean { return this.tools.size + this.terminals.size + this.requests.size + this.processes.size > 0; }
-  snapshot(): SessionWorkSnapshot { return { sessionId: this.sessionId, terminals: [...this.terminals], requests: [...this.requests], processes: [...this.processes.values()] }; }
-  toolStarted(id: string): void { this.tools.add(id); }
-  toolEnded(id: string): void { this.tools.delete(id); }
-  toolResult(value: unknown, inspection = false): void {
+  snapshot(): SessionWorkSnapshot { return { sessionId: this.sessionId, terminals: [...this.terminals], requests: [...this.requests], searches: [...this.searches].filter(id => this.requests.has(id)), processes: [...this.processes.values()] }; }
+  toolStarted(id: string, toolName?: string): void {
+    this.tools.add(id);
+    if (toolName === "wait_for_web_searches") this.searchWaits.set(id, new Set(this.searches));
+  }
+  toolEnded(id: string): void { this.tools.delete(id); this.searchWaits.delete(id); }
+  toolResult(value: unknown, inspection = false, toolName?: string, toolCallId?: string): void {
     const data = record(value);
     if (inspection && data?.origin?.sessionId !== this.sessionId) return;
     if (!data || data.origin?.sessionId && data.origin.sessionId !== this.sessionId) return;
+    // A successful wait drains its start-time search set, including searches
+    // cancelled by a provider retry. Other requests and later launches stay owned.
+    if (toolName === "wait_for_web_searches" && Array.isArray(data.results) && toolCallId) {
+      for (const id of this.searchWaits.get(toolCallId) ?? []) {
+        this.completedRequests.add(id);
+        this.requests.delete(id);
+        this.searches.delete(id);
+      }
+    }
     if (typeof data.source === "string" && data.source.startsWith("shell:") && !this.completedTerminals.has(data.source) && ["running", "stopping"].includes(data.status)) this.terminals.add(data.source);
     if (typeof data.requestId === "string") {
+      if (toolName === "web_search" && ["running", "queued"].includes(data.status) && !this.completedRequests.has(data.requestId)) this.searches.add(data.requestId);
       if (["completed", "failed", "cancelled"].includes(data.status) || data.answers !== undefined) {
         this.completedRequests.add(data.requestId);
         this.requests.delete(data.requestId);
