@@ -585,6 +585,15 @@ function installChildLifecycle(pi, initialContext) {
         }
     };
     on("agent_end", (event, ctx) => {
+        // Boundary messages commit directly to history without message_start.
+        // This run consumed them before producing its final response.
+        if (replication) {
+            for (const entry of ctx.sessionManager.getBranch()) {
+                if (entry.type === "custom_message")
+                    work.message(entry);
+            }
+            persistWork();
+        }
         armStopTimer(ctx);
         latestAgentEndMessages = event.messages;
         const eventTurnIndex = event.turnIndex;
@@ -605,6 +614,15 @@ function installChildLifecycle(pi, initialContext) {
         // A queued self-reload owns the next continuation, not this acknowledgement.
         if (reloadPending || !runtimeActive)
             return;
+        // Cancellation receipts are passive. They may be appended after agent_end
+        // and must release ownership without starting a turn after an explicit Stop.
+        if (replication) {
+            for (const entry of ctx.sessionManager.getBranch()) {
+                if (entry.type === "custom" && entry.customType === "web-search:cancelled" && entry.data?.status === "cancelled")
+                    work.toolResult(entry.data);
+            }
+            persistWork();
+        }
         const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
         const assistant = newestAssistantEntry(latestAgentEndMessages);
         if (!outcome || !assistant) {
@@ -688,7 +706,7 @@ function installChildLifecycle(pi, initialContext) {
     on("tool_execution_start", (event) => {
         if (replication) {
             closureVersion++;
-            work.toolStarted(event.toolCallId);
+            work.toolStarted(event.toolCallId, event.toolName);
         }
         recorder.toolExecutionStart(event.toolCallId, event.toolName);
     });
@@ -710,7 +728,8 @@ function installChildLifecycle(pi, initialContext) {
             for (const fact of workFacts(event)) {
                 // Inspection is not a process launch or proof of job ownership.
                 const inspection = ["read", "search", "select"].includes(event.toolName);
-                work.toolResult(fact, inspection);
+                if (!event.isError)
+                    work.toolResult(fact, inspection, event.toolName, event.toolCallId);
                 if (!inspection)
                     await work.trackProcesses(fact);
             }

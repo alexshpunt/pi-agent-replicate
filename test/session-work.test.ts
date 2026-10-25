@@ -113,3 +113,37 @@ it("does not count Pi itself or a remote PID as a local job", async () => {
   await work.trackProcesses({ remote: { pid: process.pid, target: "worker" } });
   assert.equal(work.pending, false);
 });
+
+it("retires cancelled searches after an authoritative empty wait without clearing other requests", () => {
+  const work = new SessionWork("copy");
+  work.toolResult({ requestId: "cancelled-search", status: "running" }, false, "web_search");
+  work.toolResult({ requestId: "question", status: "queued" });
+  work.toolStarted("wait", "wait_for_web_searches");
+  work.toolResult({ results: [] }, false, "wait_for_web_searches", "wait");
+  work.toolEnded("wait");
+  assert.deepEqual(work.snapshot().requests, ["question"]);
+});
+
+it("keeps searches launched after a wait starts and does not trust an interrupted wait", () => {
+  const work = new SessionWork("copy");
+  work.toolResult({ requestId: "first", status: "running" }, false, "web_search");
+  work.toolStarted("interrupted", "wait_for_web_searches");
+  work.toolEnded("interrupted");
+  assert.deepEqual(work.snapshot().requests, ["first"]);
+  work.toolStarted("wait", "wait_for_web_searches");
+  work.toolResult({ requestId: "later", status: "running" }, false, "web_search");
+  work.toolResult({ results: [] }, false, "wait_for_web_searches", "wait");
+  work.toolEnded("wait");
+  assert.deepEqual(work.snapshot().requests, ["later"]);
+});
+
+it("restores the scope of search waits only in their owning session", () => {
+  const original = new SessionWork("copy");
+  original.toolResult({ requestId: "search", status: "running" }, false, "web_search");
+  const work = new SessionWork("copy", original.snapshot());
+  work.toolStarted("wait", "wait_for_web_searches");
+  work.toolResult({ results: [] }, false, "wait_for_web_searches", "wait");
+  work.toolEnded("wait");
+  assert.equal(work.pending, false);
+  assert.equal(new SessionWork("other", original.snapshot()).pending, false);
+});
