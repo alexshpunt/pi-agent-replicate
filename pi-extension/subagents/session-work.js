@@ -5,6 +5,8 @@ export class SessionWork {
     tools = new Set();
     terminals = new Set();
     requests = new Set();
+    searches = new Set();
+    searchWaits = new Map();
     completedTerminals = new Set();
     completedRequests = new Set();
     processes = new Map();
@@ -19,23 +21,41 @@ export class SessionWork {
         for (const id of saved.requests ?? [])
             if (typeof id === "string")
                 this.requests.add(id);
+        for (const id of saved.searches ?? [])
+            if (this.requests.has(id))
+                this.searches.add(id);
         for (const identity of saved.processes ?? [])
             if (Number.isInteger(identity.pid) && identity.pid > 0 && typeof identity.start === "string" && typeof identity.boot === "string")
                 this.processes.set(identity.pid, identity);
     }
     get pending() { return this.tools.size + this.terminals.size + this.requests.size + this.processes.size > 0; }
-    snapshot() { return { sessionId: this.sessionId, terminals: [...this.terminals], requests: [...this.requests], processes: [...this.processes.values()] }; }
-    toolStarted(id) { this.tools.add(id); }
-    toolEnded(id) { this.tools.delete(id); }
-    toolResult(value, inspection = false) {
+    snapshot() { return { sessionId: this.sessionId, terminals: [...this.terminals], requests: [...this.requests], searches: [...this.searches].filter(id => this.requests.has(id)), processes: [...this.processes.values()] }; }
+    toolStarted(id, toolName) {
+        this.tools.add(id);
+        if (toolName === "wait_for_web_searches")
+            this.searchWaits.set(id, new Set(this.searches));
+    }
+    toolEnded(id) { this.tools.delete(id); this.searchWaits.delete(id); }
+    toolResult(value, inspection = false, toolName, toolCallId) {
         const data = record(value);
         if (inspection && data?.origin?.sessionId !== this.sessionId)
             return;
         if (!data || data.origin?.sessionId && data.origin.sessionId !== this.sessionId)
             return;
+        // A successful wait drains its start-time search set, including searches
+        // cancelled by a provider retry. Other requests and later launches stay owned.
+        if (toolName === "wait_for_web_searches" && Array.isArray(data.results) && toolCallId) {
+            for (const id of this.searchWaits.get(toolCallId) ?? []) {
+                this.completedRequests.add(id);
+                this.requests.delete(id);
+                this.searches.delete(id);
+            }
+        }
         if (typeof data.source === "string" && data.source.startsWith("shell:") && !this.completedTerminals.has(data.source) && ["running", "stopping"].includes(data.status))
             this.terminals.add(data.source);
         if (typeof data.requestId === "string") {
+            if (toolName === "web_search" && ["running", "queued"].includes(data.status) && !this.completedRequests.has(data.requestId))
+                this.searches.add(data.requestId);
             if (["completed", "failed", "cancelled"].includes(data.status) || data.answers !== undefined) {
                 this.completedRequests.add(data.requestId);
                 this.requests.delete(data.requestId);
