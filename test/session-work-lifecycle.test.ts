@@ -8,7 +8,7 @@ import { it } from "node:test";
 import lifecycle from "../pi-extension/subagents/subagent-done.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
-async function fixture(run: (test: { emit: (name: string, value?: any) => Promise<void>; file: string; shutdowns: () => number; busy: (value: boolean) => void; messages: any[] }) => Promise<void>) {
+async function fixture(run: (test: { emit: (name: string, value?: any) => Promise<void>; file: string; shutdowns: () => number; busy: (value: boolean) => void; messages: any[]; branch: any[] }) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "replica-session-work-")), file = join(dir, "copy.jsonl");
   const prompt = join(dir, "prompt.txt"); writeFileSync(prompt, "inherited system prompt");
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "copy", cwd: dir }) + "\n");
@@ -21,7 +21,7 @@ async function fixture(run: (test: { emit: (name: string, value?: any) => Promis
   const ctx: any = { cwd: dir, isIdle: () => !busy, hasPendingMessages: () => false, shutdown: () => { shutdowns++; }, ui: { setWidget() {}, notify() {} }, sessionManager: { getSessionFile: () => file, getSessionId: () => "copy", getBranch: () => branch } };
   const pi: any = { events: {}, on(name: string, handler: Function) { const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list); return () => {}; }, appendEntry(customType: string, data: unknown) { branch.push({ type: "custom", customType, data }); }, sendMessage(value: unknown) { messages.push(value); }, registerTool() {}, registerShortcut() {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools() {} };
   const emit = async (name: string, value: any = {}) => { for (const handler of handlers.get(name) ?? []) await handler(value, ctx); };
-  try { lifecycle(pi, ctx); await emit("before_agent_start", {}); await run({ emit, file, shutdowns: () => shutdowns, busy: value => { busy = value; }, messages }); }
+  try { lifecycle(pi, ctx); await emit("before_agent_start", {}); await run({ emit, file, shutdowns: () => shutdowns, busy: value => { busy = value; }, messages, branch }); }
   finally { await emit("session_shutdown", { reason: "reload" }); for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } rmSync(dir, { recursive: true, force: true }); }
 }
 const answer = (text: string) => ({ messages: [{ id: text, role: "assistant", stopReason: "stop", content: [{ type: "text", text }] }] });
@@ -75,5 +75,62 @@ it("cancels an old shutdown when a new run starts before its drain completes", {
     assert.equal(test.shutdowns(), 0); assert.equal(existsSync(test.file + ".exit"), false);
     await test.emit("agent_end", answer("new answer")); await test.emit("agent_settled");
     await new Promise(resolve => setTimeout(resolve, 25)); assert.equal(test.shutdowns(), 1);
+  });
+});
+
+for (const status of ["completed", "failed"]) {
+  it(`closes after a ${status} search result committed atomically without message events`, { timeout: 5_000 }, async () => {
+    await fixture(async test => {
+      await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
+      await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
+      await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+      // Pi's boundary commits custom_message entries without message_start.
+      test.branch.push({ type: "custom_message", customType: "web-search:result", details: { requestId: "search", status } });
+      await test.emit("agent_end", answer("search result inspected"));
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), 1);
+      assert.equal(existsSync(test.file + ".exit"), true);
+    });
+  });
+}
+
+it("closes after a cancelled search and an empty wait, retaining genuinely pending work until then", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
+    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("agent_end", answer("before search finishes"));
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 0);
+    await test.emit("before_agent_start", {});
+    await test.emit("tool_execution_start", { toolCallId: "wait", toolName: "wait_for_web_searches" });
+    await test.emit("tool_result", { toolCallId: "wait", toolName: "wait_for_web_searches", details: { results: [] } });
+    await test.emit("tool_execution_end", { toolCallId: "wait", toolName: "wait_for_web_searches" });
+    await test.emit("agent_end", answer("no outstanding searches"));
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 1);
+  });
+});
+
+it("closes a stopped replica after passive cancellation at the settlement boundary without waking it", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
+    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] });
+    test.branch.push({ type: "custom", customType: "web-search:cancelled", data: { requestId: "search", status: "cancelled" } });
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 1);
+    assert.equal(test.messages.length, 0);
+    assert.equal(existsSync(test.file + ".exit"), true);
+  });
+});
+it("does not interpret an unrelated custom entry as cancellation", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
+    test.branch.push({ type: "custom", customType: "other-extension", data: { requestId: "search", status: "cancelled" } });
+    await test.emit("agent_end", answer("search still running"));
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 0);
   });
 });

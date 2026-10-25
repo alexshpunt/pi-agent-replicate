@@ -212,6 +212,13 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		return { text: user.includes("exit 7") ? "BACKGROUND_WORK_FAILED" : "BACKGROUND_WORK_PROCESSED" };
 	}
 
+	if (names.has("web_search") && user.includes("Your assignment:\nSEARCH_REQUEST_")) {
+		if (lastRole !== "tool") return { toolCalls: [{ name: "web_search", arguments: {} }] };
+		if (user.includes("SEARCH_REQUEST_STOP")) return { holdQuiet: true };
+		const latestTool = request.messages?.at(-1);
+		if (messageText(latestTool?.content).includes("SEARCH_REQUEST_STARTED")) return { toolCalls: [{ name: "wait_for_web_searches", arguments: {} }] };
+		return { text: "SEARCH_REQUEST_DRAINED" };
+	}
 	if (names.has("replication_output_wrapper") && lastRole !== "tool" && /Call the replica output wrapper/i.test(user)) {
 		const task = quotedValue(user, "task");
 		if (task) return { toolCalls: [{ name: "replication_output_wrapper", arguments: { name: quotedValue(user, "name"), task } }] };
