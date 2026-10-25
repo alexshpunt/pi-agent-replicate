@@ -22,6 +22,8 @@ A queued self-reload is unfinished work. The acknowledgement before reload is no
 
 A stopped model does not imply finished session work. Replicas wait for active tools, background terminal completion messages, pending background request receipts, reported live Linux descendant PIDs and their observed children, and their own replicas. The copy processes completion messages before returning. New work invalidates an older shutdown decision, including one already waiting for descendants. The idle safety timer cannot bypass this guard. Terminal completion remains authoritative for its exit status; observing the same PID exit must not replace it with a status-less duplicate.
 
+Search completions committed as atomic `custom_message` boundary entries drain their matching request before final settlement, even when Pi emits no `message_start`. A passive `web-search:cancelled` custom entry with `{ requestId, status: "cancelled", parentToolCallId? }` releases that request without waking a stopped model. A successful `wait_for_web_searches` also drains the known search set captured when that wait started, including searches cancelled during a provider retry. Failed waits, unrelated requests and searches launched after the wait started remain pending.
+
 Receipt and process ownership persists for the exact session through reload. Unreported daemons, unsupported native process identities and remote jobs without completion receipts are not discoverable by this guard. It does not adopt unrelated processes or idle runtime helpers.
 
 The settled handler returns its finalization promise. Pi must see the shutdown request before it checks that settled boundary; saving a result or starting detached finalization is not proof that the Pi process exited.
