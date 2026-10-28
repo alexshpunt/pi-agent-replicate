@@ -212,6 +212,11 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		return { text: user.includes("exit 7") ? "BACKGROUND_WORK_FAILED" : "BACKGROUND_WORK_PROCESSED" };
 	}
 
+	if (user.includes("Your assignment:\nDELETED_TERMINAL_WORK")) {
+		if (lastRole !== "tool") return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
+		if (messageText(request.messages?.at(-1)?.content).includes("DELETED_TERMINAL_STARTED")) return { toolCalls: [{ name: "delete", arguments: { path: "shell:fixture-work" } }] };
+		return { text: "DELETED_TERMINAL_FINISHED" };
+	}
 	if (names.has("web_search") && user.includes("Your assignment:\nSEARCH_REQUEST_")) {
 		if (lastRole !== "tool") return { toolCalls: [{ name: "web_search", arguments: {} }] };
 		if (user.includes("SEARCH_REQUEST_STOP")) return { holdQuiet: true };

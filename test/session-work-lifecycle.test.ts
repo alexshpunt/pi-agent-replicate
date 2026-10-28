@@ -51,6 +51,21 @@ it("does not close a settled replica before its background terminal completion i
   });
 });
 
+for (const isError of [false, true]) {
+  it(`only closes after a successful terminal deletion (isError=${isError})`, { timeout: 5_000 }, async () => {
+    await fixture(async test => {
+      await test.emit("tool_result", { toolCallId: "background", toolName: "bash", details: { source: "shell:job", status: "running" } });
+      await test.emit("tool_execution_start", { toolCallId: "delete", toolName: "delete" });
+      await test.emit("tool_result", { toolCallId: "delete", toolName: "delete", isError, details: { source: "shell:job", deleted: true, snapshot: { origin: { sessionId: "copy" }, status: "running" } } });
+      await test.emit("tool_execution_end", { toolCallId: "delete", toolName: "delete" });
+      await test.emit("agent_end", answer("terminal deleted"));
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), isError ? 0 : 1);
+      assert.equal(existsSync(test.file + ".exit"), !isError);
+      assert.equal(test.messages.length, 0, "no terminal completion turn is required after deletion");
+    });
+  });
+}
 it("does not adopt an inspected runtime helper as a launched session job", { timeout: 5_000 }, async () => {
   const helper = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
   const exit = once(helper, "exit");
