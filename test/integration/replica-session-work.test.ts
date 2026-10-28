@@ -24,6 +24,52 @@ for (const backend of getAvailableBackends()) {
     beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
     afterEach(async () => { await cleanupTestEnv(env); });
 
+    it("returns automatically after deleting a background terminal without a completion message", async () => {
+      const file = join(env.dir, "parent.jsonl"), capability = join(env.dir, "deleted-terminal-fixture.ts");
+      const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+      writeFileSync(capability, `import {Type} from ${JSON.stringify(typebox)};
+import {spawn} from 'node:child_process'; import {once} from 'node:events';
+export default function(pi){
+ let context, child;
+ const source='shell:fixture-work';
+ pi.on('session_start',(_event,ctx)=>{context=ctx;});
+ pi.on('session_shutdown',()=>{child?.kill();});
+ pi.registerTool({name:'replication_probe',label:'Background job',description:'Start session work',parameters:Type.Object({}),async execute(){
+  child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+  return {content:[{type:'text',text:'DELETED_TERMINAL_STARTED'}],details:{source,pid:child.pid,origin:{sessionId:context.sessionManager.getSessionId()},status:'running',background:true}};
+ }});
+ pi.registerTool({name:'delete',label:'Delete terminal',description:'Delete session work',parameters:Type.Object({path:Type.String()}),async execute(_id,{path}){
+  if(path!==source) throw Error('Unknown fixture terminal');
+  const snapshot={source,pid:child.pid,status:'running',origin:{sessionId:context.sessionManager.getSessionId()}};
+  const exit=once(child,'exit'); child.kill(); await exit;
+  return {content:[{type:'text',text:'DELETED_TERMINAL_REMOVED'}],details:{source,deleted:true,snapshot,action:'delete',input:'session',changedLines:[]}};
+ }});
+}`);
+      const parent = createTrackedSurface(env, "deleted-terminal-parent");
+      await waitForPaneReady(parent);
+      startPi(parent, env.dir, "Return exactly BACKGROUND_PARENT_READY", { extraArgs: `--session ${shellQuote(file)} -e ${shellQuote(capability)}` });
+      await until(() => entries(file).some(row => row.message?.role === "assistant"), "parent ready");
+      runInPane(parent, 'Call the replicate tool once with name: "check-deleted-terminal" task: "DELETED_TERMINAL_WORK"');
+      await until(() => entries(file).some(row => row.message?.toolName === "replicate"), "copy launched");
+      const launch = entries(file).find(row => row.message?.toolName === "replicate").message.details;
+      await until(() => entries(file).some(row => row.customType === "subagent_result"), "deleted terminal must not block result delivery");
+      const results = entries(file).filter(row => row.customType === "subagent_result");
+      assert.equal(results.length, 1);
+      assert.equal(results[0].details.exitCode, 0);
+      assert.equal(results[0].details.integration.status, "applied");
+      const child = entries(launch.sessionFile);
+      const deleted = child.filter(row => row.message?.toolName === "delete");
+      assert.equal(deleted.length, 1);
+      assert.equal(deleted[0].message.isError, false);
+      assert.equal(deleted[0].message.details.deleted, true);
+      assert.equal(child.some(row => row.customType === "terminal-completion" || row.message?.customType === "terminal-completion"), false);
+      const snapshots = child.filter(row => row.customType === "replica-session-work");
+      assert.deepEqual(snapshots.at(-1).data.terminals, []);
+      const binding = readSessionBinding(launch.sessionFile)!;
+      const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
+      await until(() => !sessionLocationAlive(location), "copy exits after deleting its terminal");
+      assert.match(await readPaneAsync(parent, 80), /check-deleted-terminal/);
+    });
     for (const variant of ["terminal", "failed-terminal", "process"]) {
       it(`processes background work before returning (${variant})`, async () => {
         const file = join(env.dir, "parent.jsonl"), gate = join(env.dir, ".pi", "agent", "release-work"), started = gate + ".started";

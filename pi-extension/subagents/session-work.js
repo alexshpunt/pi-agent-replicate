@@ -42,6 +42,11 @@ export class SessionWork {
             return;
         if (!data || data.origin?.sessionId && data.origin.sessionId !== this.sessionId)
             return;
+        // Deletion suppresses terminal-completion; it retires the receipt, not live PIDs.
+        if (toolName === "delete" && data.deleted === true && typeof data.source === "string" && data.source.startsWith("shell:") && (!data.snapshot?.origin?.sessionId || data.snapshot.origin.sessionId === this.sessionId)) {
+            this.completedTerminals.add(data.source);
+            this.terminals.delete(data.source);
+        }
         // A successful wait drains its start-time search set, including searches
         // cancelled by a provider retry. Other requests and later launches stay owned.
         if (toolName === "wait_for_web_searches" && Array.isArray(data.results) && toolCallId) {

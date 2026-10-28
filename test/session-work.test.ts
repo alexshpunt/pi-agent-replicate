@@ -17,6 +17,48 @@ it("keeps a returned background terminal pending until its completion reaches th
   assert.equal(work.pending, false);
 });
 
+it("retires only the deleted terminal without waiting for its suppressed completion", () => {
+  const work = new SessionWork("copy");
+  for (const source of ["shell:deleted", "shell:still-running"]) work.toolResult({ source, status: "running" });
+  work.toolResult({ source: "shell:deleted", deleted: true, snapshot: { origin: { sessionId: "copy" }, status: "running" } }, false, "delete");
+  assert.deepEqual(work.snapshot().terminals, ["shell:still-running"]);
+  work.toolResult({ source: "shell:deleted", status: "running" });
+  assert.deepEqual(work.snapshot().terminals, ["shell:still-running"], "a late launch receipt cannot resurrect the deleted terminal");
+  work.toolResult({ source: "shell:still-running", deleted: true }, false, "delete");
+  assert.equal(work.pending, false);
+  assert.equal(new SessionWork("copy", work.snapshot()).pending, false);
+});
+
+it("does not retire terminals on a failed, inspected or foreign deletion receipt", () => {
+  const work = new SessionWork("copy"), source = "shell:job";
+  work.toolResult({ source, status: "running" });
+  for (const [details, inspection, toolName] of [
+    [{ source, deleted: false }, false, "delete"],
+    [{ source, deleted: true }, false, "read"],
+    [{ source, deleted: true }, true, "delete"],
+    [{ source, deleted: true, origin: { sessionId: "other" } }, false, "delete"],
+    [{ source, deleted: true, snapshot: { origin: { sessionId: "other" } } }, false, "delete"],
+  ] as const) {
+    work.toolResult(details, inspection, toolName);
+    assert.equal(work.pending, true);
+  }
+});
+
+it("keeps a live process pending after deleting its terminal", { skip: process.platform !== "linux", timeout: 5_000 }, async () => {
+  const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
+  const exit = once(child, "exit"), work = new SessionWork("copy"), source = "shell:deleted";
+  try {
+    work.toolResult({ source, status: "running" });
+    await work.trackProcesses({ source, pid: child.pid });
+    work.toolResult({ source, deleted: true }, false, "delete");
+    assert.deepEqual(work.snapshot().terminals, []);
+    assert.equal(work.pending, true, "deleting a terminal is not evidence that its processes exited");
+    assert.deepEqual(await work.refreshProcesses(), []);
+    child.stdin.end(); await exit;
+    assert.deepEqual(await work.refreshProcesses(), [child.pid]);
+    assert.equal(work.pending, false);
+  } finally { if (child.exitCode === null) child.kill(); }
+});
 it("does not own another session's terminal or a completed foreground tool", () => {
   const work = new SessionWork("copy");
   work.toolResult({ source: "shell:other", status: "running", background: true, origin: { sessionId: "other" } });
