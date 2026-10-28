@@ -48,7 +48,8 @@ export default function(pi){
       const parent = createTrackedSurface(env, "deleted-terminal-parent");
       await waitForPaneReady(parent);
       startPi(parent, env.dir, "Return exactly BACKGROUND_PARENT_READY", { extraArgs: `--session ${shellQuote(file)} -e ${shellQuote(capability)}` });
-      await until(() => entries(file).some(row => row.message?.role === "assistant"), "parent ready");
+      try { await until(() => entries(file).some(row => row.message?.role === "assistant"), "parent ready"); }
+      catch (error) { console.error(await readPaneAsync(parent, 100)); throw error; }
       runInPane(parent, 'Call the replicate tool once with name: "check-deleted-terminal" task: "DELETED_TERMINAL_WORK"');
       await until(() => entries(file).some(row => row.message?.toolName === "replicate"), "copy launched");
       const launch = entries(file).find(row => row.message?.toolName === "replicate").message.details;
