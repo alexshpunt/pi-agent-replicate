@@ -65,6 +65,7 @@ export default function(pi){
       assert.equal(deleted[0].message.details.deleted, true);
       assert.equal(child.some(row => row.customType === "terminal-completion" || row.message?.customType === "terminal-completion"), false);
       const snapshots = child.filter(row => row.customType === "replica-session-work");
+      assert.ok(snapshots.some(row => row.data.terminals.includes("shell:fixture-work")), "the launched terminal must be owned before deletion");
       assert.deepEqual(snapshots.at(-1).data.terminals, []);
       const binding = readSessionBinding(launch.sessionFile)!;
       const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
