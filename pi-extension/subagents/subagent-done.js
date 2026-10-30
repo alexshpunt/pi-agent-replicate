@@ -723,18 +723,7 @@ function installChildLifecycle(pi, initialContext) {
     on("tool_execution_update", (event) => {
         recorder.toolExecutionUpdate(event.toolCallId, event.toolName);
     });
-    on("tool_result", async (event, ctx) => {
-        if (replication) {
-            for (const fact of workFacts(event)) {
-                // Inspection is not a process launch or proof of job ownership.
-                const inspection = ["read", "search", "select"].includes(event.toolName);
-                if (!event.isError)
-                    work.toolResult(fact, inspection, event.toolName, event.toolCallId);
-                if (!inspection)
-                    await work.trackProcesses(fact);
-            }
-            persistWork();
-        }
+    on("tool_result", (event, ctx) => {
         if (event.toolName === "pi_extension_dev_reload_self" && !event.isError && event.details?.queued)
             reloadPending = true;
         if (event.toolName === "teleport" && event.isError) {
@@ -743,9 +732,20 @@ function installChildLifecycle(pi, initialContext) {
         }
         recorder.toolResult(event.toolCallId, event.toolName);
     });
-    on("tool_execution_end", (event) => {
-        if (replication)
+    on("tool_execution_end", async (event) => {
+        if (replication) {
+            // tool_result handlers can still transform receipts, including nested calls.
+            for (const fact of workFacts(event.result)) {
+                // Inspection is not a process launch or proof of job ownership.
+                const inspection = ["read", "search", "select"].includes(event.toolName);
+                if (!event.isError)
+                    work.toolResult(fact, inspection, event.toolName, event.toolCallId);
+                if (!inspection)
+                    await work.trackProcesses(fact);
+            }
             work.toolEnded(event.toolCallId);
+            persistWork();
+        }
         recorder.toolExecutionEnd(event.toolCallId, event.toolName);
     });
     on("message_end", (event, ctx) => {

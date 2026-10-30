@@ -803,23 +803,24 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
     );
   });
 
-  on("tool_result", async (event, ctx) => {
-    if (replication) {
-      for (const fact of workFacts(event)) {
-        // Inspection is not a process launch or proof of job ownership.
-        const inspection = ["read", "search", "select"].includes(event.toolName);
-        if (!event.isError) work.toolResult(fact, inspection, event.toolName, event.toolCallId);
-        if (!inspection) await work.trackProcesses(fact);
-      }
-      persistWork();
-    }
+  on("tool_result", (event, ctx) => {
     if (event.toolName === "pi_extension_dev_reload_self" && !event.isError && (event.details as { queued?: boolean } | undefined)?.queued) reloadPending = true;
     if (event.toolName === "teleport" && event.isError) { movePending = false; bindSessionRuntime(pi, ctx); }
     recorder.toolResult((event as any).toolCallId, (event as any).toolName);
   });
 
-  on("tool_execution_end", (event) => {
-    if (replication) work.toolEnded(event.toolCallId);
+  on("tool_execution_end", async (event) => {
+    if (replication) {
+      // tool_result handlers can still transform receipts, including nested calls.
+      for (const fact of workFacts(event.result)) {
+        // Inspection is not a process launch or proof of job ownership.
+        const inspection = ["read", "search", "select"].includes(event.toolName);
+        if (!event.isError) work.toolResult(fact, inspection, event.toolName, event.toolCallId);
+        if (!inspection) await work.trackProcesses(fact);
+      }
+      work.toolEnded(event.toolCallId);
+      persistWork();
+    }
     recorder.toolExecutionEnd(
       (event as any).toolCallId,
       (event as any).toolName,
