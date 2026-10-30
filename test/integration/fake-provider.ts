@@ -214,7 +214,11 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 
 	if (user.includes("Your assignment:\nDELETED_TERMINAL_WORK")) {
 		if (lastRole !== "tool") return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
-		if (messageText(request.messages?.at(-1)?.content).includes("DELETED_TERMINAL_STARTED")) return { toolCalls: [{ name: "delete", arguments: { path: "shell:fixture-work" } }] };
+		if (messageText(request.messages?.at(-1)?.content).includes("DELETED_TERMINAL_STARTED")) {
+			return { toolCalls: [user.includes("DELETED_TERMINAL_WORK_CODEMODE")
+				? { name: "codemode", arguments: { code: 'text(await tools.delete({path: "shell:fixture-work"}));' } }
+				: { name: "delete", arguments: { path: "shell:fixture-work" } }] };
+		}
 		return { text: "DELETED_TERMINAL_FINISHED" };
 	}
 	if (names.has("web_search") && user.includes("Your assignment:\nSEARCH_REQUEST_")) {
