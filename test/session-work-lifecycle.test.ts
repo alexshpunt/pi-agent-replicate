@@ -38,8 +38,7 @@ it("requests shutdown before the settled hook returns to Pi's interactive mode",
 it("does not close a settled replica before its background terminal completion is processed", { timeout: 5_000 }, async () => {
   await fixture(async test => {
     await test.emit("tool_execution_start", { toolCallId: "background", toolName: "bash" });
-    await test.emit("tool_result", { toolCallId: "background", toolName: "bash", details: { source: "shell:job", background: true, status: "running", origin: { sessionId: "copy" } } });
-    await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash" });
+    await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", background: true, status: "running", origin: { sessionId: "copy" } } }, isError: false });
     await test.emit("agent_end", answer("before job completes")); await test.emit("agent_settled");
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(test.shutdowns(), 0); assert.equal(existsSync(test.file + ".exit"), false);
@@ -54,10 +53,9 @@ it("does not close a settled replica before its background terminal completion i
 for (const isError of [false, true]) {
   it(`only closes after a successful terminal deletion (isError=${isError})`, { timeout: 5_000 }, async () => {
     await fixture(async test => {
-      await test.emit("tool_result", { toolCallId: "background", toolName: "bash", details: { source: "shell:job", status: "running" } });
+      await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
       await test.emit("tool_execution_start", { toolCallId: "delete", toolName: "delete" });
-      await test.emit("tool_result", { toolCallId: "delete", toolName: "delete", isError, details: { source: "shell:job", deleted: true, snapshot: { origin: { sessionId: "copy" }, status: "running" } } });
-      await test.emit("tool_execution_end", { toolCallId: "delete", toolName: "delete" });
+      await test.emit("tool_execution_end", { toolCallId: "delete", toolName: "delete", result: { details: { source: "shell:job", deleted: true, snapshot: { origin: { sessionId: "copy" }, status: "running" } } }, isError });
       await test.emit("agent_end", answer("terminal deleted"));
       await test.emit("agent_settled");
       assert.equal(test.shutdowns(), isError ? 0 : 1);
@@ -66,14 +64,41 @@ for (const isError of [false, true]) {
     });
   });
 }
+for (const nested of [false, true]) {
+  for (const isError of [false, true]) {
+    it(`uses the finalized deletion result (nested=${nested}, isError=${isError})`, { timeout: 5_000 }, async () => {
+      await fixture(async test => {
+        const receipt = { source: "shell:job", deleted: true, snapshot: { origin: { sessionId: "copy" }, status: "running" } };
+        const running = { source: "shell:job", status: "running" };
+        await test.emit("tool_execution_start", { toolCallId: "background", toolName: "bash" });
+        await test.emit("tool_result", { toolCallId: "background", toolName: "bash", details: running });
+        await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: running }, isError: false });
+        assert.deepEqual(test.branch.at(-1).data.terminals, ["shell:job"]);
+        if (nested) await test.emit("tool_execution_start", { toolCallId: "wrapper", toolName: "codemode" });
+        const call = { toolCallId: "delete", toolName: "delete", ...(nested ? { parentToolCallId: "wrapper" } : {}) };
+        await test.emit("tool_execution_start", call);
+        // A later extension either adds the receipt or rejects an earlier success.
+        await test.emit("tool_result", { ...call, isError: false, details: isError ? receipt : undefined });
+        assert.deepEqual(test.branch.at(-1).data.terminals, ["shell:job"], "transformable results must not retire work");
+        await test.emit("tool_execution_end", { ...call, result: { details: receipt }, isError });
+        if (nested) await test.emit("tool_execution_end", { toolCallId: "wrapper", toolName: "codemode", result: { content: [] }, isError: false });
+        await test.emit("agent_end", answer("terminal deletion inspected"));
+        await test.emit("agent_settled");
+        assert.equal(test.shutdowns(), isError ? 0 : 1);
+        assert.deepEqual(test.branch.at(-1).data.terminals, isError ? ["shell:job"] : []);
+        assert.equal(existsSync(test.file + ".exit"), !isError);
+        assert.equal(test.messages.length, 0, "deletion does not need a terminal-completion turn");
+      });
+    });
+  }
+}
 it("does not adopt an inspected runtime helper as a launched session job", { timeout: 5_000 }, async () => {
   const helper = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
   const exit = once(helper, "exit");
   try {
     await fixture(async test => {
       await test.emit("tool_execution_start", { toolCallId: "inspect", toolName: "read" });
-      await test.emit("tool_result", { toolCallId: "inspect", toolName: "read", details: { pid: helper.pid } });
-      await test.emit("tool_execution_end", { toolCallId: "inspect", toolName: "read" });
+      await test.emit("tool_execution_end", { toolCallId: "inspect", toolName: "read", result: { details: { pid: helper.pid } }, isError: false });
       await test.emit("agent_end", answer("inspection finished")); await test.emit("agent_settled");
       await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(test.shutdowns(), 1);
@@ -97,8 +122,7 @@ for (const status of ["completed", "failed"]) {
   it(`closes after a ${status} search result committed atomically without message events`, { timeout: 5_000 }, async () => {
     await fixture(async test => {
       await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
-      await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
-      await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+      await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search", result: { details: { requestId: "search", status: "running" } }, isError: false });
       // Pi's boundary commits custom_message entries without message_start.
       test.branch.push({ type: "custom_message", customType: "web-search:result", details: { requestId: "search", status } });
       await test.emit("agent_end", answer("search result inspected"));
@@ -112,15 +136,13 @@ for (const status of ["completed", "failed"]) {
 it("closes after a cancelled search and an empty wait, retaining genuinely pending work until then", { timeout: 5_000 }, async () => {
   await fixture(async test => {
     await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
-    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
-    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search", result: { details: { requestId: "search", status: "running" } }, isError: false });
     await test.emit("agent_end", answer("before search finishes"));
     await test.emit("agent_settled");
     assert.equal(test.shutdowns(), 0);
     await test.emit("before_agent_start", {});
     await test.emit("tool_execution_start", { toolCallId: "wait", toolName: "wait_for_web_searches" });
-    await test.emit("tool_result", { toolCallId: "wait", toolName: "wait_for_web_searches", details: { results: [] } });
-    await test.emit("tool_execution_end", { toolCallId: "wait", toolName: "wait_for_web_searches" });
+    await test.emit("tool_execution_end", { toolCallId: "wait", toolName: "wait_for_web_searches", result: { details: { results: [] } }, isError: false });
     await test.emit("agent_end", answer("no outstanding searches"));
     await test.emit("agent_settled");
     assert.equal(test.shutdowns(), 1);
@@ -130,8 +152,7 @@ it("closes after a cancelled search and an empty wait, retaining genuinely pendi
 it("closes a stopped replica after passive cancellation at the settlement boundary without waking it", { timeout: 5_000 }, async () => {
   await fixture(async test => {
     await test.emit("tool_execution_start", { toolCallId: "search", toolName: "web_search" });
-    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
-    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search" });
+    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search", result: { details: { requestId: "search", status: "running" } }, isError: false });
     await test.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] });
     test.branch.push({ type: "custom", customType: "web-search:cancelled", data: { requestId: "search", status: "cancelled" } });
     await test.emit("agent_settled");
@@ -142,7 +163,7 @@ it("closes a stopped replica after passive cancellation at the settlement bounda
 });
 it("does not interpret an unrelated custom entry as cancellation", { timeout: 5_000 }, async () => {
   await fixture(async test => {
-    await test.emit("tool_result", { toolCallId: "search", toolName: "web_search", details: { requestId: "search", status: "running" } });
+    await test.emit("tool_execution_end", { toolCallId: "search", toolName: "web_search", result: { details: { requestId: "search", status: "running" } }, isError: false });
     test.branch.push({ type: "custom", customType: "other-extension", data: { requestId: "search", status: "cancelled" } });
     await test.emit("agent_end", answer("search still running"));
     await test.emit("agent_settled");
