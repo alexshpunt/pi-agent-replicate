@@ -54,6 +54,7 @@ it("registers only the fresh replication tool", () => {
 	const registered: string[] = [];
 	subagentsExtension({
 		registerTool: (tool: { name: string }) => registered.push(tool.name),
+		registerCommand: () => {},
 		on: () => () => {},
 		registerMessageRenderer: () => {},
 	} as any);
