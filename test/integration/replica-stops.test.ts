@@ -83,8 +83,8 @@ for (const backend of getAvailableBackends()) {
 
 		for (const reload of [false, true]) {
 			it(`retries a missed completion ${reload ? "across reload" : "after ten stopped seconds"} without restarting the model`, async () => {
-				const parentFile = join(env.dir, "parent.jsonl"), blocker = join(env.dir, "blocked-path"), capability = join(env.dir, "block-completion.ts");
-				writeFileSync(capability, `import {mkdirSync,writeFileSync} from 'node:fs'; export default function(pi){if(process.env.PI_SUBAGENT_REPLICATION==='1'){pi.on('agent_end',()=>{const p=process.env.PI_SUBAGENT_SESSION+'.exit';mkdirSync(p,{recursive:true});writeFileSync(${JSON.stringify(blocker)},p);});}}`);
+				const parentFile = join(env.dir, "parent.jsonl"), blocker = join(env.dir, "blocked-path"), attempted = join(env.dir, "completion-attempted"), capability = join(env.dir, "block-completion.ts");
+				writeFileSync(capability, `import {mkdirSync,writeFileSync,watch} from 'node:fs'; import {basename,dirname} from 'node:path'; export default function(pi){if(process.env.PI_SUBAGENT_REPLICATION==='1'){pi.on('agent_end',()=>{const p=process.env.PI_SUBAGENT_SESSION+'.exit';mkdirSync(p,{recursive:true});const watcher=watch(dirname(p),{persistent:false},(_event,file)=>{if(file?.startsWith(basename(p)+'.')&&file.endsWith('.tmp')){writeFileSync(${JSON.stringify(attempted)},'attempted');watcher.close();}});writeFileSync(${JSON.stringify(blocker)},p);});}}`);
 				const parent = createTrackedSurface(env, "safety-parent");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, "Return exactly SAFETY_PARENT_READY", { extraArgs: `--session ${shellQuote(parentFile)} -e ${shellQuote(capability)}` });
@@ -95,6 +95,7 @@ for (const backend of getAvailableBackends()) {
 				await until(() => entries(path.slice(0, -5)).some(row => row.message?.role === "assistant" && JSON.stringify(row.message.content).includes("SAFETY_CHILD_SUMMARY")), "final answer saved");
 				await until(() => existsSync(path.slice(0, -5) + ".replica-stop"), "fully settled evidence saved despite failed completion publication");
 				const stoppedAt = JSON.parse(readFileSync(path.slice(0, -5) + ".replica-stop", "utf8")).stoppedAt;
+				await until(() => existsSync(attempted), "normal completion must attempt the blocked write before recovery");
 				if (reload) {
 					const binding = readSessionBinding(path.slice(0, -5))!;
 					const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
