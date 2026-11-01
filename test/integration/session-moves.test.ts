@@ -351,6 +351,14 @@ export default function(pi){
 				env.surfaces.push(returned.paneId!);
 				runInPane(returned.paneId!, "/quit");
 				await waitUntil(() => !existsSync(`/proc/${returned.pid}`), "returned Pi must exit");
+				const reopened = createTrackedSurface(env, "teleport-reopened");
+				await waitForPaneReady(reopened);
+				startPi(reopened, env.dir, "Return exactly TELEPORT_REOPENED", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(returned.sessionFile)} -e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)}` });
+				await waitForScreen(reopened, /TELEPORT_REOPENED/);
+				assert.equal(results(returned.sessionFile).length, 2, "acknowledged results must not replay after reopening");
+				assert.equal(entries(deliveries).length, 2, "tree callbacks must not replay after reopening");
+				runInPane(reopened, "/quit");
+				await waitForPiExit(reopened);
 			} finally {
 				execFileSync("herdr", ["worktree", "remove", "--workspace", worktree.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
 			}
