@@ -51,7 +51,7 @@ import {
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore, captureLaunchPaneOwnership, type LaunchPaneOwnership } from "./session-binding.ts";
 import type { ReplicationSnapshot } from "./replication.ts";
 import type { ExecutionOwner } from "./execution-owner.ts";
-import { attachReplicaWork, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.ts";
+import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.ts";
 import { sourceRepositoryAnchor } from "./source-state.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -289,8 +289,9 @@ async function launchFreshPiSubagent(
 			}
 		}
 		surface = prepareLaunchSurface(resolved, operations);
-		if (request.replication?.recordFile && surface.worktree) {
-			attachReplicaWork(request.replication.recordFile, surface.worktree);
+		if (request.replication?.recordFile) {
+			if (surface.worktree) attachReplicaWork(request.replication.recordFile, surface.worktree);
+			else attachSharedReplicaPane(request.replication.recordFile, surface.surface);
 			captureLaunchSurface(resolved, surface, operations);
 		}
 		const session = prepareChildSession(resolved, surface);
@@ -346,6 +347,7 @@ async function launchFreshPiSubagent(
 		// Publish recovery evidence before waiting on external shell startup.
 		await confirmShellReady(session, operations, signal);
 		captureLaunchSurface(resolved, surface, operations);
+		if (request.replication?.recordFile && !surface.worktree && !resolved.launchPane) throw new Error("Cannot verify shared replica pane ownership.");
 		if (signal.aborted) throw new Error("subagent launch aborted");
 		const command = buildPiCommand(resolved, artifacts);
 		const launchScriptFile = startPiProcess(resolved, artifacts, command, operations);
@@ -356,7 +358,11 @@ async function launchFreshPiSubagent(
 			try { failReplicaLaunch(request.replication.recordFile, error); } catch { /* Preserve the original launch failure. */ }
 		}
 		if (surface && !surface.worktree) {
-			try { operations.closePane?.(surface.surface); } catch { /* best effort */ }
+			if (request.replication?.recordFile) {
+				try { captureLaunchSurface(resolved, surface, operations); cleanupReplicaWork(request.replication.recordFile, resolved.sourceCwd); } catch { /* Unknown ownership stays recoverable. */ }
+			} else {
+				try { operations.closePane?.(surface.surface); } catch { /* best effort */ }
+			}
 		}
 		if (!surface?.worktree) throw error;
 		if (request.replication?.recordFile) {
@@ -376,7 +382,7 @@ async function launchFreshPiSubagent(
 /** Record the shell before dispatch; child startup may never reach session_start. */
 function captureLaunchSurface(resolved: ResolvedLaunch, surface: PreparedSurface, operations: PiLaunchOperations): void {
 	const file = resolved.request.replication?.recordFile;
-	if (!file || !surface.worktree || !operations.getPaneProcessInfo) return;
+	if (!file || !operations.getPaneProcessInfo) return;
 	let shellPid: number | undefined;
 	try { shellPid = operations.getPaneProcessInfo(surface.surface).shellPid; }
 	catch { return; } // A shell may still be starting; retry after readiness.
@@ -527,6 +533,8 @@ function prepareChildSession(
 		surface.worktree.sessionFile = sessionFile;
 		writeWorktreeManifest(surface.worktree.manifestFile, { sessionFile });
 		if (resolved.request.replication?.recordFile) attachReplicaWork(resolved.request.replication.recordFile, surface.worktree, sessionFile);
+	} else if (resolved.request.replication?.recordFile) {
+		attachSharedReplicaPane(resolved.request.replication.recordFile, surface.surface, sessionFile);
 	}
 	const activityFile = getSubagentActivityFile(
 		resolved.artifactDir,

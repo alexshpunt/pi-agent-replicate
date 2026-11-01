@@ -14,7 +14,7 @@ export function replicaWorkFile(storeDir, id) {
 /** Load known ownership; missing or malformed records are never guessed recoverable. */
 export function readReplicaWork(file) {
     const value = JSON.parse(readFileSync(file, "utf8"));
-    if (value.version !== 1 || !value.id || !value.parentSessionId || !value.fork?.commit || !value.joinBase || !value.integration ||
+    if (value.version !== 1 || !value.id || !value.parentSessionId || !value.integration || (value.mode === "shared" ? !value.sharedCwd : ((value.mode != null && value.mode !== "worktree") || !value.fork?.commit || !value.joinBase)) ||
         (value.continuationOwner && (!Number.isInteger(value.continuationOwner.pid) || value.continuationOwner.pid <= 0 || (value.continuationOwner.startTime != null && typeof value.continuationOwner.startTime !== "string"))))
         throw new Error("Invalid replica work record.");
     return value;
@@ -24,6 +24,17 @@ export function createReplicaWork(file, id, parentSessionId, fork, joinBase = fo
     if (existsSync(file))
         throw new Error("Replica work identity already exists.");
     writeBindingFile(file, { version: 1, id, parentSessionId, fork, joinBase, integration: { status: "pending" } });
+}
+/** Record a shared attempt without creating a Git snapshot or branch. */
+export function createSharedReplicaWork(file, id, parentSessionId, cwd) {
+    if (existsSync(file)) throw new Error("Replica work identity already exists.");
+    writeBindingFile(file, { version: 1, id, parentSessionId, mode: "shared", sharedCwd: cwd, integration: { status: "pending" } });
+}
+/** Persist the allocated shared pane before dispatch. */
+export function attachSharedReplicaPane(file, pane, sessionFile) {
+    const record = readReplicaWork(file);
+    if (record.mode !== "shared" || (record.sharedPane && record.sharedPane !== pane)) throw new Error("Invalid shared replica pane.");
+    writeBindingFile(file, { ...record, sharedPane: pane, ...(sessionFile ? { sessionFile } : {}) });
 }
 /** Reserve the latest settled attempt for its exact immediate parent. */
 export function reserveReplicaContinuation(file, parentSessionId, attemptId) {
@@ -85,7 +96,8 @@ export function saveReplicaRuntime(file, runtime) {
 }
 /** Preserve failed allocation facts and release a reservation without discarding evidence. */
 export function failReplicaLaunch(file, error, toolCallId) {
-    writeBindingFile(file, { ...readReplicaWork(file), launchError: String(error), ...(toolCallId ? { launchErrorToolCallId: toolCallId } : {}), integration: { status: "not-attempted", details: "Launch failed; saved work was not applied." } });
+    const record = readReplicaWork(file);
+    writeBindingFile(file, { ...record, launchError: String(error), ...(toolCallId ? { launchErrorToolCallId: toolCallId } : {}), integration: { status: "not-attempted", details: record.mode === "shared" ? "Launch failed; changes may already be present in the shared directory." : "Launch failed; saved work was not applied." } });
 }
 /** A persisted native tool error already delivered this pre-acknowledgement failure. */
 export function replicaLaunchFailureReported(record, entries, owner) {
@@ -114,7 +126,7 @@ export function attachReplicaWork(file, worktree, sessionFile) {
 /** Save launch ownership before the child can fail during extension loading. */
 export function captureReplicaLaunchPane(file, owner) {
     const record = readReplicaWork(file);
-    if (!record.worktree || record.worktree.paneId !== owner.paneId)
+    if ((record.mode === "shared" ? record.sharedPane : record.worktree?.paneId) !== owner.paneId)
         throw new Error("Launch ownership does not match the replica pane.");
     if (record.launchPane) {
         if (!launchOwnsPane(record.launchPane, owner.paneId, owner.shellPid))
@@ -126,9 +138,10 @@ export function captureReplicaLaunchPane(file, owner) {
 /** Preserve the launch workspace's process incarnation even if the session later teleports. */
 export function captureReplicaWorkLocation(file, location) {
     const record = readReplicaWork(file);
-    if (record.worktreeLocation || !record.worktree || location.paneId !== record.worktree.paneId)
-        return;
-    if (realpathSync(location.cwd) !== realpathSync(record.worktree.path))
+    const pane = record.mode === "shared" ? record.sharedPane : record.worktree?.paneId;
+    const cwd = record.mode === "shared" ? record.sharedCwd : record.worktree?.path;
+    if (record.worktreeLocation || !pane || !cwd || location.paneId !== pane) return;
+    if (realpathSync(location.cwd) !== realpathSync(cwd))
         return;
     writeBindingFile(file, { ...record, worktreeLocation: location });
 }
@@ -155,6 +168,14 @@ export function checkpointReplicaCompletion(file, cwd, sessionFile, completion) 
     }
     catch (error) {
         record = { ...record, sessionCheckpointError: String(error) };
+    }
+    if (record.mode === "shared") {
+        const failed = completion.exitCode !== 0 || !!completion.error || !!completion.errorMessage || !completion.summary.trim();
+        record = { ...record, sessionFile, completion, integration: failed
+            ? { status: "not-attempted", details: "The task failed; changes may already be present in the shared directory." }
+            : { status: "shared" } };
+        writeBindingFile(file, record);
+        return record;
     }
     try {
         const checkpoint = snapshotSource(cwd, join(file + ".artifacts", "source"));
@@ -217,8 +238,25 @@ export function joinReplicaWork(file, parentCwd, parentActive = () => true) {
 /** Close an owned settled pane; remove its checkout only after safe integration. */
 export function cleanupReplicaWork(file, parentCwd) {
     const record = readReplicaWork(file), worktree = record.worktree;
-    if (record.cleaned || !worktree)
+    if (record.cleaned) return true;
+    if (record.mode === "shared") {
+        if (!record.sharedPane) return true;
+        if (record.worktreeLocation && sessionLocationAlive(record.worktreeLocation)) return false;
+        let info;
+        try { info = getHerdrPaneProcessInfo(record.sharedPane); }
+        catch (error) {
+            if (/pane_not_found|pane.*not found/i.test(String(error))) { writeBindingFile(file, { ...record, cleaned: true }); return true; }
+            throw error;
+        }
+        const owned = record.worktreeLocation
+            ? sessionOwnsPane(record.worktreeLocation, record.sharedPane, info.shellPid)
+            : !!record.launchPane && launchOwnsPane(record.launchPane, record.sharedPane, info.shellPid);
+        if (!owned || info.pids.some(pid => pid !== info.shellPid)) return false;
+        closeHerdrSurface(record.sharedPane);
+        writeBindingFile(file, { ...record, cleaned: true });
         return true;
+    }
+    if (!worktree) return true;
     const removeWorktree = record.integration.status === "applied";
     const matches = listHerdrWorktrees(parentCwd).filter((entry) => entry.path === worktree.path && entry.branch === worktree.branch && entry.isLinkedWorktree);
     if (matches.length > 1)

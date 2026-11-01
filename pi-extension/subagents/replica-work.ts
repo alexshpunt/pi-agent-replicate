@@ -26,9 +26,13 @@ export interface ReplicaWork {
 	version: 1;
 	id: string;
 	parentSessionId: string;
-	fork: SourceSnapshot;
+	mode?: "worktree" | "shared";
+	/** Launch directory and pane for shared replicas. */
+	sharedCwd?: string;
+	sharedPane?: string;
+	fork?: SourceSnapshot;
 	/** Original fork basis for outstanding work, or the last already-integrated checkpoint. */
-	joinBase: string;
+	joinBase?: string;
 	worktree?: WorktreeLaunch;
 	sessionFile?: string;
 	/** Durable JSONL copy outside the disposable checkout. */
@@ -42,7 +46,7 @@ export interface ReplicaWork {
 	checkpointError?: string;
 	completion?: ReplicaCompletion;
 	joinPlan?: SourceJoinReady;
-	integration: { status: "pending" | "applied" | "conflict" | "blocked" | "not-attempted"; details?: string };
+	integration: { status: "pending" | "applied" | "shared" | "conflict" | "blocked" | "not-attempted"; details?: string };
 	cleaned?: boolean;
 	/** The next attempt in this continuation; completed chains resolve to their latest state. */
 	continuationAttempt?: string;
@@ -64,7 +68,7 @@ export function replicaWorkFile(storeDir: string, id: string): string {
 /** Load known ownership; missing or malformed records are never guessed recoverable. */
 export function readReplicaWork(file: string): ReplicaWork {
 	const value = JSON.parse(readFileSync(file, "utf8")) as ReplicaWork;
-	if (value.version !== 1 || !value.id || !value.parentSessionId || !value.fork?.commit || !value.joinBase || !value.integration ||
+	if (value.version !== 1 || !value.id || !value.parentSessionId || !value.integration || (value.mode === "shared" ? !value.sharedCwd : ((value.mode != null && value.mode !== "worktree") || !value.fork?.commit || !value.joinBase)) ||
 		(value.continuationOwner && (!Number.isInteger(value.continuationOwner.pid) || value.continuationOwner.pid <= 0 || (value.continuationOwner.startTime != null && typeof value.continuationOwner.startTime !== "string")))) throw new Error("Invalid replica work record.");
 	return value;
 }
@@ -73,6 +77,19 @@ export function readReplicaWork(file: string): ReplicaWork {
 export function createReplicaWork(file: string, id: string, parentSessionId: string, fork: SourceSnapshot, joinBase = fork.commit): void {
 	if (existsSync(file)) throw new Error("Replica work identity already exists.");
 	writeBindingFile(file, { version: 1, id, parentSessionId, fork, joinBase, integration: { status: "pending" } } satisfies ReplicaWork);
+}
+
+/** Record a shared attempt without creating a Git snapshot or branch. */
+export function createSharedReplicaWork(file: string, id: string, parentSessionId: string, cwd: string): void {
+	if (existsSync(file)) throw new Error("Replica work identity already exists.");
+	writeBindingFile(file, { version: 1, id, parentSessionId, mode: "shared", sharedCwd: cwd, integration: { status: "pending" } } satisfies ReplicaWork);
+}
+
+/** Persist the allocated shared pane before dispatch. */
+export function attachSharedReplicaPane(file: string, pane: string, sessionFile?: string): void {
+	const record = readReplicaWork(file);
+	if (record.mode !== "shared" || (record.sharedPane && record.sharedPane !== pane)) throw new Error("Invalid shared replica pane.");
+	writeBindingFile(file, { ...record, sharedPane: pane, ...(sessionFile ? { sessionFile } : {}) });
 }
 
 /** Reserve the latest settled attempt for its exact immediate parent. */
@@ -125,7 +142,8 @@ export function saveReplicaRuntime(file: string, runtime: NonNullable<ReplicaWor
 
 /** Preserve failed allocation facts and release a reservation without discarding evidence. */
 export function failReplicaLaunch(file: string, error: unknown, toolCallId?: string): void {
-	writeBindingFile(file, { ...readReplicaWork(file), launchError: String(error), ...(toolCallId ? { launchErrorToolCallId: toolCallId } : {}), integration: { status: "not-attempted", details: "Launch failed; saved work was not applied." } });
+	const record = readReplicaWork(file);
+	writeBindingFile(file, { ...record, launchError: String(error), ...(toolCallId ? { launchErrorToolCallId: toolCallId } : {}), integration: { status: "not-attempted", details: record.mode === "shared" ? "Launch failed; changes may already be present in the shared directory." : "Launch failed; saved work was not applied." } });
 }
 
 /** A persisted native tool error already delivered this pre-acknowledgement failure. */
@@ -153,7 +171,7 @@ export function attachReplicaWork(file: string, worktree: WorktreeLaunch, sessio
 /** Save launch ownership before the child can fail during extension loading. */
 export function captureReplicaLaunchPane(file: string, owner: LaunchPaneOwnership): void {
 	const record = readReplicaWork(file);
-	if (!record.worktree || record.worktree.paneId !== owner.paneId) throw new Error("Launch ownership does not match the replica pane.");
+	if ((record.mode === "shared" ? record.sharedPane : record.worktree?.paneId) !== owner.paneId) throw new Error("Launch ownership does not match the replica pane.");
 	if (record.launchPane) {
 		if (!launchOwnsPane(record.launchPane, owner.paneId, owner.shellPid)) throw new Error("Replica launch shell incarnation changed.");
 		return;
@@ -164,8 +182,10 @@ export function captureReplicaLaunchPane(file: string, owner: LaunchPaneOwnershi
 /** Preserve the launch workspace's process incarnation even if the session later teleports. */
 export function captureReplicaWorkLocation(file: string, location: SessionLocation): void {
 	const record = readReplicaWork(file);
-	if (record.worktreeLocation || !record.worktree || location.paneId !== record.worktree.paneId) return;
-	if (realpathSync(location.cwd) !== realpathSync(record.worktree.path)) return;
+	const pane = record.mode === "shared" ? record.sharedPane : record.worktree?.paneId;
+	const cwd = record.mode === "shared" ? record.sharedCwd : record.worktree?.path;
+	if (record.worktreeLocation || !pane || !cwd || location.paneId !== pane) return;
+	if (realpathSync(location.cwd) !== realpathSync(cwd)) return;
 	writeBindingFile(file, { ...record, worktreeLocation: location });
 }
 
@@ -186,9 +206,17 @@ export function checkpointReplicaCompletion(file: string, cwd: string, sessionFi
 	} catch (error) {
 		record = { ...record, sessionCheckpointError: String(error) };
 	}
+	if (record.mode === "shared") {
+		const failed = completion.exitCode !== 0 || !!completion.error || !!completion.errorMessage || !completion.summary.trim();
+		record = { ...record, sessionFile, completion, integration: failed
+			? { status: "not-attempted", details: "The task failed; changes may already be present in the shared directory." }
+			: { status: "shared" } };
+		writeBindingFile(file, record);
+		return record;
+	}
 	try {
 		const checkpoint = snapshotSource(cwd, join(file + ".artifacts", "source"));
-		if (checkpoint.commonDir !== record.fork.commonDir) throw new Error("Replica moved outside its source repository.");
+		if (checkpoint.commonDir !== record.fork!.commonDir) throw new Error("Replica moved outside its source repository.");
 		record = { ...record, checkpoint };
 	} catch (error) {
 		record = { ...record, checkpointError: String(error) };
@@ -214,10 +242,10 @@ export function joinReplicaWork(file: string, parentCwd: string, parentActive: (
 	}
 	try {
 		const parent = snapshotSource(parentCwd, join(file + ".artifacts", "parent"));
-		if (parent.commonDir !== record.fork.commonDir) throw new Error("The parent is now in a different repository; saved work was not applied there.");
+		if (parent.commonDir !== record.fork!.commonDir) throw new Error("The parent is now in a different repository; saved work was not applied there.");
 		if (record.joinPlan && record.joinPlan.before.repoDir !== parent.repoDir) throw new Error("An interrupted join belongs to another parent checkout; its saved plan is retained.");
 		if (!record.joinPlan) {
-			const plan = planSourceJoin(parent.repoDir, record.joinBase, record.checkpoint.commit, join(file + ".artifacts", "join"));
+			const plan = planSourceJoin(parent.repoDir, record.joinBase!, record.checkpoint.commit, join(file + ".artifacts", "join"));
 			if (plan.status === "conflict") {
 				record = { ...record, integration: { status: "conflict", details: plan.details } };
 				writeBindingFile(file, record); return record;
@@ -239,7 +267,25 @@ export function joinReplicaWork(file: string, parentCwd: string, parentActive: (
 /** Close an owned settled pane; remove its checkout only after safe integration. */
 export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 	const record = readReplicaWork(file), worktree = record.worktree;
-	if (record.cleaned || !worktree) return true;
+	if (record.cleaned) return true;
+	if (record.mode === "shared") {
+		if (!record.sharedPane) return true;
+		if (record.worktreeLocation && sessionLocationAlive(record.worktreeLocation)) return false;
+		let info: ReturnType<typeof getHerdrPaneProcessInfo>;
+		try { info = getHerdrPaneProcessInfo(record.sharedPane); }
+		catch (error) {
+			if (/pane_not_found|pane.*not found/i.test(String(error))) { writeBindingFile(file, { ...record, cleaned: true }); return true; }
+			throw error;
+		}
+		const owned = record.worktreeLocation
+			? sessionOwnsPane(record.worktreeLocation, record.sharedPane, info.shellPid)
+			: !!record.launchPane && launchOwnsPane(record.launchPane, record.sharedPane, info.shellPid);
+		if (!owned || info.pids.some(pid => pid !== info.shellPid)) return false;
+		closeHerdrSurface(record.sharedPane);
+		writeBindingFile(file, { ...record, cleaned: true });
+		return true;
+	}
+	if (!worktree) return true;
 	const removeWorktree = record.integration.status === "applied";
 	const matches = listHerdrWorktrees(parentCwd).filter((entry) => entry.path === worktree.path && entry.branch === worktree.branch && entry.isLinkedWorktree);
 	if (matches.length > 1) throw new Error("Ambiguous replica worktree ownership.");

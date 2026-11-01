@@ -19,7 +19,7 @@ function execute(request: ReplicaBackgroundRequest): ReplicaBackgroundResult {
 	return withLineageMutationGate(request.file + ".artifacts", () => {
 		if (request.operation === "cleanup") {
 			const record = readReplicaWork(request.file);
-			if (record.worktree && request.surface !== record.worktree.paneId && request.child) {
+			if ((record.worktree?.paneId ?? record.sharedPane) && request.surface !== (record.worktree?.paneId ?? record.sharedPane) && request.child) {
 				const location = childSessionLocation(request.child.rootDir, request.child.nodeId);
 				if (location && sessionLocationAlive(location)) return { cleaned: false };
 				const info = getHerdrPaneProcessInfo(request.surface);
@@ -43,7 +43,7 @@ function execute(request: ReplicaBackgroundRequest): ReplicaBackgroundResult {
 			}
 		}
 		let work = checkpointReplicaCompletion(request.file, request.cwd, request.sessionFile, completion);
-		if (!failed && request.parent && sameParent(request.file, request.parent)) {
+		if (!failed && work.mode !== "shared" && request.parent && sameParent(request.file, request.parent)) {
 			// Different Pi incarnations and siblings share this gate, not just an in-memory queue.
 			work = withLineageMutationGate(join(dirname(request.file), "joins", encodeURIComponent(work.parentSessionId)), () => {
 				if (!sameParent(request.file, request.parent!)) return work;

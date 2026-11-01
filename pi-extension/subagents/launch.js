@@ -11,7 +11,7 @@ import { HerdrWorktreeCreateError } from "./herdr.js";
 import { captureSessionBaseline, seedStandaloneSessionFile, seedSubagentSessionFile, seedReplicationSessionFile, } from "./session.js";
 import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, getPaneProcessInfo, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore, captureLaunchPaneOwnership } from "./session-binding.js";
-import { attachReplicaWork, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.js";
+import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.js";
 import { sourceRepositoryAnchor } from "./source-state.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
@@ -67,8 +67,9 @@ async function launchFreshPiSubagent(request, operations) {
             }
         }
         surface = prepareLaunchSurface(resolved, operations);
-        if (request.replication?.recordFile && surface.worktree) {
-            attachReplicaWork(request.replication.recordFile, surface.worktree);
+        if (request.replication?.recordFile) {
+            if (surface.worktree) attachReplicaWork(request.replication.recordFile, surface.worktree);
+            else attachSharedReplicaPane(request.replication.recordFile, surface.surface);
             captureLaunchSurface(resolved, surface, operations);
         }
         const session = prepareChildSession(resolved, surface);
@@ -123,6 +124,7 @@ async function launchFreshPiSubagent(request, operations) {
         // Publish recovery evidence before waiting on external shell startup.
         await confirmShellReady(session, operations, signal);
         captureLaunchSurface(resolved, surface, operations);
+        if (request.replication?.recordFile && !surface.worktree && !resolved.launchPane) throw new Error("Cannot verify shared replica pane ownership.");
         if (signal.aborted)
             throw new Error("subagent launch aborted");
         const command = buildPiCommand(resolved, artifacts);
@@ -138,10 +140,11 @@ async function launchFreshPiSubagent(request, operations) {
             catch { /* Preserve the original launch failure. */ }
         }
         if (surface && !surface.worktree) {
-            try {
-                operations.closePane?.(surface.surface);
+            if (request.replication?.recordFile) {
+                try { captureLaunchSurface(resolved, surface, operations); cleanupReplicaWork(request.replication.recordFile, resolved.sourceCwd); } catch { /* Unknown ownership stays recoverable. */ }
+            } else {
+                try { operations.closePane?.(surface.surface); } catch { /* best effort */ }
             }
-            catch { /* best effort */ }
         }
         if (!surface?.worktree)
             throw error;
@@ -168,7 +171,7 @@ async function launchFreshPiSubagent(request, operations) {
 /** Record the shell before dispatch; child startup may never reach session_start. */
 function captureLaunchSurface(resolved, surface, operations) {
     const file = resolved.request.replication?.recordFile;
-    if (!file || !surface.worktree || !operations.getPaneProcessInfo)
+    if (!file || !operations.getPaneProcessInfo)
         return;
     let shellPid;
     try {
@@ -299,6 +302,8 @@ function prepareChildSession(resolved, surface) {
         writeWorktreeManifest(surface.worktree.manifestFile, { sessionFile });
         if (resolved.request.replication?.recordFile)
             attachReplicaWork(resolved.request.replication.recordFile, surface.worktree, sessionFile);
+    } else if (resolved.request.replication?.recordFile) {
+        attachSharedReplicaPane(resolved.request.replication.recordFile, surface.surface, sessionFile);
     }
     const activityFile = getSubagentActivityFile(resolved.artifactDir, resolved.id);
     const settledEventsFile = getSubagentSettledEventsFile(resolved.artifactDir, resolved.id);

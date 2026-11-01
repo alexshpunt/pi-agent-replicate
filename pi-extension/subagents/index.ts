@@ -36,12 +36,13 @@ import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
 import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { readReplicaDirectoryMode, registerReplicaDirectoryCommand } from "./replica-directory-settings.ts";
 import { snapshotSource } from "./source-state.ts";
 import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
 import { runReplicaBackground } from "./replica-background.ts";
 import { reserveReplicaBranch } from "./replica-branch.ts";
 import { getHerdrCurrentPaneTitle, readHerdrScreenAsync } from "./herdr.ts";
-import { replicaWorkFile, createReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, replicaLaunchFailureReported, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
+import { replicaWorkFile, createReplicaWork, createSharedReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, replicaLaunchFailureReported, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive, launchOwnsPane, type LaunchPaneOwnership } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
@@ -902,7 +903,7 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
   const sessionFile = ctx?.sessionManager.getSessionFile();
   const parent = sessionFile ? parentSessionLocation(sessionBindingStore(sessionFile), ctx!.sessionManager.getSessionId()) : undefined;
   const { work } = await runReplicaBackground({
-    operation: "complete", file: recordFile, cwd: location?.cwd ?? running.worktree!.path,
+    operation: "complete", file: recordFile, cwd: location?.cwd ?? running.worktree?.path ?? readReplicaWork(recordFile).sharedCwd!,
     sessionFile: running.sessionFile, completion, parent,
   });
   if (!work?.completion) throw new Error("Replica worker returned no saved completion.");
@@ -919,7 +920,8 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
     ? `Textual answer history: ${saved.historyPath}`
     : `Textual answer history unavailable: ${saved.historyError ?? "No saved history."}`;
   let summary = failed ? [`Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}`, saved.summary.trim(), history].filter(Boolean).join("\n\n") : saved.summary;
-  const report = work.integration.status === "applied" ? ""
+  const report = work.mode === "shared" ? (failed ? "The copy worked in the shared directory; partial changes may already be present." : "")
+    : work.integration.status === "applied" ? ""
     : work.integration.status === "conflict"
       ? "The copy finished, but its changes conflict with your current work and were not included."
       : work.integration.status === "not-attempted"
@@ -1049,7 +1051,7 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         if (reported) {
           acknowledgeFailedLaunch(running, savedWork.launchError);
           continue;
-        } else if (!running.worktree) {
+        } else if (!running.worktree && savedWork.mode !== "shared") {
           const summary = `Replica failed during launch: ${savedWork.launchError}`;
           queueTerminalDelivery(running, undefined, () => {
             if (runtime.pi) sendSubagentResult(runtime.pi, summary, {
@@ -3163,6 +3165,7 @@ function installSubagentRuntime(pi: ExtensionAPI) {
 
 /** Register fresh replication while retaining internal launch and delivery APIs. */
 export default function subagentsExtension(pi: ExtensionAPI) {
+	registerReplicaDirectoryCommand(pi);
 	// Discard the old disclosure handle on reload; in-flight watchers may still use it.
 	delete (runtime as SubagentRuntime & { replicateTool?: unknown }).replicateTool;
 	registerReplicateTool(pi, async (params, ctx, toolCallId) => {
@@ -3181,15 +3184,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		const name = replicationName(params.name, pi, ctx, getHerdrCurrentPaneTitle);
 		const recordFile = replicaWorkFile(sessionBindingStore(file), id);
 		try {
-			const source = snapshotSource(ctx.cwd, join(recordFile + ".artifacts", "fork"));
+			const mode = readReplicaDirectoryMode(ctx.cwd);
+			const source = mode === "worktree" ? snapshotSource(ctx.cwd, join(recordFile + ".artifacts", "fork")) : undefined;
 			const inherited = { systemPrompt: snapshot.systemPrompt, extensionArgs: snapshot.extensionArgs, provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel(), tools: pi.getActiveTools() };
-			createReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), source);
+			if (source) createReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), source);
+			else createSharedReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), ctx.cwd);
 			saveReplicaRuntime(recordFile, inherited);
 			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
 			const child = await launchPiSubagent({
 				kind: "fresh", id, name, task: replicationAssignment(params.task), executionOwner,
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
-				worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit },
+				...(source ? { worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit } } : {}),
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
 				behavior: { tools: inherited.tools.join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
 			});
