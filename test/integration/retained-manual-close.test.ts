@@ -27,11 +27,12 @@ for (const backend of getAvailableBackends()) {
 		it("cancels a manually closed child once without attempting recovery", async () => {
 			const original = join(env.dir, "manual-close-parent.jsonl");
 			const witness = join(env.dir, "manual-close-launch.json");
+			const parentIdle = join(env.dir, "parent-idle-after-result");
 			const bridge = join(env.dir, "manual-close-fixture.ts");
 			const source = new URL("../../pi-extension/subagents/index.ts", import.meta.url).pathname;
 			// Exercise the retained launcher internally without registering a model-facing tool.
 			writeFileSync(bridge, `import {__test__} from ${JSON.stringify(source)};import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
-export default function(pi){pi.on('session_start',async (_event,ctx)=>{if(process.env.PI_SUBAGENT_ID)return;const file=${JSON.stringify(witness)};if(!existsSync(file)){const running=await __test__.launchSubagent({name:'manual-close-child',task:'INTEGRATION_HOLD_QUIET_ONCE'},ctx,pi.getThinkingLevel());__test__.startRecoveredWatcher(running);writeFileSync(file,JSON.stringify({id:running.id,sessionFile:running.sessionFile,rootDir:running.lineage.rootDir}));}appendFileSync(file+'.starts','start\\n');});}`);
+export default function(pi){pi.on('session_start',async (_event,ctx)=>{if(process.env.PI_SUBAGENT_ID)return;const file=${JSON.stringify(witness)};if(!existsSync(file)){const running=await __test__.launchSubagent({name:'manual-close-child',task:'INTEGRATION_HOLD_QUIET_ONCE'},ctx,pi.getThinkingLevel());__test__.startRecoveredWatcher(running);writeFileSync(file,JSON.stringify({id:running.id,sessionFile:running.sessionFile,rootDir:running.lineage.rootDir}));}appendFileSync(file+'.starts','start\\n');});pi.on('agent_end',(_event,ctx)=>{if(process.env.PI_SUBAGENT_ID||!ctx.sessionManager.getBranch().some(e=>e.type==='custom_message'&&e.customType==='subagent_result'))return;const timer=setInterval(()=>{if(ctx.isIdle()){writeFileSync(${JSON.stringify(parentIdle)},'idle');clearInterval(timer);}},20);timer.unref();});}`);
 			const parent = createTrackedSurface(env, "manual-close-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, "Return exactly MANUAL_CLOSE_PARENT_READY", {
@@ -61,6 +62,7 @@ export default function(pi){pi.on('session_start',async (_event,ctx)=>{if(proces
 			assert.ok(events.some(event => event.nodeId === launched.id && event.type === "cancel_intent" && event.source === "user_tab_close"));
 			const ledger = () => records(join(launched.rootDir, "subagent-delivery.log"));
 			assert.equal(ledger().filter(event => event.childId === launched.id && event.event === "recovery-attempt").length, 0);
+			await until(() => existsSync(parentIdle), "parent finishes responding to the cancellation before reload");
 			// Reload restoration must neither replay the cancellation nor start a recovery.
 			runInPane(parent, "/reload");
 			await until(() => existsSync(witness + ".starts") && readFileSync(witness + ".starts", "utf8").trim().split("\n").length === 2, "parent reload finishes");
