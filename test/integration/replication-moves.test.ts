@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
@@ -19,17 +19,26 @@ async function waitUntil(check: () => boolean, explanation: string): Promise<voi
 	assert.fail(explanation);
 }
 const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
+function installTeleport(agentDir: string): void {
+	assert.ok(teleportSource);
+	const file = join(agentDir, "settings.json");
+	const settings = JSON.parse(readFileSync(file, "utf8"));
+	settings.extensions = [...(settings.extensions ?? []), teleportSource];
+	writeFileSync(file, JSON.stringify(settings));
+}
 for (const backend of getAvailableBackends()) {
 	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 5 }, () => {
 		let env: TestEnv;
-		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
-		afterEach(async () => { await cleanupTestEnv(env); });
+		let originalSettings: string | undefined;
+		const settingsFile = join(process.env.PI_INTEGRATION_HERDR_AGENT_DIR!, "settings.json");
+		beforeEach(() => { originalSettings = existsSync(settingsFile) ? readFileSync(settingsFile, "utf8") : undefined; resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
+		afterEach(async () => { try { await cleanupTestEnv(env); } finally { if (originalSettings === undefined) rmSync(settingsFile, { force: true }); else writeFileSync(settingsFile, originalSettings); } });
 		for (const handoff of ["move", "restart"]) {
 			it(`recovers held background checkpoint after parent ${handoff}`, { skip: handoff === "move" && !teleportSource }, async () => {
 				const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR!;
 				assert.ok(agentDir);
 				cpSync(join(env.dir, ".pi", "agent"), agentDir, { recursive: true });
-				if (handoff === "move") symlinkSync(teleportSource!, join(agentDir, "extensions", "teleport-under-test.ts"));
+				if (handoff === "move") installTeleport(agentDir);
 				const state = join(env.dir, ".pi", "agent", "held-completion"), original = join(state, "original.jsonl");
 				mkdirSync(state); const bin = join(state, "bin"); mkdirSync(bin);
 				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release");
@@ -38,7 +47,7 @@ for (const backend of getAvailableBackends()) {
 				const capability = join(env.dir, "held-capability.ts");
 				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
-				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))}` : ""}` });
+				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)}` });
 				try { await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready"); }
 				catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly HELD_SUMMARY"');
@@ -165,15 +174,15 @@ for (const backend of getAvailableBackends()) {
 		it("drains nested copies through real Teleport and replays the direct result only to its reopened original", { skip: !teleportSource }, async () => {
 			assert.ok(teleportSource && existsSync(teleportSource));
 			const agentDir = join(env.dir, ".pi", "agent");
-			symlinkSync(teleportSource, join(agentDir, "extensions", "teleport-under-test.ts"));
 			assert.ok(process.env.PI_INTEGRATION_HERDR_AGENT_DIR);
 			cpSync(agentDir, process.env.PI_INTEGRATION_HERDR_AGENT_DIR, { recursive: true });
+			installTeleport(process.env.PI_INTEGRATION_HERDR_AGENT_DIR);
 			const original = join(env.dir, "original.jsonl"), gate = join(env.dir, "grandchild-gate");
 			const capability = join(env.dir, "nested-capability.ts");
 			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write nested source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'nested.txt'),'GRANDCHILD_SOURCE');return {content:[{type:'text',text:'nested source written'}],details:{}}}});}\n`);
 			const parent = createTrackedSurface(env, "nested-original");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))} -e ${shellQuote(capability)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
+			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
 			const nodes = () => {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap((root) => [...reduceLineage(root).nodes.values()]) : [];
