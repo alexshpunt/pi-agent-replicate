@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -212,6 +213,80 @@ globalThis.fetch = async (_url, options) => {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+function runGithubRelease(script: string, options: { version: string; notes?: string; existing?: boolean; failCreate?: boolean }) {
+  const dir = mkdtempSync(join(tmpdir(), "pi-release-notes-"));
+  const bin = join(dir, "bin"), calls = join(dir, "calls.jsonl"), captured = join(dir, "captured-notes");
+  mkdirSync(bin);
+  const notesDir = join(dir, ".github", "release-notes");
+  mkdirSync(notesDir, { recursive: true });
+  // A different version's notes must never be selected.
+  writeFileSync(join(notesDir, "9.9.9.md"), "other version");
+  if (options.notes !== undefined) writeFileSync(join(notesDir, `${options.version}.md`), options.notes);
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
+const { appendFileSync, readFileSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+appendFileSync(process.env.CALLS, JSON.stringify(args) + '\\n');
+if (args[0] === 'release' && args[1] === 'view') process.exit(process.env.EXISTING === '1' ? 0 : 1);
+if (args[0] === 'release' && args[1] === 'create') {
+  const i = args.indexOf('--notes-file');
+  if (i >= 0) writeFileSync(process.env.CAPTURED, readFileSync(args[i + 1]));
+  process.exit(process.env.FAIL_CREATE === '1' ? 1 : 0);
+}
+process.exit(2);
+`, { mode: 0o755 });
+  let error: unknown;
+  try {
+    try {
+      execFileSync("bash", ["-e", "-o", "pipefail", "-c", script], {
+        cwd: dir,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALLS: calls, CAPTURED: captured,
+          EXISTING: options.existing ? "1" : "0", FAIL_CREATE: options.failCreate ? "1" : "0",
+          TAG: `v${options.version}`, VERSION: options.version, PACKAGE_NAME: "fixture-package" },
+        stdio: "pipe",
+      });
+    } catch (caught) { error = caught; }
+    return {
+      error,
+      calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : [],
+      captured: existsSync(captured) ? readFileSync(captured, "utf8") : undefined,
+    };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("GitHub release uses version-specific approved notes and preserves retries", async () => {
+  const workflow = await readFile(".github/workflows/publish.yml", "utf8");
+  const script = extractStepRun(workflow, "Create GitHub release");
+  const approved = "# Fixture release\n\nApproved fixture content.\n";
+  const chosen = runGithubRelease(script, { version: "2.4.1", notes: approved });
+  assert.equal(chosen.error, undefined);
+  assert.equal(chosen.calls.length, 2);
+  assert.deepEqual(chosen.calls[0], ["release", "view", "v2.4.1"]);
+  const created = chosen.calls[1];
+  assert.deepEqual(created.slice(0, 3), ["release", "create", "v2.4.1"]);
+  assert.ok(created.includes("--verify-tag"));
+  assert.equal(created[created.indexOf("--notes-file") + 1], ".github/release-notes/2.4.1.md");
+  assert.equal(created.includes("--generate-notes"), false);
+  assert.equal(chosen.captured, approved);
+
+  const fallback = runGithubRelease(script, { version: "2.4.2" });
+  assert.equal(fallback.error, undefined);
+  assert.equal(fallback.calls.length, 2);
+  assert.ok(fallback.calls[1].includes("--generate-notes"));
+  assert.equal(fallback.calls[1].includes("--notes-file"), false);
+
+  const existing = runGithubRelease(script, { version: "2.4.1", notes: approved, existing: true });
+  assert.equal(existing.error, undefined);
+  assert.deepEqual(existing.calls, [["release", "view", "v2.4.1"]]);
+
+  const empty = runGithubRelease(script, { version: "2.4.1", notes: "" });
+  assert.ok(empty.error, "empty approved notes must fail closed");
+  assert.deepEqual(empty.calls, [["release", "view", "v2.4.1"]]);
+
+  const failed = runGithubRelease(script, { version: "2.4.1", notes: approved, failCreate: true });
+  assert.ok(failed.error, "release creation failures must propagate");
+  assert.equal(failed.calls.length, 2);
+});
 
 test("release workflow uses package.json identity and trusted publishing", async () => {
   const workflow = await readFile(".github/workflows/publish.yml", "utf8");
