@@ -173,7 +173,8 @@ for (const backend of getAvailableBackends()) {
 				'name: "autonomous-mobile"',
 				`task: ${JSON.stringify(`Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"\nAfter the move, Return exactly AUTONOMOUS_MOVED_ANSWER`)}`,
 			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(teleportWrapper)}` });
-			await waitUntil(() => results(original).length === 1, `moved autonomous child must finish: ${readPane(parent, 250)}`, 40_000);
+			try { await waitUntil(() => results(original).length === 1, "moved autonomous child must finish", 40_000); }
+			catch (error) { assert.fail(`${error}\n${readPane(parent, 250)}\n${JSON.stringify(ownedNodes(original))}`); }
 			const node = ownedNodes(original)[0];
 			const binding = readSessionBinding(original)!;
 			const root = sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
