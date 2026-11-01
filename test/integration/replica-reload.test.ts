@@ -53,9 +53,9 @@ for (const backend of getAvailableBackends()) {
 			const capability = join(env.dir, "reload-capability.ts");
 			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
 			const probe = new URL("./fixtures/reload-probe.ts", import.meta.url).pathname;
-			writeFileSync(capability, `import {Type} from ${JSON.stringify(typebox)};import {existsSync,readFileSync,rmSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
+			writeFileSync(capability, `import {Type} from ${JSON.stringify(typebox)};import {appendFileSync,existsSync,readFileSync,rmSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
 export default function(pi){
- pi.on('session_start',(_event,ctx)=>{const file=${JSON.stringify(witness)};const all=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{};const id=ctx.sessionManager.getSessionId();all[id]={starts:(all[id]?.starts??0)+1,pid:process.pid};writeFileSync(file,JSON.stringify(all));});
+ pi.on('session_start',(_event,ctx)=>{appendFileSync(${JSON.stringify(witness)},JSON.stringify({id:ctx.sessionManager.getSessionId(),pid:process.pid})+'\\n');});
  pi.on('agent_settled',(_event,ctx)=>{if(!process.env.PI_SUBAGENT_ID)writeFileSync(${JSON.stringify(witness + '.settled')},String(ctx.sessionManager.getEntries().filter(row=>row.customType==='subagent_result').length));});
  pi.on('session_shutdown',async event=>{const armed=${JSON.stringify(witness + '.hold')};if(process.env.PI_SUBAGENT_ID||event.reason!=='reload'||!existsSync(armed))return;const owner=readFileSync(armed,'utf8');rmSync(armed);writeFileSync(${JSON.stringify(gate)},'release');const end=Date.now()+15000;while(!existsSync(owner+'.exit')&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,25));if(!existsSync(owner+'.exit'))throw Error('owner did not finish during parent reload');writeFileSync(${JSON.stringify(witness + '.completed-during-reload')},owner);});
  pi.registerTool({name:'replication_probe',label:'Probe',description:'Save descendant source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'descendant.txt'),'RELOADED_DESCENDANT_SOURCE');return {content:[{type:'text',text:'source saved'}],details:{}};}});
@@ -82,7 +82,7 @@ export default function(pi){
 				const binding = readSessionBinding(ownerFile)!;
 				const location = () => childSessionLocation(binding.child!.lineage.rootDir, owner.nodeId)!;
 				const before = location();
-				const starts = () => JSON.parse(readFileSync(witness, "utf8"));
+				const starts = () => entries(witness).reduce((all, row) => { all[row.id] = { starts: (all[row.id]?.starts ?? 0) + 1, pid: row.pid }; return all; }, {} as Record<string, { starts: number; pid: number }>);
 				runInPane(before.paneId!, startupProbe ? "/reload-probe" : "/reload");
 				await until(() => starts()[before.sessionId]?.starts === 2, "replica runtime reloaded");
 				if (startupProbe) {
