@@ -1,6 +1,6 @@
 {
   "name": "pi-agent-replicate",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "One Pi agent makes copies of itself to work on independent tasks in parallel",
   "keywords": [
     "pi-package",
