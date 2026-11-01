@@ -1,0 +1,11 @@
+{
+  "rootId": "incident-root",
+  "parentSessionId": "original-parent",
+  "parentSessionFile": "/fixture/original.jsonl",
+  "launchKind": "fresh",
+  "version": 1,
+  "eventId": "launch:original-child",
+  "type": "launch",
+  "nodeId": "original-child",
+  "at": 1
+}
