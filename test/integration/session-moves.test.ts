@@ -164,20 +164,17 @@ for (const backend of getAvailableBackends()) {
 		});
 
 		it("lets an autonomous child finish in its Teleport destination, not during the source handoff", { skip: !teleportSource }, async () => {
-			installTeleport(env);
-			const role = join(env.dir, ".pi", "agents", "test-echo.md");
-			writeFileSync(role, readFileSync(role, "utf8").replace(/^tools:.*$/m, "tools: bash, teleport"));
+			const teleportWrapper = installTeleport(env);
 			const destination = join(env.dir, "autonomous-destination");
 			mkdirSync(destination);
 			const original = join(env.dir, "autonomous-parent.jsonl");
 			const parent = createTrackedSurface(env, "autonomous-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "autonomous-mobile"', 'agent: "test-echo"',
+				"Call the replicate tool once with these parameters:",
+				'name: "autonomous-mobile"',
 				`task: ${JSON.stringify(`Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"\nAfter the move, Return exactly AUTONOMOUS_MOVED_ANSWER`)}`,
-				"Do not do anything else. Just call the subagent tool once.",
-			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)}` });
+			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(teleportWrapper)}` });
 			await waitUntil(() => results(original).length === 1, `moved autonomous child must finish: ${readPane(parent, 250)}`, 40_000);
 			const node = ownedNodes(original)[0];
 			const binding = readSessionBinding(original)!;
