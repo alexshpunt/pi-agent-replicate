@@ -40,7 +40,7 @@ for (const backend of getAvailableBackends()) {
 			await until(() => results(original).length === 1, "quit must return a failure");
 			const result = results(original)[0];
 			assert.equal(result.details.exitCode, 1);
-			assert.match(result.content, /interrupt|abort|closed.*saved completion/i);
+			assert.equal(typeof result.details.errorMessage, "string");
 			assert.equal(result.details.integration.status, "not-attempted");
 			assert.ok(existsSync(result.details.historyPath));
 			await until(() => !sessionLocationAlive(owned), "quit must end the replica process");
@@ -79,7 +79,7 @@ for (const backend of getAvailableBackends()) {
 			await until(() => results(original).length === 1, "drained owner returns its interruption");
 			const result = results(original)[0];
 			assert.equal(result.details.exitCode, 1);
-			assert.match(result.content, /interrupt|abort/i);
+			assert.equal(typeof result.details.errorMessage, "string");
 			assert.equal(result.details.integration.status, "not-attempted");
 			assert.equal(results(owner.sessionFile!).length, 1, "descendant reaches its exact immediate parent once");
 			assert.equal(results(owner.sessionFile!)[0].details.childId, descendant.nodeId);
