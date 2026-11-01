@@ -68,7 +68,7 @@ for (const backend of getAvailableBackends()) {
 			assert.ok(owner.sessionFile && descendant.sessionFile);
 			const binding = readSessionBinding(owner.sessionFile)!;
 			const location = () => childSessionLocation(binding.child!.lineage.rootDir, owner.nodeId);
-			await until(() => !!location() && getProviderRequests().some(request => request.messages.at(-1)?.role === "tool" && request.userText.includes("INTEGRATION_INTERRUPT_OWNER")), "owner model request remains active");
+			await until(() => !!location() && getProviderRequests().some(request => request.messages.at(-1)?.role === "tool" && request.userText.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && request.userText.includes("INTEGRATION_INTERRUPT_OWNER")), "owner model request remains active");
 			interruptPane(location()!.paneId!);
 			await until(() => entries(owner.sessionFile!).some(row => row.message?.role === "assistant" && row.message.stopReason === "aborted"), "owner interruption saved");
 			// This elapsed-time check proves that descendant drain is not a ten-second stop deadline.
