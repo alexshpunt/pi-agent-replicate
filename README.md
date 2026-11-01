@@ -9,7 +9,6 @@
 <div align="center">
 
 [![npm version](https://img.shields.io/npm/v/pi-agent-replicate)](https://www.npmjs.com/package/pi-agent-replicate)
-[![npm downloads](https://img.shields.io/npm/dm/pi-agent-replicate)](https://www.npmjs.com/package/pi-agent-replicate)
 [![MIT license](https://img.shields.io/npm/l/pi-agent-replicate)](./LICENSE)
 
 </div>
