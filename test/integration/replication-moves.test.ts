@@ -39,7 +39,8 @@ for (const backend of getAvailableBackends()) {
 				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
 				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))}` : ""}` });
-				await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready");
+				try { await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready"); }
+				catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly HELD_SUMMARY"');
 				await waitUntil(() => existsSync(started), "the actual background checkpoint must be held");
 				assert.equal(results(original).length, 0);
