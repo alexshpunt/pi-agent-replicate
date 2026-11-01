@@ -34,7 +34,7 @@ for (const backend of getAvailableBackends()) {
 				mkdirSync(state); const bin = join(state, "bin"); mkdirSync(bin);
 				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release");
 				const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-				writeFileSync(join(bin, "git"), `#!/bin/bash\nif test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<600;i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(git)} "$@"\n`, { mode: 0o700 });
+				writeFileSync(join(bin, "git"), `#!/bin/bash\nif test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<${Math.ceil(PI_TIMEOUT * 2 / 50)};i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(git)} "$@"\n`, { mode: 0o700 });
 				const capability = join(env.dir, "held-capability.ts");
 				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
