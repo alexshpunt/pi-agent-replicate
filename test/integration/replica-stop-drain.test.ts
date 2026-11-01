@@ -59,7 +59,10 @@ for (const backend of getAvailableBackends()) {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap(root => [...reduceLineage(root).nodes.values()]) : [];
 			};
-			await until(() => nodes().filter(node => node.replication).length === 2, "owner launches one descendant");
+			await until(() => {
+				const current = nodes().filter(node => node.replication);
+				return current.length === 2 && current.every(node => !!node.sessionFile);
+			}, "owner and descendant have registered their sessions");
 			const owner = nodes().find(node => !node.parentNodeId && node.replication)!;
 			const descendant = nodes().find(node => node.parentNodeId === owner.nodeId)!;
 			assert.ok(owner.sessionFile && descendant.sessionFile);

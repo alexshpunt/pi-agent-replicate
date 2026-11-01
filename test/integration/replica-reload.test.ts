@@ -56,6 +56,7 @@ for (const backend of getAvailableBackends()) {
 			writeFileSync(capability, `import {Type} from ${JSON.stringify(typebox)};import {existsSync,readFileSync,rmSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
 export default function(pi){
  pi.on('session_start',(_event,ctx)=>{const file=${JSON.stringify(witness)};const all=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{};const id=ctx.sessionManager.getSessionId();all[id]={starts:(all[id]?.starts??0)+1,pid:process.pid};writeFileSync(file,JSON.stringify(all));});
+ pi.on('agent_settled',(_event,ctx)=>{if(!process.env.PI_SUBAGENT_ID)writeFileSync(${JSON.stringify(witness + '.settled')},String(ctx.sessionManager.getEntries().filter(row=>row.customType==='subagent_result').length));});
  pi.on('session_shutdown',async event=>{const armed=${JSON.stringify(witness + '.hold')};if(process.env.PI_SUBAGENT_ID||event.reason!=='reload'||!existsSync(armed))return;const owner=readFileSync(armed,'utf8');rmSync(armed);writeFileSync(${JSON.stringify(gate)},'release');const end=Date.now()+15000;while(!existsSync(owner+'.exit')&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,25));if(!existsSync(owner+'.exit'))throw Error('owner did not finish during parent reload');writeFileSync(${JSON.stringify(witness + '.completed-during-reload')},owner);});
  pi.registerTool({name:'replication_probe',label:'Probe',description:'Save descendant source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'descendant.txt'),'RELOADED_DESCENDANT_SOURCE');return {content:[{type:'text',text:'source saved'}],details:{}};}});
 }
@@ -110,6 +111,7 @@ export default function(pi){
 				assert.equal(entries(ownerFile).filter(row => row.message?.role === "user" && JSON.stringify(row.message.content).includes("Your assignment:")).length, 1);
 				assert.equal(getProviderRequests().filter(request => request.userText.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && request.messages.at(-1)?.role !== "tool").length, 1, "reload does not repeat the assignment");
 				await until(() => !sessionLocationAlive(location()), "settled owner closes");
+				await until(() => existsSync(witness + ".settled") && readFileSync(witness + ".settled", "utf8") === "1", "parent finishes handling the result before reload");
 				const parentId = entries(original)[0].id;
 				const count = starts()[parentId].starts;
 				runInPane(parent, "/reload");
