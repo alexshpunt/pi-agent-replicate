@@ -1,6 +1,6 @@
 # Release guide
 
-GitHub Actions publishes this package when the version in `package.json` changes on `main`. The release workflow reads the package name and version from `package.json`, validates the package, publishes to npm, creates a matching `vX.Y.Z` tag, and creates a GitHub Release with generated notes and a link to the npm package.
+GitHub Actions publishes this package when the version in `package.json` changes on `main`. The release workflow reads the package name and version from `package.json`, validates the package, publishes to npm, creates a matching `vX.Y.Z` tag, and creates a GitHub Release. If `.github/release-notes/<version>.md` exists, the release uses that file. Otherwise GitHub generates the notes and adds the npm package link.
 
 The published version must be unique on npm.
 
@@ -72,6 +72,8 @@ Choose the semantic version increment:
 - `patch`: compatible bug fixes, such as `0.0.2` to `0.0.3`
 - `minor`: compatible features, such as `0.0.2` to `0.1.0`
 - `major`: breaking changes, such as `0.0.2` to `1.0.0`
+
+Save approved release notes as `.github/release-notes/<version>.md` and commit that file before the version commit. The workflow uses its contents verbatim for the matching release. An empty notes file stops release creation. Without a matching file, GitHub generates the release notes.
 
 Create the version commit without a local tag:
 
