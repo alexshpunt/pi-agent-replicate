@@ -170,7 +170,7 @@ for (const backend of getAvailableBackends()) {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap((root) => [...reduceLineage(root).nodes.values()]) : [];
 			};
-			try { await waitUntil(() => nodes().filter((node) => node.replication).length === 2, "one clone must launch one descendant"); } catch (error) { assert.fail(`${error}\n${JSON.stringify({ parent: entries(original).filter((row) => row.customType === "subagent_result" || row.message?.role === "toolResult"), children: nodes().map((node) => ({ id: node.nodeId, session: node.sessionFile ? entries(node.sessionFile).slice(-4) : [], screen: node.surface ? readPane(node.surface, 150) : "" })) })}`); }
+			try { await waitUntil(() => { const replicas = nodes().filter((node) => node.replication); return replicas.length === 2 && replicas.every((node) => !!node.sessionFile); }, "one clone and its descendant must register their sessions"); } catch (error) { assert.fail(`${error}\n${JSON.stringify({ parent: entries(original).filter((row) => row.customType === "subagent_result" || row.message?.role === "toolResult"), children: nodes().map((node) => ({ id: node.nodeId, session: node.sessionFile ? entries(node.sessionFile).slice(-4) : [], screen: node.surface ? readPane(node.surface, 150) : "" })) })}`); }
 			const owner = nodes().find((node) => node.task?.includes("Your assignment:\nREPLICATION_NESTED_OWNER"));
 			assert.ok(owner?.sessionFile && owner.surface);
 			const grandchild = nodes().find((node) => node.parentNodeId === owner.nodeId);
