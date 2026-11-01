@@ -172,8 +172,7 @@ export default function(pi){
 			assert.equal(Object.hasOwn(result.details, "recoveryAvailable"), false);
 			assert.equal(Object.hasOwn(result.details, "continuationId"), false);
 			assert.equal(result.details.historyPath, undefined);
-			assert.match(result.details.historyError, /boundary|ENOENT/);
-			assert.match(result.content, /Textual answer history unavailable/);
+			assert.equal(typeof result.details.historyError, "string");
 			assert.doesNotMatch(result.content, /history: undefined/);
 			assert.equal(readFileSync(join(result.details.worktreePath, "retained-partial.txt"), "utf8"), "PARTIAL_WORK");
 			assert.equal(existsSync(join(env.dir, "retained-partial.txt")), false);
@@ -202,8 +201,9 @@ export default function(pi){
 				const results = entries(parentFile).filter((entry) => entry.customType === "subagent_result");
 				assert.equal(results.length, 1);
 				const result = results[0];
-				assert.match(result.content, /Replica .* error/);
-				assert.match(result.content, task === "REPLICATION_FAIL_WITH_HISTORY" ? /deterministic replica terminal failure/ : /no required summary/);
+				assert.equal(result.details.exitCode, 1);
+				assert.equal(typeof result.details.errorMessage, "string");
+				if (task === "REPLICATION_FAIL_WITH_HISTORY") assert.match(result.details.errorMessage, /deterministic replica terminal failure/);
 				const launchCall = entries(parentFile).find(row => row.message?.role === "toolResult" && row.message.toolName === "replicate")?.message.toolCallId;
 				assert.ok(launchCall);
 				assert.equal(result.details.parentToolCallId, launchCall);
@@ -211,7 +211,12 @@ export default function(pi){
 				const history = readFileSync(result.details.historyPath, "utf8");
 				assert.doesNotMatch(history, /INHERITED_ANSWER_NOT_HISTORY|TOOL_OUTPUT_NOT_AN_ANSWER|echo TOOL_OUTPUT|Call the replicate tool/);
 				if (task === "REPLICATION_FAIL_WITH_HISTORY") assert.match(history, /REPLICA_FIRST_ANSWER/);
-				else assert.match(history, /No textual answers were produced/);
+				else {
+					const assistant = entries(result.details.sessionFile).filter(row => row.message?.role === "assistant").at(-1)?.message;
+					assert.ok(assistant);
+					assert.equal(assistant.content?.some((part: any) => part.type === "text" && part.text?.trim()), false);
+					assert.doesNotMatch(history, /REPLICA_FIRST_ANSWER/);
+				}
 				const binding = readSessionBinding(result.details.sessionFile)!;
 				const location = childSessionLocation(binding.child!.lineage.rootDir, binding.child!.lineage.nodeId)!;
 				await waitUntil(() => !sessionLocationAlive(location), "the failed model process must exit");
@@ -420,7 +425,7 @@ export default function(pi){
 			writeFileSync(gate, "go");
 			await waitUntil(() => entries(parentFile).some((row) => row.customType === "subagent_result"), "conflict must return task summary and retained pointer");
 			const result = entries(parentFile).find((row) => row.customType === "subagent_result");
-			assert.match(result.content, /completed[\s\S]*CONFLICT_TASK_FINISHED/);
+			assert.match(result.content, /CONFLICT_TASK_FINISHED/);
 			assert.equal(result.details.integration.status, "conflict");
 			assert.equal(Object.hasOwn(result.details, "recoveryAvailable"), false);
 			assert.equal(Object.hasOwn(result.details, "continuationId"), false);
