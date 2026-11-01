@@ -1,0 +1,28 @@
+{
+  "prompt": "Create a distinctive polished open-source coding agent project mascot illustration for a GitHub README. A single original friendly small robot with an expressive dark face screen and warm ivory ceramic body is RUNNING fast toward the right, splitting into three identical independent copies as it runs, like the duplication/afterimage power-up effect in a videogame. Show one main solid robot at the front and two fully formed identical robots fanning out behind in coherent running poses, with elegant luminous motion trails and overlapping translucent replication echoes. Communicate energetic parallel work and one agent multiplying, not a team of different robots. Confident tasteful editorial illustration, refined 3D-rendered toy with tactile materials, dynamic composition, crisp silhouette, warm orange/coral accent lights, deep midnight navy background, vivid but restrained. Wide landscape hero banner, robot grouping centered with generous safe margin, no border. Absolutely no text, no letters, no typography, no logo, no watermark, no brand references.",
+  "settings": {
+    "requested": {
+      "model": "gpt-image-2.5",
+      "background": "opaque",
+      "quality": "high",
+      "size": "1536x1024"
+    },
+    "reported": {
+      "size": "1774x887",
+      "quality": "low",
+      "background": "opaque"
+    },
+    "servedModel": "unknown",
+    "dimensions": {
+      "width": 1774,
+      "height": 887
+    },
+    "hasTransparency": false
+  },
+  "id": "ea52de83-1e84-4f07-969c-896defccd7cf",
+  "file": "image-ea52de83-1e84-4f07-969c-896defccd7cf.png",
+  "width": 1774,
+  "height": 887,
+  "sha256": "a2f23817cf175853ccaf676105949a556a04edb41ca76023f645bace95418bc4",
+  "created": "2026-11-01T07:34:31.243Z"
+}

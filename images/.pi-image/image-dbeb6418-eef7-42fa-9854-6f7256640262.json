@@ -1,0 +1,28 @@
+{
+  "prompt": "Create a polished hand-drawn cartoon-style transparent-background hero illustration and wordmark for an open-source project. Composition: a charming expressive small friendly robot mascot in motion, actively SPLITTING INTO TWO identical fully opaque robot copies that run diagonally in DIFFERENT directions (one upper right, one lower right), connected at the point of split by an elegant little branching sparkle / forked swoosh. Clearly show replication as branching, NOT afterimages, NOT robots following in a row. Same character design, off-white/cream body, warm orange and coral accents, charcoal outlines, expressive eyes, playful human energy. Modern editorial cartoon / hand-inked vector-like illustration with soft cel shading, tactile hand-drawn contours, restrained vivid colors. No photorealism, no 3D rendering. Transparent background everywhere outside illustration and lettering; no checkerboard, no rectangular backdrop, no landscape, no shadows across canvas. Balanced landscape layout with artwork left and legible designed wordmark on right. The exact text is: 'PiAgent Replicate' and beneath it in smaller readable type: 'One agent. Parallel work.' Render spelling precisely. Avoid any other letters, marks or logos. Keep every element safely inside canvas with generous margins. The illustration must work on both white and dark GitHub README backgrounds, via subtle light/dark outlines.",
+  "settings": {
+    "requested": {
+      "model": "gpt-image-2.5",
+      "background": "transparent",
+      "quality": "high",
+      "size": "1536x1024"
+    },
+    "reported": {
+      "size": "1774x887",
+      "quality": "medium",
+      "background": "transparent"
+    },
+    "servedModel": "unknown",
+    "dimensions": {
+      "width": 1774,
+      "height": 887
+    },
+    "hasTransparency": true
+  },
+  "id": "dbeb6418-eef7-42fa-9854-6f7256640262",
+  "file": "image-dbeb6418-eef7-42fa-9854-6f7256640262.png",
+  "width": 1774,
+  "height": 887,
+  "sha256": "ba4b1dca88be468b44351427fac1e50c23029fe2b7743e447478e1421327e94e",
+  "created": "2026-11-01T07:46:43.525Z"
+}
