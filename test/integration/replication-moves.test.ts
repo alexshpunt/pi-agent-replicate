@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
@@ -29,7 +29,7 @@ for (const backend of getAvailableBackends()) {
 				const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR!;
 				assert.ok(agentDir);
 				cpSync(join(env.dir, ".pi", "agent"), agentDir, { recursive: true });
-				if (handoff === "move") writeFileSync(join(agentDir, "extensions", "teleport-under-test.ts"), `export {default} from ${JSON.stringify(teleportSource)};\n`);
+				if (handoff === "move") symlinkSync(teleportSource!, join(agentDir, "extensions", "teleport-under-test.ts"));
 				const state = join(env.dir, ".pi", "agent", "held-completion"), original = join(state, "original.jsonl");
 				mkdirSync(state); const bin = join(state, "bin"); mkdirSync(bin);
 				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release");
@@ -164,7 +164,7 @@ for (const backend of getAvailableBackends()) {
 		it("drains nested copies through real Teleport and replays the direct result only to its reopened original", { skip: !teleportSource }, async () => {
 			assert.ok(teleportSource && existsSync(teleportSource));
 			const agentDir = join(env.dir, ".pi", "agent");
-			writeFileSync(join(agentDir, "extensions", "teleport-under-test.ts"), `export { default } from ${JSON.stringify(teleportSource)};\n`);
+			symlinkSync(teleportSource, join(agentDir, "extensions", "teleport-under-test.ts"));
 			assert.ok(process.env.PI_INTEGRATION_HERDR_AGENT_DIR);
 			cpSync(agentDir, process.env.PI_INTEGRATION_HERDR_AGENT_DIR, { recursive: true });
 			const original = join(env.dir, "original.jsonl"), gate = join(env.dir, "grandchild-gate");
