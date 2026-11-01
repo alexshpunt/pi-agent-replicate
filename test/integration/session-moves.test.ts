@@ -62,7 +62,11 @@ for (const backend of getAvailableBackends()) {
 	describe(`session moves (${backend})`, { timeout: PI_TIMEOUT * 6 }, () => {
 		let env: TestEnv;
 		beforeEach(() => { env = createTestEnv(backend, { replication: true }); });
-		afterEach(async () => { await cleanupTestEnv(env); });
+		afterEach(async () => {
+			const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR;
+			if (agentDir) rmSync(join(agentDir, "extensions", "move-tree-consumer.ts"), { force: true });
+			await cleanupTestEnv(env);
+		});
 
 		it("delivers once after the parent file and process move and the old file disappears", async () => {
 			const original = join(env.dir, "parent.jsonl");
