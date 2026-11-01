@@ -1,0 +1,9 @@
+{
+  "outcome": "failure",
+  "resultContent": "Resumed child stopped before its result was delivered.",
+  "version": 1,
+  "eventId": "terminal:resumed-child",
+  "type": "terminal",
+  "nodeId": "resumed-child",
+  "at": 5
+}
