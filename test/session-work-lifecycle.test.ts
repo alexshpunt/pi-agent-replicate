@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -50,6 +50,22 @@ it("does not close a settled replica before its background terminal completion i
   });
 });
 
+for (const stopReason of ["aborted", "error", "empty"]) {
+  it(`retains a terminal ${stopReason} outcome when pending work starts another turn`, { timeout: 5_000 }, async () => {
+    await fixture(async test => {
+      await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
+      await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: stopReason === "empty" ? "stop" : stopReason, content: [] }] });
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), 0);
+      await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
+      await test.emit("before_agent_start", {});
+      await test.emit("agent_end", answer("background work inspected"));
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), 1);
+      assert.equal(JSON.parse(readFileSync(test.file + ".exit", "utf8")).type, "error");
+    });
+  });
+}
 for (const isError of [false, true]) {
   it(`only closes after a successful terminal deletion (isError=${isError})`, { timeout: 5_000 }, async () => {
     await fixture(async test => {
