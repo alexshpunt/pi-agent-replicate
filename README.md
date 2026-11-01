@@ -1,8 +1,24 @@
-# Pi Agent Replicate
+<p align="center">
+  <img src="assets/banner.png" alt="PiAgent Replicate: one agent branches into two copies" width="100%">
+</p>
 
-An experimental session-replication extension for [Pi](https://github.com/earendil-works/pi) in [Herdr](https://herdr.dev).
+<h1 align="center">Pi Agent Replicate</h1>
 
-An agent can run a defined part of its task in parallel with another copy of itself while continuing a different part. The copy's result returns automatically to the original session.
+<p align="center">One agent. Parallel work.</p>
+
+<div align="center">
+
+[![npm version](https://img.shields.io/npm/v/pi-agent-replicate)](https://www.npmjs.com/package/pi-agent-replicate)
+[![npm downloads](https://img.shields.io/npm/dm/pi-agent-replicate)](https://www.npmjs.com/package/pi-agent-replicate)
+[![MIT license](https://img.shields.io/npm/l/pi-agent-replicate)](./LICENSE)
+
+</div>
+
+## Summary
+
+Pi Agent Replicate gives your [Pi](https://github.com/earendil-works/pi) agent a `replicate` tool for parallel work in [Herdr](https://herdr.dev). The original agent keeps working on the task while copies of itself handle independent parts. Each copy inherits the current conversation and tools, then returns its result automatically to the original.
+
+Copies work in separate Git worktrees by default. For projects that need the same directory, such as Unity projects, you can choose a shared directory instead.
 
 ## Install
 
