@@ -19,6 +19,7 @@ describe("minimal production package", () => {
     for (const path of packageFiles) {
       assert.doesNotMatch(path, /(^|\/)(?:skills|agents\/built-in)(?:\/|$)/);
       assert.doesNotMatch(path, /(?:workflow-worker\.js|plan-skill\.md|model-config\.(?:js|ts))$/);
+      assert.doesNotMatch(path, /^(?:images|docs\/research)\//);
       assert.doesNotMatch(path, /(^|\/)(?:\.pi|test|prototypes?|sessions|\.reviews|\.tmp)(?:\/|$)|(^|\/)(?:run\.jsonl|config\.json)$/);
     }
   });

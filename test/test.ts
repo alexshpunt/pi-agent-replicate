@@ -2653,11 +2653,11 @@ describe("completion.ts", () => {
 
 
 describe("tool registration", () => {
-	it("exposes only fresh replication and no user commands", () => {
+	it("exposes fresh replication and the replica directory command", () => {
 		const { api, registeredTools, registeredCommands } = createMockExtensionApi();
 		subagentsModule.default(api);
 		assert.deepEqual(registeredTools.map(tool => tool.name), ["replicate"]);
-		assert.deepEqual(registeredCommands, []);
+		assert.deepEqual(registeredCommands.map(command => command.name), ["replica-directory"]);
 		const schema = registeredTools[0].parameters;
 		assert.deepEqual(schema.required, ["name", "task"]);
 		assert.deepEqual(Object.keys(schema.properties), ["name", "task"]);

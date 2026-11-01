@@ -1,0 +1,14 @@
+{
+  "deliveryId": "terminal:original-child",
+  "sessionId": "original-parent",
+  "sessionFile": "/fixture/original.jsonl",
+  "payload": {
+    "kind": "terminal",
+    "resultContent": "Original child stopped."
+  },
+  "version": 1,
+  "eventId": "inbox:terminal:original-child",
+  "type": "inbox",
+  "nodeId": "original-child",
+  "at": 4
+}

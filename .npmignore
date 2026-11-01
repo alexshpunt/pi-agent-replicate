@@ -5,6 +5,8 @@ test/
 .mesh/
 .linear-project
 docs/assets/
+docs/research/
+images/
 .github/
 .gitignore
 config.json

@@ -77,7 +77,7 @@ it("follows real nested edges, keeps concurrent roots separate, and discards fin
 function renderCard(content: string, kind?: string) {
 	const renderers = new Map<string, Function>();
 	subagentsExtension({
-		on() {}, registerTool() {}, registerMessageRenderer: (name: string, render: Function) => { renderers.set(name, render); },
+		on() {}, registerTool() {}, registerCommand() {}, registerMessageRenderer: (name: string, render: Function) => { renderers.set(name, render); },
 	} as any);
 	const theme = { fg: (_color: string, value: string) => value, bg: (_color: string, value: string) => value, bold: (value: string) => value };
 	return renderers.get("subagent_result")!({ content, details: { name: "review", kind, resultContent: content } }, { expanded: true }, theme);

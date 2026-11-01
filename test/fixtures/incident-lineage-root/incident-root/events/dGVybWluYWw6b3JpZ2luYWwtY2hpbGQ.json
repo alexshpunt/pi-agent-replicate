@@ -1,0 +1,9 @@
+{
+  "outcome": "failure",
+  "resultContent": "Original child stopped.",
+  "version": 1,
+  "eventId": "terminal:original-child",
+  "type": "terminal",
+  "nodeId": "original-child",
+  "at": 2
+}
