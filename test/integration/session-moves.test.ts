@@ -70,13 +70,16 @@ for (const backend of getAvailableBackends()) {
 			const moved = join(destinationDir, "parent.jsonl");
 			const gate = join(env.dir, "release-child");
 			const started = join(env.dir, "child-started");
+			const probe = join(env.dir, "mobile-probe.ts");
+			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+			writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync,writeFileSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold child until released",parameters:Type.Object({}),async execute(){writeFileSync(${JSON.stringify(started)},"started");while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 			const parent = createTrackedSurface(env, "mobile-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
 				"Call the replicate tool once with these parameters:",
 				'name: "mobile-child"',
-				`task: ${JSON.stringify(gatedTask(started, gate, "MOBILE_ANSWER"))}`,
-			].join("\n"), { extraArgs: `--session ${shellQuote(original)}` });
+				'task: "Use replication_probe then Return exactly MOBILE_ANSWER"',
+			].join("\n"), { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}` });
 			try { await waitForFile(started); }
 			catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 			runInPane(parent, "/quit");
