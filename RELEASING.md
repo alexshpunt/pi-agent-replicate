@@ -59,6 +59,8 @@ After the package exists on npm, steady-state releases use npm trusted publishin
 
 When the repository secret `NPM_TOKEN` is absent, the publish step unsets `NODE_AUTH_TOKEN` and relies on OIDC. Once the package exists, the workflow fails if `NPM_TOKEN` is still configured, so steady-state releases cannot silently keep using the bootstrap credential. Manual dispatch runs only from `main`; other refs are rejected.
 
+A new trusted publisher expires 48 hours after creation unless it completes a successful publish. Create or recreate it shortly before the next release; an expired configuration cannot authorize publishing. The first successful trusted publish validates the configuration.
+
 ### Bootstrap history
 
 The upstream `0.0.1` publication and documented trusted publisher for `giuseppecrj/pi-herdr-agents` do not establish the renamed npm package or authorize its releases.
