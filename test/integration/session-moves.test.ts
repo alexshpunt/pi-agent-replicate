@@ -77,7 +77,8 @@ for (const backend of getAvailableBackends()) {
 				'name: "mobile-child"',
 				`task: ${JSON.stringify(gatedTask(started, gate, "MOBILE_ANSWER"))}`,
 			].join("\n"), { extraArgs: `--session ${shellQuote(original)}` });
-			await waitForFile(started);
+			try { await waitForFile(started); }
+			catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 			runInPane(parent, "/quit");
 			await waitForPiExit(parent);
 			closePane(parent);
