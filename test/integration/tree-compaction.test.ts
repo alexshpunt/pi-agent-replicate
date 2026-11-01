@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { readSessionBinding } from "../../pi-extension/subagents/session-binding.ts";
+import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
 import {
   PI_TIMEOUT, cleanupTestEnv, createTestEnv, createTrackedSurface,
   getAvailableBackends, readPane, restoreBackend, runInPane, setBackend,
@@ -61,24 +62,9 @@ async function waitForFile(path: string, parentPane: string): Promise<string> {
   throw new Error(`Timeout waiting for ${path}; parent screen:\n${readPane(parentPane, 100)}`);
 }
 
-async function waitForChildSession(root: string, childId: string): Promise<string> {
-  const sessions = join(root, ".pi", "agent", "sessions");
-  const deadline = Date.now() + PI_TIMEOUT;
-  while (Date.now() < deadline) {
-    if (existsSync(sessions)) {
-      for (const directory of readdirSync(sessions, { withFileTypes: true })) {
-        if (!directory.isDirectory()) continue;
-        const file = readdirSync(join(sessions, directory.name)).find((name) => name.includes(childId) && name.endsWith(".jsonl"));
-        if (file) return join(sessions, directory.name, file);
-      }
-    }
-    await sleep(25);
-  }
-  throw new Error(`Timeout waiting for session for child ${childId}`);
-}
 
 for (const backend of backends) {
-  describe(`public tree manual compaction [${backend}]`, { timeout: PI_TIMEOUT * 5 }, () => {
+  describe(`retained child manual compaction [${backend}]`, { timeout: PI_TIMEOUT * 5 }, () => {
     let previous: string | undefined;
     let env: TestEnv;
     beforeEach(() => { previous = setBackend(backend); env = createTestEnv(backend); });
@@ -95,42 +81,58 @@ for (const backend of backends) {
       const agentDir = join(env.dir, ".pi", "agent");
       const gate = join(agentDir, "integration-compaction-release");
       const launched = join(env.dir, "launched.json");
-      const result = join(env.dir, "result.json");
-      const callback = join(env.dir, "callback.json");
+      const parentSession = join(env.dir, "parent.jsonl");
       const extension = join(env.dir, "tree-compaction-extension.ts");
       writeFileSync(join(env.dir, ".pi", "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 1 } }));
       writeFileSync(join(agentDir, "integration-compaction-enabled"), "enabled\n");
+      // Exercise the retained watcher directly; persistent children are not a public tree lifecycle.
       writeFileSync(extension, `
-import { writeFileSync } from "node:fs";
-import { Type } from ${JSON.stringify(join(root, "node_modules/@sinclair/typebox/build/esm/index.mjs"))};
-import { createSubagentTree } from ${JSON.stringify(join(root, "index.ts"))};
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { __test__ } from ${JSON.stringify(join(root, "pi-extension/subagents/index.ts"))};
 export default function(pi) {
-  pi.registerTool({ name: "consumer_tree_open_probe", label: "Launch", description: "Launch persistent test child", parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _update, ctx) {
-      const tree = createSubagentTree({ pi, ctx });
-      tree.bindFinalCallback(value => writeFileSync(${JSON.stringify(callback)}, JSON.stringify(value)));
-      const child = await tree.launchChild({ parentId: tree.callerId, name: ${JSON.stringify(label)}, agent: "test-persistent", task: ${JSON.stringify(`Return exactly CHILD_READY_${id}`)}, tools: ["read", "bash", "write", "edit"] });
-      void child.result.then(value => writeFileSync(${JSON.stringify(result)}, JSON.stringify(value)));
-      writeFileSync(${JSON.stringify(launched)}, JSON.stringify({ childId: child.nodeId }));
-      return { content: [{ type: "text", text: "child launched" }], details: {} };
+  pi.on("session_start", async (_event, ctx) => {
+    if (process.env.PI_SUBAGENT_ID) return;
+    const file = ${JSON.stringify(launched)};
+    if (!existsSync(file)) {
+      const child = await __test__.launchSubagent({ name: ${JSON.stringify(label)}, agent: "test-persistent", interactive: false, task: ${JSON.stringify(`Return exactly CHILD_READY_${id}`)} }, ctx, pi.getThinkingLevel());
+      __test__.startRecoveredWatcher(child);
+      writeFileSync(file, JSON.stringify({ childId: child.id, sessionFile: child.sessionFile, rootDir: child.lineage.rootDir }));
     }
+    appendFileSync(file + ".starts", "start\\n");
   });
 }`);
       const parent = createTrackedSurface(env, `parent-${id}`);
       await waitForPaneReady(parent);
-      startPi(parent, env.dir, "Call consumer_tree_open_probe exactly once, then wait.", {
-        extensionSource: extension,
+      startPi(parent, env.dir, "Return exactly COMPACTION_PARENT_READY", {
         environment: { JITI_FS_CACHE: "0", PI_SUBAGENT_QUIET_THRESHOLD_MS: "200" },
         // Activity sidecars are relative to the parent session directory.
-        extraArgs: `--session ${shellQuote(join(env.dir, "parent.jsonl"))} --tools consumer_tree_open_probe`,
+        extraArgs: `--session ${shellQuote(parentSession)} -e ${shellQuote(extension)}`,
       });
-      const { childId } = JSON.parse(await waitForFile(launched, parent)) as { childId: string };
+      const { childId, sessionFile, rootDir } = JSON.parse(await waitForFile(launched, parent)) as { childId: string; sessionFile: string; rootDir: string };
+      const parentResults = () => {
+        if (!existsSync(parentSession)) return [];
+        const source = readFileSync(parentSession, "utf8");
+        return source.slice(0, source.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.customType === "subagent_result");
+      };
+      const assertNotDelivered = () => {
+        assert.equal(parentResults().length, 0, "compaction must not publish a parent result");
+        const node = reduceLineage(rootDir).nodes.get(childId);
+        assert.ok(node, "the original child must remain in the lineage");
+        assert.equal(node.terminal, undefined, "compaction must not settle the child");
+      };
+      // A reload starts production status supervision for the already launched child.
+      await waitForActivity(env.dir, childId, (value) => (value.latestEvent === "agent_end" || value.latestEvent === "agent_settled") && value.phase === "waiting");
+      runInPane(parent, "/reload");
+      const starts = launched + ".starts";
+      const deadline = Date.now() + PI_TIMEOUT;
+      while ((!existsSync(starts) || readFileSync(starts, "utf8").trim().split("\n").length < 2) && Date.now() < deadline) await sleep(25);
+      assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 2, "parent runtime reloaded and restored supervision");
       let active: Awaited<ReturnType<typeof waitForActivity>>;
       try {
         active = await waitForActivity(env.dir, childId, (value) =>
           (value.latestEvent === "agent_end" || value.latestEvent === "agent_settled") && value.phase === "waiting");
       } catch (error) {
-        const childResult = existsSync(result) ? readFileSync(result, "utf8") : undefined;
+        const childResult = parentResults();
         const childPane = panes(env.workspaceId).find((pane) => pane.label === label)?.pane_id;
         throw new Error(`${String(error)}\nchild=${childId} result=${childResult}\nparent:\n${readPane(parent, 100)}\nchild:\n${childPane ? readPane(childPane, 100) : "(no child pane)"}`);
       }
@@ -149,8 +151,7 @@ export default function(pi) {
         value.activeSince !== undefined && Date.now() - value.activeSince > 2_500);
       assert.equal(observed.path, compacting.path);
       assert.deepEqual(panes(env.workspaceId).filter((pane) => pane.label === label).map((pane) => pane.pane_id), [childPane]);
-      assert.equal(existsSync(result), false, "compaction must not settle the child");
-      assert.equal(existsSync(callback), false, "compaction must not publish a tree result");
+      assertNotDelivered();
 
       writeFileSync(gate, "release\n");
       const compacted = await waitForActivity(env.dir, childId, (value) => value.latestEvent === "session_compact" && value.compactionActive === false);
@@ -160,7 +161,7 @@ export default function(pi) {
       assert.equal(compacted.activity.turnActive, false);
       assert.equal(compacted.activity.providerActive, false);
       assert.equal(compacted.activity.toolActive, false);
-      const childSession = await waitForChildSession(env.dir, childId);
+      const childSession = sessionFile;
       const lineage = readSessionBinding(childSession)?.child?.lineage;
       assert.ok(lineage, "the child session must retain its lineage binding");
       const deliveryLog = join(lineage.rootDir, "subagent-delivery.log");
@@ -171,8 +172,7 @@ export default function(pi) {
       assert.equal(indices[0], entries.length - 1, "compaction must not create an artificial follow-up turn");
       assert.equal(entries[indices[0]].summary, "INTEGRATION_COMPACTION_SUMMARY");
       assert.deepEqual(panes(env.workspaceId).filter((pane) => pane.label === label).map((pane) => pane.pane_id), [childPane]);
-      assert.equal(existsSync(result), false);
-      assert.equal(existsSync(callback), false);
+      assertNotDelivered();
     });
   });
 }
