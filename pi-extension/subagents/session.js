@@ -51,11 +51,55 @@ export function seedSubagentSessionFile(params) {
     mkdirSync(dirname(params.childSessionFile), { recursive: true });
     writeFileSync(params.childSessionFile, lines.join("\n") + "\n", "utf8");
 }
-/**
- * Copy only the active Pi branch into a session rooted at another cwd.
- * Pi's native branched-session writer supplies compaction and label fidelity;
- * the temporary source-directory file is rewritten with the target cwd.
- */
+/** Fork conversation and runtime, not extension control state; settle inherited calls without replay. */
+export function seedReplicationSessionFile(params) {
+    const header = { type: "session", version: 3, id: params.resumeSessionId ?? randomUUID(), timestamp: new Date().toISOString(), cwd: params.childCwd, parentSession: params.parentSessionFile };
+    const rows = [header];
+    const pending = new Map();
+    let parentId = null;
+    for (const source of params.entries) {
+        // Custom messages are conversation. Custom entries are extension-owned
+        // controls: restoring them can start a parent turn before our assignment.
+        if (source.type === "custom") continue;
+        const entry = { ...source, parentId };
+        if (source.type === "compaction") {
+            const firstKeptIndex = params.entries.findIndex((row) => row.id === source.firstKeptEntryId);
+            if (params.entries[firstKeptIndex]?.type === "custom") {
+                entry.firstKeptEntryId = params.entries.slice(firstKeptIndex).find((row) => row.type !== "custom")?.id ?? source.id;
+            }
+        }
+        rows.push(entry);
+        parentId = entry.id;
+    }
+    // Use the native projected context, not raw history before compaction or edits.
+    for (const message of params.contextMessages) {
+        if (message.role === "system")
+            continue;
+        if (message.role === "toolResult") {
+            pending.delete(message.toolCallId);
+            continue;
+        }
+        // A later turn already closes older orphan calls during provider replay.
+        pending.clear();
+        if (message.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted")
+            continue;
+        for (const part of message.content)
+            if (part.type === "toolCall")
+                pending.set(part.id, part.name);
+    }
+    for (const [toolCallId, toolName] of pending) {
+        const id = randomBytes(4).toString("hex");
+        rows.push({ type: "message", id, parentId, timestamp: new Date().toISOString(), message: {
+                role: "toolResult", toolCallId, toolName, isError: false, timestamp: Date.now(),
+                content: [{ type: "text", text: "This call belongs to the original session. This copy continues with its own assignment." }],
+            } });
+        parentId = id;
+    }
+    mkdirSync(dirname(params.childSessionFile), { recursive: true });
+    if (params.name)
+        rows.push({ type: "session_info", id: randomBytes(4).toString("hex"), parentId, timestamp: new Date().toISOString(), name: params.name });
+    writeFileSync(params.childSessionFile, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+}
 function parseEntry(line) {
     try {
         return JSON.parse(line);

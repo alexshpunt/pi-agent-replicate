@@ -12,12 +12,14 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
 	launchPiSubagent,
+	buildSubagentToolAllowlist,
 	type FreshPiLaunchRequest,
 	type PiLaunchOperations,
 	type ResumePiLaunchRequest,
 } from "../pi-extension/subagents/launch.ts";
 
-import { registerLineage } from "../pi-extension/subagents/lineage.ts";
+import { registerLineage, reduceLineage } from "../pi-extension/subagents/lineage.ts";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
 function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "subagent-launch-test-"));
@@ -32,6 +34,7 @@ function fixture() {
 		`${JSON.stringify({ type: "session", version: 3, id: "parent", cwd: project })}\n`,
 	);
 
+	seedSessionBinding(parentSessionFile, { version: 1, storeDir: join(agentDir, "subagent-sessions") });
 	const request: FreshPiLaunchRequest = {
 		kind: "fresh",
 		id: "child-1",
@@ -77,6 +80,15 @@ function withFixture(
 }
 
 describe("Pi launch", () => {
+	it("never adds or inherits removed model-facing controls", () => {
+		for (const autoExit of [false, true]) {
+			for (const includeControlTools of [false, true]) {
+				assert.equal(buildSubagentToolAllowlist("read,bash,caller_ping,subagent_done,subagent,subagent_resume,subagent_interrupt,subagent_cancel,subagents_list", autoExit, includeControlTools), "read,bash");
+			}
+		}
+		assert.equal(buildSubagentToolAllowlist(undefined), null);
+		assert.equal(buildSubagentToolAllowlist(""), null);
+	});
 	it("launches an ordinary child through one transaction", async () => {
 		await withFixture(async ({ request, project, agentDir }) => {
 			const projectAgentDir = join(project, ".pi", "agent");
@@ -106,10 +118,13 @@ describe("Pi launch", () => {
 				},
 			};
 
+			request.executionOwner = { toolCallId: "nested-leaf", parentToolCallId: "visible-root" };
 			const running = await launchPiSubagent(request, operations);
 
 			assert.deepEqual(events, ["create", "ready", "run"]);
 			assert.equal(running.id, "child-1");
+			assert.deepEqual(running.executionOwner, request.executionOwner);
+			assert.deepEqual(reduceLineage(running.lineage!.rootDir).nodes.get(running.id)?.executionOwner, request.executionOwner);
 			assert.equal(running.surface, "pane-1");
 			assert.equal(running.launchScriptFile, scriptPath);
 			assert.ok(running.sessionFile.startsWith(join(agentDir, "sessions")));
@@ -118,7 +133,7 @@ describe("Pi launch", () => {
 			assert.match(command, /PI_SUBAGENT_LAUNCHER_PID=\$\$/);
 			assert.match(command, /--model 'fake\/worker'/);
 			assert.match(command, /--thinking 'high'/);
-			assert.match(command, /--tools 'read,bash,caller_ping'/);
+			assert.match(command, /--tools 'read,bash'/);
 			assert.doesNotMatch(command, /subagent_done/);
 			assert.match(command, /PI_DENY_TOOLS='subagent,subagent_resume'/);
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=1/);
@@ -143,6 +158,27 @@ describe("Pi launch", () => {
 		});
 	});
 
+	it("publishes recovery metadata before waiting on a newly allocated shell", async () => {
+		await withFixture(async ({ request, root }) => {
+			const lineage = registerLineage({ artifactDir: root, nodeId: request.id!, parentSessionId: "parent", launchKind: "fresh" });
+			let started = false, closed = false;
+			await assert.rejects(() => launchPiSubagent({ ...request, lineage }, {
+				createPane: () => "pending-shell",
+				createWorktree: () => { throw new Error("unexpected worktree"); },
+				async waitForShellReady() {
+					const node = reduceLineage(lineage.rootDir).nodes.get(request.id!)!;
+					assert.equal(node.surface, "pending-shell");
+					assert.ok(node.activityFile && node.settledEventsFile);
+					assert.equal(JSON.parse(readFileSync(node.sessionFile!, "utf8").split("\n")[0]).cwd, request.parent.cwd);
+					throw new Error("owned shell setup failed");
+				},
+				runScript: (_surface, _command, options) => { started = true; return options.scriptPath; },
+				closePane: () => { closed = true; },
+			}), /owned shell setup failed/);
+			assert.equal(started, false);
+			assert.equal(closed, true);
+		});
+	});
 	it("clears inherited auto-exit state for interactive children", async () => {
 		await withFixture(async ({ request }) => {
 			let command = "";
@@ -169,14 +205,14 @@ describe("Pi launch", () => {
 			);
 
 			assert.match(command, /PI_SUBAGENT_AUTO_EXIT=0/);
-			assert.match(command, /--tools 'read,bash,caller_ping,subagent_done'/);
+			assert.match(command, /--tools 'read,bash'/);
 		});
 	});
 
 	it("resumes a session through the launch transaction", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "child.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 			process.env.PI_CODING_AGENT_DIR = join(root, "isolated-agent");
 			try {
@@ -269,7 +305,7 @@ describe("Pi launch", () => {
 	it("closes a replacement pane when resume setup fails before metadata", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "failed-resume.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const events: string[] = [];
 
 			await assert.rejects(
@@ -316,7 +352,7 @@ describe("Pi launch", () => {
 	it("keeps the durable child identity and can reuse its pane during recovery", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "recovered.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const lineage = registerLineage({
 				artifactDir: join(root, "artifacts"),
 				nodeId: "durable-child",
@@ -358,7 +394,7 @@ describe("Pi launch", () => {
 	it("clears inherited auto-exit state when a resumed session is interactive", async () => {
 		await withFixture(async ({ root, sessionDir, parentSessionFile }) => {
 			const sessionFile = join(root, "interactive.jsonl");
-			writeFileSync(sessionFile, "existing session\n");
+			writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "resume-session", cwd: root }) + "\n");
 			const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
 			process.env.PI_SUBAGENT_AUTO_EXIT = "1";
 			try {

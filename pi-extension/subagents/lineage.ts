@@ -13,6 +13,9 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
+import type { WorktreeLaunch } from "./launch.ts";
+import { readExecutionOwner, type ExecutionOwner } from "./execution-owner.ts";
 
 /** Durable launch registration and recursive ownership projection. */
 export interface LineageRegistration {
@@ -26,11 +29,19 @@ export interface LineageRegistration {
 }
 
 export interface LineageNodeState {
+  /** Attempt-specific tool ownership survives receiver recovery and movement. */
+  executionOwner?: ExecutionOwner;
+  /** Preserve replica lifecycle when restoring a watcher. */
+  replication?: boolean;
+  /** Work/checkpoint ownership must survive moved or deleted session files. */
+  replicaWorkFile?: string;
   nodeId: string;
   parentNodeId?: string;
   parentSessionId?: string;
   parentSessionFile?: string;
   launchKind?: string;
+  /** Original review target; moving the session does not make it an ordinary pane. */
+  worktree?: WorktreeLaunch;
   name?: string;
   task?: string;
   agent?: string;
@@ -61,6 +72,20 @@ export interface LineageNodeState {
   };
 }
 
+/** Acknowledge an exact-parent native launch error without sending a second result. */
+export function acknowledgeReportedLaunchFailure(lineage: Pick<LineageRegistration, "rootDir" | "nodeId">, error: string, publishEvent: typeof appendLineageEvent = appendLineageEvent): void {
+  const { rootDir, nodeId } = lineage;
+  if (hasUndrainedDescendants(reduceLineage(rootDir), nodeId)) throw new Error("Replica descendants have not drained.");
+  const publish = (eventId: string, type: string, fields: Record<string, unknown> = {}) => {
+    if (!publishEvent(rootDir, eventId, type, nodeId, fields) && !hasLineageEvent(rootDir, eventId, type)) {
+      throw new Error(`Unable to publish reported launch acknowledgement: ${type}`);
+    }
+  };
+  publish(`terminal:${nodeId}`, "terminal", { outcome: "error", resultContent: error });
+  // A crash after delivery must leave resource cleanup discoverable.
+  publish(`cleanup-pending:${nodeId}`, "cleanup_pending");
+  publish(`terminal-delivered:${nodeId}`, "terminal_delivered", { deliveryId: `terminal:${nodeId}` });
+}
 export interface LineageState {
   rootId: string;
   nodes: Map<string, LineageNodeState>;
@@ -254,6 +279,7 @@ export function reduceLineage(rootDir: string): LineageState {
       // this comparison is deterministic and does not use event publication time.
       const runStart = typeof event.startTime === "number" ? event.startTime : 0;
       if (node.startTime !== undefined && runStart < node.startTime) continue;
+      node.executionOwner = readExecutionOwner(event.executionOwner);
       if (typeof event.name === "string") node.name = event.name;
       if (typeof event.task === "string") node.task = event.task;
       if (typeof event.agent === "string") node.agent = event.agent;
@@ -266,8 +292,14 @@ export function reduceLineage(rootDir: string): LineageState {
 
       if (typeof event.interactive === "boolean") node.interactive = event.interactive;
       if (typeof event.autoExit === "boolean") node.autoExit = event.autoExit;
+      if (typeof event.replication === "boolean") node.replication = event.replication;
+      if (typeof event.replicaWorkFile === "string") node.replicaWorkFile = event.replicaWorkFile;
       if (typeof event.workspaceId === "string") node.workspaceId = event.workspaceId;
       if (typeof event.cwd === "string") node.cwd = event.cwd;
+      if (event.worktree && typeof event.worktree === "object" &&
+        ["path", "workspaceId", "paneId", "branch", "baseRef", "baseSha", "manifestFile"].every((key) => typeof (event.worktree as Record<string, unknown>)[key] === "string")) {
+        node.worktree = event.worktree as WorktreeLaunch;
+      }
     } else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
       const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
       prior.intent = true;
@@ -440,26 +472,29 @@ function claimFile(rootDir: string, deliveryId: string): string {
   return join(materializationClaimDir(rootDir), `${safeId(deliveryId)}.claim`);
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** Linux process start time (field 22 of /proc/<pid>/stat). */
-function processStartTime(pid: number): string | undefined {
+/** Linux stat fields after the command name, starting with process state. */
+function linuxProcessFields(pid: number): string[] | undefined {
   if (process.platform !== "linux") return undefined;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const closingParen = stat.lastIndexOf(")");
-    const fields = closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : [];
-    return fields[19] || undefined;
-  } catch {
-    return undefined;
+    return closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : undefined;
+  } catch { return undefined; }
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
   }
+  // A zombie retains its PID and start time but cannot finish or release its gate.
+  const state = linuxProcessFields(pid)?.[0];
+  return state !== "Z" && state !== "X";
+}
+
+/** Linux process start time (field 22 of /proc/<pid>/stat). */
+function processStartTime(pid: number): string | undefined {
+  return linuxProcessFields(pid)?.[19] || undefined;
 }
 
 function currentProcessIncarnation(): ProcessIncarnation {
@@ -497,7 +532,8 @@ function readMaterializationGate(path: string): MaterializationGateRecord | unde
   }
 }
 
-function processIncarnationAlive(identity: ProcessIncarnation, observer: ProcessIncarnation): boolean {
+/** Check a saved process identity without treating an unknown live incarnation as dead. */
+export function processIncarnationAlive(identity: ProcessIncarnation, observer: ProcessIncarnation): boolean {
   if (!processAlive(identity.pid)) return false;
   const observed = identity.pid === observer.pid ? observer : { pid: identity.pid, startTime: processStartTime(identity.pid) };
   // Portable filesystems/platforms may not expose an incarnation identity. Do
@@ -542,6 +578,13 @@ function releaseMaterializationGate(rootDir: string, token: string): void {
   if (current?.token === token) try { unlinkSync(path); } catch {}
 }
 
+/** Run one synchronous durable mutation under a process-owned filesystem gate. */
+export function withLineageMutationGate<T>(rootDir: string, mutate: (owner: ProcessIncarnation) => T): T {
+  const owner = currentProcessIncarnation();
+  const gate = acquireMaterializationGate(rootDir, owner);
+  if (!gate) throw new Error("Durable state has an active mutation.");
+  try { return mutate(owner); } finally { releaseMaterializationGate(rootDir, gate.token); }
+}
 function readLineageInboxes(rootDir: string): { record: LineageInboxRecord; materialized: boolean }[] {
   const result: { record: LineageInboxRecord; materialized: boolean }[] = [];
   const materialized = new Set<string>();
@@ -697,7 +740,7 @@ export function pendingLineageInboxes(rootDir: string, sessionId: string, sessio
       const value = JSON.parse(readFileSync(join(rootDir, "events", file), "utf8"));
       if (!validEvent(value, file, rootDir.split(/[\\/]/).pop())) continue;
       if (value.type === "inbox_materialized" && typeof value.deliveryId === "string") materialized.add(value.deliveryId);
-      else if (value.type === "inbox" && value.sessionId === sessionId && value.sessionFile === sessionFile && typeof value.deliveryId === "string") {
+      else if (value.type === "inbox" && value.sessionId === sessionId && typeof value.deliveryId === "string") {
         const payload = value.payload && typeof value.payload === "object" ? value.payload as Record<string, unknown> : {};
         inboxes.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId, sessionFile, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
       }
@@ -709,6 +752,8 @@ export function pendingLineageInboxes(rootDir: string, sessionId: string, sessio
 
 /** Read the authoritative lineage pointer attached to a child session. */
 export function readLineageAttachment(sessionFile: string): LineageRegistration | undefined {
+  const embedded = readSessionBinding(sessionFile)?.child?.lineage;
+  if (embedded && existsSync(join(embedded.rootDir, "events"))) return embedded;
   try {
     const value = JSON.parse(readFileSync(`${sessionFile}.lineage.json`, "utf8")) as Partial<LineageRegistration>;
     if (typeof value.rootDir !== "string" || typeof value.rootId !== "string" || typeof value.nodeId !== "string") return undefined;
@@ -725,6 +770,22 @@ export function discoverLineageRoots(sessionDir: string, sessionFile?: string): 
   if (sessionFile) {
     const attachment = readLineageAttachment(sessionFile);
     if (attachment) result.add(attachment.rootDir);
+    const binding = readSessionBinding(sessionFile);
+    const header = readSessionHeader(sessionFile);
+    if (header) {
+      for (const rootDir of sessionLineageRoots(binding?.storeDir ?? sessionBindingStore(), header.id)) result.add(rootDir);
+    }
+    // Bound sessions need only their index and their own legacy artifacts,
+    // including a root published after startup but not yet indexed by a launcher.
+    if (binding) {
+      const lineageDir = join(sessionDir, "artifacts", binding.sessionId, "lineage");
+      try {
+        for (const root of readdirSync(lineageDir, { withFileTypes: true })) {
+          if (root.isDirectory()) result.add(join(lineageDir, root.name));
+        }
+      } catch { /* This session may have no local artifacts after a move. */ }
+      return [...result].sort();
+    }
   }
   try {
     for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {

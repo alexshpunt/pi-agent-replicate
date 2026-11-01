@@ -4,18 +4,22 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, } from 
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { appendLineageEvent, lineageFromEnvironment, lineageEnvironment, registerLineage, isLineageNodeDrained, reduceLineage, } from "./lineage.js";
+import { appendLineageEvent, hasLineageEvent, lineageFromEnvironment, lineageEnvironment, registerLineage, isLineageNodeDrained, reduceLineage, } from "./lineage.js";
 import { getSubagentActivityFile, getSubagentSettledEventsFile, } from "./activity.js";
 import { createLifecycle } from "./lifecycle.js";
 import { HerdrWorktreeCreateError } from "./herdr.js";
-import { captureSessionBaseline, seedStandaloneSessionFile, seedSubagentSessionFile, } from "./session.js";
-import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
+import { captureSessionBaseline, seedStandaloneSessionFile, seedSubagentSessionFile, seedReplicationSessionFile, } from "./session.js";
+import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTabId, getPaneProcessInfo, createSubagentWorktree, runScriptInPane, shellQuote, waitForShellReady, } from "./terminal.js";
+import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore, captureLaunchPaneOwnership } from "./session-binding.js";
+import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.js";
+import { sourceRepositoryAnchor } from "./source-state.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
     createPane: (name, workspace) => workspace
         ? createSubagentPaneInWorkspace(name, workspace.cwd, workspace.id)
         : createSubagentPane(name),
     closePane,
+    getPaneProcessInfo,
     createWorktree: createSubagentWorktree,
     waitForShellReady,
     runScript: runScriptInPane,
@@ -32,7 +36,7 @@ export async function launchPiSubagent(request, operations = defaultOperations) 
 async function launchFreshPiSubagent(request, operations) {
     const resolved = resolveLaunchRequest(request);
     // Registration is the ownership boundary: publish lineage before Herdr creates resources.
-    const inherited = lineageFromEnvironment();
+    const inherited = readSessionBinding(request.parent.sessionFile)?.child?.lineage ?? lineageFromEnvironment();
     resolved.lineage = request.lineage ?? registerLineage({
         artifactDir: resolved.artifactDir,
         nodeId: resolved.id,
@@ -43,20 +47,64 @@ async function launchFreshPiSubagent(request, operations) {
         inheritedRootDir: inherited?.rootDir,
         inheritedRootId: inherited?.rootId,
     });
+    const storeDir = sessionBindingStore(request.parent.sessionFile, resolved.agentDir);
+    registerSessionLineage(storeDir, request.parent.sessionId, resolved.lineage.rootDir);
     let surface;
     const abort = new AbortController();
     const signal = request.signal ?? abort.signal;
     try {
+        if (request.replication) {
+            const metadataId = `metadata:${resolved.id}:reserved`;
+            if (!appendLineageEvent(resolved.lineage.rootDir, metadataId, "launch_metadata", resolved.id, {
+                name: request.name,
+                task: request.task,
+                startTime: resolved.startTime,
+                executionOwner: request.executionOwner,
+                replication: true,
+                replicaWorkFile: request.replication.recordFile,
+            }) && !hasLineageEvent(resolved.lineage.rootDir, metadataId, "launch_metadata")) {
+                throw new Error("Unable to publish replica launch recovery metadata.");
+            }
+        }
         surface = prepareLaunchSurface(resolved, operations);
+        if (request.replication?.recordFile) {
+            if (surface.worktree) attachReplicaWork(request.replication.recordFile, surface.worktree);
+            else attachSharedReplicaPane(request.replication.recordFile, surface.surface);
+            captureLaunchSurface(resolved, surface, operations);
+        }
         const session = prepareChildSession(resolved, surface);
-        await confirmShellReady(session, operations, signal);
-        if (signal.aborted)
-            throw new Error("subagent launch aborted");
         const artifacts = prepareTaskArtifacts(resolved, session);
+        seedSessionBinding(artifacts.sessionFile, {
+            version: 1, storeDir,
+            child: {
+                lineage: resolved.lineage,
+                environment: {
+                    ...lineageEnvironment(resolved.lineage),
+                    PI_SUBAGENT_ID: resolved.id,
+                    PI_SUBAGENT_NAME: request.name,
+                    PI_SUBAGENT_AGENT: request.agent ?? "",
+                    PI_SUBAGENT_AUTO_EXIT: request.behavior.autoExit ? "1" : "0",
+                    PI_SUBAGENT_SKILLS: normalizeSkillNames(request.behavior.skills ?? "").join(","),
+                    PI_DENY_TOOLS: request.behavior.deniedTools.join(","),
+                    PI_SUBAGENT_TOOLS: buildSubagentToolAllowlist(request.behavior.tools, request.behavior.autoExit, request.behavior.includeControlTools ?? true) ?? "",
+                    PI_SUBAGENT_ACTIVITY_FILE: artifacts.activityFile,
+                    PI_SUBAGENT_SETTLED_EVENTS_FILE: artifacts.settledEventsFile,
+                    ...(request.replication ? {
+                        PI_SUBAGENT_REPLICATION: "1",
+                        ...(request.replication.recordFile ? { PI_SUBAGENT_REPLICA_WORK_FILE: request.replication.recordFile } : {}),
+                        PI_SUBAGENT_REPLICATION_PROMPT_FILE: artifacts.replicationPromptFile,
+                        PI_SUBAGENT_REPLICATION_EXTENSIONS: JSON.stringify(request.replication.extensionArgs),
+                        PI_SUBAGENT_REPLICATION_ASSISTANTS: JSON.stringify(request.replication.entries.filter((entry) => entry.type === "message" && entry.message?.role === "assistant").map((entry) => entry.id)),
+                    } : {}),
+                    ...Object.fromEntries(Object.entries(request.environment ?? {}).filter(([key]) => key.startsWith("PI_SUBAGENT_TREE_"))),
+                },
+            },
+        });
         const sessionBaseline = captureSessionBaseline(artifacts.sessionFile);
         if (resolved.lineage) {
             appendLineageEvent(resolved.lineage.rootDir, `metadata:${resolved.id}:${resolved.startTime}`, "launch_metadata", resolved.id, {
                 name: request.name,
+                executionOwner: request.executionOwner,
                 task: request.task,
                 agent: request.agent,
                 surface: artifacts.surface,
@@ -67,30 +115,75 @@ async function launchFreshPiSubagent(request, operations) {
                 startTime: resolved.startTime,
                 interactive: request.behavior.interactive,
                 autoExit: request.behavior.autoExit,
+                ...(request.replication ? { replication: true, replicaWorkFile: request.replication.recordFile } : {}),
                 cwd: artifacts.targetCwd,
+                ...(artifacts.worktree ? { worktree: artifacts.worktree } : {}),
                 ...(artifacts.worktree?.workspaceId ? { workspaceId: artifacts.worktree.workspaceId } : {}),
             });
         }
+        // Publish recovery evidence before waiting on external shell startup.
+        await confirmShellReady(session, operations, signal);
+        captureLaunchSurface(resolved, surface, operations);
+        if (request.replication?.recordFile && !surface.worktree && !resolved.launchPane) throw new Error("Cannot verify shared replica pane ownership.");
+        if (signal.aborted)
+            throw new Error("subagent launch aborted");
         const command = buildPiCommand(resolved, artifacts);
         const launchScriptFile = startPiProcess(resolved, artifacts, command, operations);
         return createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline);
     }
     catch (error) {
         abort.abort();
-        if (surface && !surface.worktree) {
+        if (request.replication?.recordFile) {
             try {
-                operations.closePane?.(surface.surface);
+                failReplicaLaunch(request.replication.recordFile, error);
             }
-            catch { /* best effort */ }
+            catch { /* Preserve the original launch failure. */ }
+        }
+        if (surface && !surface.worktree) {
+            if (request.replication?.recordFile) {
+                try { captureLaunchSurface(resolved, surface, operations); cleanupReplicaWork(request.replication.recordFile, resolved.sourceCwd); } catch { /* Unknown ownership stays recoverable. */ }
+            } else {
+                try { operations.closePane?.(surface.surface); } catch { /* best effort */ }
+            }
         }
         if (!surface?.worktree)
             throw error;
+        if (request.replication?.recordFile) {
+            try {
+                captureLaunchSurface(resolved, surface, operations);
+                cleanupReplicaWork(request.replication.recordFile, resolved.sourceCwd);
+            }
+            catch { /* Unknown ownership keeps the failed work recoverable. */ }
+            try {
+                persistWorktreeResult(surface.worktree, "failed");
+            }
+            catch { /* The work record also retains the failure. */ }
+            throw new Error(`Failed to launch replica; worktree retained at ${surface.worktree.path}: ${errorMessage(error)}`);
+        }
         const handoff = captureWorktreeHandoff(surface.worktree);
         try {
             persistWorktreeResult(surface.worktree, "failed", handoff);
         }
         catch { /* launch error remains authoritative */ }
         throw new Error(`Failed to launch subagent; worktree retained at ${surface.worktree.path} (workspace ${surface.worktree.workspaceId}): ${errorMessage(error)}`);
+    }
+}
+/** Record the shell before dispatch; child startup may never reach session_start. */
+function captureLaunchSurface(resolved, surface, operations) {
+    const file = resolved.request.replication?.recordFile;
+    if (!file || !operations.getPaneProcessInfo)
+        return;
+    let shellPid;
+    try {
+        shellPid = operations.getPaneProcessInfo(surface.surface).shellPid;
+    }
+    catch {
+        return;
+    } // A shell may still be starting; retry after readiness.
+    const owner = captureLaunchPaneOwnership(surface.surface, shellPid);
+    if (owner) {
+        captureReplicaLaunchPane(file, owner);
+        resolved.launchPane = owner;
     }
 }
 function resolveLaunchRequest(request) {
@@ -116,7 +209,7 @@ function resolveLaunchRequest(request) {
         agentDir,
         localAgentDir: localAgentDir && existsSync(localAgentDir) ? localAgentDir : null,
         sourceCwd,
-        artifactDir: join(request.parent.sessionDir, "artifacts", request.parent.sessionId),
+        artifactDir: request.replication?.recordFile ? join(request.replication.recordFile + ".artifacts", "launch") : join(request.parent.sessionDir, "artifacts", request.parent.sessionId),
         sessionMode,
         taskDelivery: sessionMode === "fork" ? "direct" : "artifact",
     };
@@ -154,7 +247,7 @@ function prepareLaunchSurface(resolved, operations) {
     });
     let created;
     try {
-        created = operations.createWorktree(request.name, resolved.sourceCwd, request.worktree.branch, baseSha);
+        created = operations.createWorktree(request.name, request.replication ? sourceRepositoryAnchor(resolved.sourceCwd) : resolved.sourceCwd, request.worktree.branch, baseSha);
     }
     catch (error) {
         writeWorktreeManifest(manifestFile, {
@@ -194,7 +287,10 @@ function prepareLaunchSurface(resolved, operations) {
     };
 }
 function prepareChildSession(resolved, surface) {
-    const sessionDir = getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
+    const sessionDir = resolved.request.replication?.recordFile
+        ? join(resolved.request.replication.recordFile + ".artifacts", "sessions")
+        : getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
+    mkdirSync(sessionDir, { recursive: true });
     const timestamp = timestampForFile();
     const uuid = [resolved.id, randomUUID(), randomUUID(), randomUUID()].join("-");
     const sessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
@@ -204,6 +300,10 @@ function prepareChildSession(resolved, surface) {
     if (surface.worktree) {
         surface.worktree.sessionFile = sessionFile;
         writeWorktreeManifest(surface.worktree.manifestFile, { sessionFile });
+        if (resolved.request.replication?.recordFile)
+            attachReplicaWork(resolved.request.replication.recordFile, surface.worktree, sessionFile);
+    } else if (resolved.request.replication?.recordFile) {
+        attachSharedReplicaPane(resolved.request.replication.recordFile, surface.surface, sessionFile);
     }
     const activityFile = getSubagentActivityFile(resolved.artifactDir, resolved.id);
     const settledEventsFile = getSubagentSettledEventsFile(resolved.artifactDir, resolved.id);
@@ -217,7 +317,10 @@ async function confirmShellReady(session, operations, signal) {
 }
 function prepareTaskArtifacts(resolved, session) {
     const { request } = resolved;
-    if (resolved.sessionMode !== "standalone") {
+    if (request.replication) {
+        seedReplicationSessionFile({ parentSessionFile: request.parent.sessionFile, childSessionFile: session.sessionFile, childCwd: session.targetCwd, entries: request.replication.entries, contextMessages: request.replication.contextMessages, resumeSessionId: request.replication.resumeSessionId, name: request.name });
+    }
+    else if (resolved.sessionMode !== "standalone") {
         seedSubagentSessionFile({
             mode: resolved.sessionMode,
             parentSessionFile: request.parent.sessionFile,
@@ -232,10 +335,8 @@ function prepareTaskArtifacts(resolved, session) {
         : "";
     const modeHint = request.behavior.autoExit
         ? "Complete your task autonomously."
-        : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
-    const summaryInstruction = request.behavior.autoExit
-        ? "Your FINAL assistant message should summarize what you accomplished."
-        : "Your FINAL assistant message (before calling subagent_done or before the user exits) should summarize what you accomplished.";
+        : "Complete your task. The user can interact with you at any time.";
+    const summaryInstruction = "Your FINAL assistant message should summarize what you accomplished.";
     const fullTask = resolved.sessionMode === "fork"
         ? request.task
         : `${roleBlock}\n\n${modeHint}\n\n${request.task}\n\n${summaryInstruction}`;
@@ -252,7 +353,13 @@ function prepareTaskArtifacts(resolved, session) {
         mkdirSync(dirname(systemPromptFile), { recursive: true });
         writeFileSync(systemPromptFile, identityInSystemPrompt, "utf8");
     }
-    return { ...session, taskArg, systemPromptFile };
+    let replicationPromptFile;
+    if (request.replication) {
+        replicationPromptFile = join(resolved.artifactDir, "replication", `${resolved.id}.system.txt`);
+        mkdirSync(dirname(replicationPromptFile), { recursive: true });
+        writeFileSync(replicationPromptFile, request.replication.systemPrompt, { mode: 0o600 });
+    }
+    return { ...session, taskArg, systemPromptFile, replicationPromptFile };
 }
 function buildPiCommand(resolved, artifacts) {
     const { request } = resolved;
@@ -260,15 +367,17 @@ function buildPiCommand(resolved, artifacts) {
         "pi",
         "--session",
         shellQuote(artifacts.sessionFile),
-        "-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.js")),
-        ...(process.env.HERDR_ENV === "1" && existsSync(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.js"))
-            ? ["-e", shellQuote(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.js"))]
+        ...(!request.replication ? ["-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts"))] : []),
+        ...(process.env.HERDR_ENV === "1" && existsSync(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))
+            ? ["-e", shellQuote(join(process.env.HOME ?? "", ".pi/agent/extensions/herdr-agent-state.ts"))]
             : []),
         "--model",
         shellQuote(request.runtimePlan.model),
         "--thinking",
         shellQuote(request.runtimePlan.thinking),
     ];
+    if (request.replication)
+        parts.push(...request.replication.extensionArgs.map(shellQuote), "-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")));
     if (artifacts.systemPromptFile) {
         parts.push(request.behavior.systemPromptMode === "replace"
             ? "--system-prompt"
@@ -279,6 +388,13 @@ function buildPiCommand(resolved, artifacts) {
         parts.push("--tools", shellQuote(toolAllowlist));
     parts.push(shellQuote(artifacts.taskArg));
     const env = [];
+    if (!request.replication)
+        env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
+    if (request.replication) {
+        env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile)}`);
+        if (request.replication.recordFile)
+            env.push(`PI_SUBAGENT_REPLICA_WORK_FILE=${shellQuote(request.replication.recordFile)}`);
+    }
     for (const [key, value] of Object.entries(request.environment ?? {})) {
         if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
             env.push(`${key}=${shellQuote(value)}`);
@@ -330,6 +446,9 @@ function startPiProcess(resolved, artifacts, command, operations) {
 function createRunningChild(resolved, artifacts, launchScriptFile, sessionBaseline) {
     return {
         lineage: resolved.lineage,
+        executionOwner: resolved.request.executionOwner,
+        ...(resolved.launchPane ? { launchPane: resolved.launchPane } : {}),
+        ...(resolved.request.replication ? { replication: true, replicaWorkFile: resolved.request.replication.recordFile } : {}),
         id: resolved.id,
         name: resolved.request.name,
         task: resolved.request.task,
@@ -355,10 +474,11 @@ async function launchResumedPiSubagent(request, operations) {
     let id = request.id ?? randomUUID();
     const autoExit = request.behavior?.autoExit ?? true;
     const artifactDir = join(request.parent.sessionDir, "artifacts", request.parent.sessionId);
-    const inherited = lineageFromEnvironment();
-    let prior;
+    const inherited = readSessionBinding(request.parent.sessionFile)?.child?.lineage ?? lineageFromEnvironment();
+    const priorBinding = readSessionBinding(request.sessionFile);
+    let prior = priorBinding?.child?.lineage;
     try {
-        prior = JSON.parse(readFileSync(`${request.sessionFile}.lineage.json`, "utf8"));
+        prior ??= JSON.parse(readFileSync(`${request.sessionFile}.lineage.json`, "utf8"));
         if (!prior.rootDir || !prior.rootId || !prior.nodeId)
             prior = undefined;
     }
@@ -376,7 +496,10 @@ async function launchResumedPiSubagent(request, operations) {
         inheritedRootDir: inherited?.rootDir,
         inheritedRootId: inherited?.rootId,
     }));
+    const storeDir = sessionBindingStore(request.parent.sessionFile);
+    registerSessionLineage(storeDir, request.parent.sessionId, lineage.rootDir);
     const interactive = request.behavior?.interactive ?? !autoExit;
+    const executionOwner = request.executionOwner;
     const startTime = Date.now();
     const surface = request.surface ?? operations.createPane(request.name, request.workspace);
     const allocatedSurface = request.surface === undefined;
@@ -390,6 +513,7 @@ async function launchResumedPiSubagent(request, operations) {
         if (lineage) {
             appendLineageEvent(lineage.rootDir, `metadata:${lineage.nodeId}:${startTime}`, "launch_metadata", lineage.nodeId, {
                 name: request.name,
+                executionOwner,
                 task: request.message ?? "resumed session",
                 surface,
                 sessionFile: request.sessionFile,
@@ -411,6 +535,23 @@ async function launchResumedPiSubagent(request, operations) {
         // Resume must use the existing session position from before the new Pi
         // process starts, not a line count observed after launch.
         const sessionBaseline = captureSessionBaseline(request.sessionFile);
+        seedSessionBinding(request.sessionFile, {
+            version: 1, storeDir,
+            child: {
+                lineage,
+                environment: {
+                    ...priorBinding?.child?.environment,
+                    ...lineageEnvironment(lineage),
+                    PI_SUBAGENT_NAME: request.name,
+                    PI_SUBAGENT_ID: id,
+                    PI_SUBAGENT_ACTIVITY_FILE: activityFile,
+                    PI_SUBAGENT_SETTLED_EVENTS_FILE: settledEventsFile,
+                    PI_SUBAGENT_AUTO_EXIT: autoExit ? "1" : "0",
+                    PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS: JSON.stringify(sessionBaseline.assistantEntryIds),
+                    PI_SUBAGENT_RESUME: "1",
+                },
+            },
+        });
         const env = [
             ...(process.env.PI_CODING_AGENT_DIR
                 ? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
@@ -431,8 +572,9 @@ async function launchResumedPiSubagent(request, operations) {
             "pi",
             "--session",
             shellQuote(request.sessionFile),
+            ...JSON.parse(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION_EXTENSIONS ?? "[]").map(shellQuote),
             "-e",
-            shellQuote(join(SUBAGENTS_DIR, "subagent-done.js")),
+            shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
             ...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
         ].join(" ");
         const launchScriptFile = operations.runScript(surface, `${command}; echo '__SUBAGENT_DONE_'$?'__'`, {
@@ -447,6 +589,7 @@ async function launchResumedPiSubagent(request, operations) {
         });
         return {
             lineage,
+            executionOwner,
             id,
             name: request.name,
             task: request.message ?? "resumed session",
@@ -457,6 +600,7 @@ async function launchResumedPiSubagent(request, operations) {
             launchScriptFile,
             activityFile,
             settledEventsFile,
+            ...(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION === "1" ? { replication: true } : {}),
             interactive,
             runtimePlan: undefined,
             sessionBaseline,
@@ -476,21 +620,15 @@ async function launchResumedPiSubagent(request, operations) {
         throw error;
     }
 }
-export function buildSubagentToolAllowlist(tools, autoExit = false, includeControlTools = true) {
+export function buildSubagentToolAllowlist(tools, _autoExit = false, _includeControlTools = true) {
     const requested = (tools ?? "")
         .split(",")
         .map((tool) => tool.trim())
         .filter(Boolean);
     if (requested.length === 0)
         return null;
-    const allow = new Set(requested);
-    if (includeControlTools) {
-        allow.delete("subagent_done");
-        allow.add("caller_ping");
-        if (!autoExit)
-            allow.add("subagent_done");
-    }
-    return [...allow].join(",");
+    const removed = new Set(["subagent", "subagent_resume", "subagent_interrupt", "subagent_cancel", "subagents_list", "caller_ping", "subagent_done"]);
+    return [...new Set(requested.filter((tool) => !removed.has(tool)))].join(",");
 }
 /** Normalize requested skill names for safe, deterministic child transport. */
 export function normalizeSkillNames(skills) {

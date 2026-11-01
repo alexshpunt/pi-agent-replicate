@@ -1,14 +1,19 @@
 # Worktree subagents
 
-A model-facing `subagent` launch may request an isolated Git worktree:
+The retained package-root API and internal launcher support opt-in isolated Git worktrees. This document describes those retained paths only. The model-facing `replicate` tool defaults to a source-snapshot worktree with automatic host-owned join and successful cleanup; it also supports a shared-directory mode. See the README for that separate contract.
 
-```json
-{
-  "name": "issue-42-build",
-  "task": "Implement the approved change, test it, commit it, and report the SHA.",
-  "worktree": { "branch": "issue/42", "base": "HEAD" }
-}
+For example, a tree consumer can launch:
+
+```typescript
+tree.launch({
+  name: "issue-42-build",
+  agent: "implementer",
+  task: "Implement the approved change, test it, commit it, and report the SHA.",
+  worktree: { branch: "issue/42", base: "HEAD" },
+});
 ```
+
+This example assumes an existing `implementer` role. Bare API children are also supported.
 
 `cwd` selects the source repository. `base` resolves to an exact commit before creation and defaults to committed `HEAD`. The child starts at the Herdr-created worktree root.
 
@@ -44,7 +49,9 @@ git -C <worktree-path> diff <base-sha>...HEAD
 
 If creation returns an ambiguous Herdr error, the extension may reconcile one exact branch match from Herdr's worktree list. It never guesses among multiple matches. A failed launch retains any verified worktree and records the error in its manifest.
 
-`subagent_resume` resumes a session in an ordinary pane. It does not reattach ownership of a retained worktree.
+The retained internal resume path opens an ordinary pane. It does not reattach ownership of a retained worktree.
+
+A parent or child may move through Teleport without transferring or discarding the original worktree ownership. The session's binding still resolves the launch manifest and pending answer. The new session location is used for lifecycle observation and delivery; the retained checkout remains the original launch's review target. Herdr process loss does not authorize closing an unrelated pane that reuses an old ID.
 
 ## Cleanup
 

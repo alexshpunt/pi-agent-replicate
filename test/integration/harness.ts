@@ -23,6 +23,9 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { writeBindingFile } from "../../pi-extension/subagents/session-binding.ts";
+import { listHerdrWorktrees } from "../../pi-extension/subagents/herdr.ts";
 import { TEST_MODEL as FIXTURE_MODEL, TEST_PROVIDER_URL } from "./fake-provider.ts";
 import {
   isTerminalAvailable,
@@ -149,10 +152,17 @@ export interface TestEnv {
   dir: string;
   /** Active mux backend for this test run */
   backend: MuxBackend;
+  /** This fixture owns the Git repository and all replication worktrees made from it. */
+  replication?: boolean;
   /** Dedicated workspace owned by this test environment. */
   workspaceId: string;
+  /** All workspace incarnations owned by this test across server replacement. */
+  workspaceIds: string[];
   /** Parent workspace restored after cleanup. */
   previousWorkspaceId: string | undefined;
+  /** Exact caller surface restored after cleanup. */
+  previousPaneId: string | undefined;
+  previousTabId: string | undefined;
   /** Agent configuration restored after cleanup. */
   previousAgentDir: string | undefined;
   /** Surfaces created directly by the harness. */
@@ -209,21 +219,30 @@ function createTestWorkspace(cwd: string): string {
 
 
 
+function bindTestWorkspace(workspaceId: string): void {
+  const panes = workspacePaneIds(workspaceId);
+  if (panes?.length !== 1) throw new Error(`Expected one root pane in test workspace ${workspaceId}`);
+  const pane = JSON.parse(execFileSync("herdr", ["pane", "get", panes[0]], { encoding: "utf8" })).result.pane;
+  process.env.HERDR_WORKSPACE_ID = workspaceId;
+  process.env.HERDR_PANE_ID = pane.pane_id;
+  process.env.HERDR_TAB_ID = pane.tab_id;
+}
 /**
  * Create an isolated test environment with test agent definitions.
  * The temp dir has `.pi/agents/` containing copies of all test agents.
  */
-export function createTestEnv(backend: MuxBackend): TestEnv {
+export function createTestEnv(backend: MuxBackend, options: { replication?: boolean } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), "pi-integ-"));
   const agentsDir = join(dir, ".pi", "agents");
   const agentDir = join(dir, ".pi", "agent");
   const previousWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+  const previousPaneId = process.env.HERDR_PANE_ID;
+  const previousTabId = process.env.HERDR_TAB_ID;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   if (!previousWorkspaceId) throw new Error("HERDR_WORKSPACE_ID is required for integration tests");
   const workspaceId = createTestWorkspace(dir);
-  // Herdr creates subagent tabs in the workspace identified by this env var.
-  // Point the harness at its dedicated workspace without changing the parent's pane.
-  process.env.HERDR_WORKSPACE_ID = workspaceId;
+  // Herdr resolves --current by pane identity, not a workspace-only override.
+  bindTestWorkspace(workspaceId);
   mkdirSync(agentsDir, { recursive: true });
   if (USE_TEST_PROVIDER) {
     mkdirSync(join(agentDir, "extensions"), { recursive: true });
@@ -237,7 +256,16 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
       `import { existsSync, mkdirSync, writeFileSync } from "node:fs";\n` +
       `import { join } from "node:path";\n` +
       `export default function(pi) {\n` +
-      `  if (!(process.env.PI_DENY_TOOLS || '').split(',').includes('subagent')) extension(pi);\n` +
+
+      `  const queuedResultMarker = process.env.PI_INTEG_QUEUE_RESULT_MARKER;\n` +
+      `  if (queuedResultMarker) {\n` +
+      `    const send = pi.sendMessage.bind(pi);\n` +
+      `    pi.sendMessage = (message, options) => {\n` +
+      `      if (message.customType === 'subagent_result') { writeFileSync(queuedResultMarker, message.details.deliveryId); return; }\n` +
+      `      return send(message, options);\n` +
+      `    };\n` +
+      `  }\n` +
+      `  extension(pi);\n` +
       `  pi.on('session_start', (_event, ctx) => {\n` +
       `    const paneId = process.env.HERDR_PANE_ID;\n` +
       `    const agentDir = process.env.PI_CODING_AGENT_DIR;\n` +
@@ -289,11 +317,23 @@ export function createTestEnv(backend: MuxBackend): TestEnv {
     }
   }
 
+  if (options.replication) {
+    writeFileSync(join(dir, '.gitignore'), '.pi/agent/\n*.jsonl\n*.lineage.json\n');
+    execFileSync('git', ['init', '-q', dir]);
+    execFileSync('git', ['-C', dir, 'config', 'user.name', 'Integration test']);
+    execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.invalid']);
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'Test source']);
+  }
   return {
     dir,
     backend,
+    replication: options.replication,
     workspaceId,
+    workspaceIds: [workspaceId],
     previousWorkspaceId,
+    previousPaneId,
+    previousTabId,
     previousAgentDir,
     surfaces: [],
     tempFiles: [],
@@ -436,7 +476,38 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
         await waitForPaneAbsence(surface, { timeoutMs: CLEANUP_TIMEOUT, intervalMs: 50 });
       } catch {}
     }
-    await waitForWorkspaceTeardown(env.workspaceId);
+    if (env.replication) {
+      // Settled replicas can close their workspace while retaining the checkout.
+      // Dispose only trees linked to this test-owned repository.
+      const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: env.dir, encoding: "utf8" }).trim();
+      for (const work of listHerdrWorktrees(env.dir).filter((entry) => entry.isLinkedWorktree)) {
+        // The host may finish cleanup after this list was read.
+        if (!existsSync(work.path)) continue;
+        try {
+          if (execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work.path, encoding: "utf8" }).trim() !== common) throw new Error("Test worktree ownership mismatch.");
+        } catch (error) {
+          if (existsSync(work.path)) throw error;
+          continue;
+        }
+        if (work.workspaceId) {
+          try {
+            execFileSync("herdr", ["worktree", "remove", "--workspace", work.workspaceId, "--force", "--trust-repository"], { encoding: "utf8", stdio: "pipe" });
+          } catch (error) {
+            if (workspaceExists(work.workspaceId)) throw error;
+          }
+        }
+        if (existsSync(work.path)) {
+          await waitForProcessCwdRelease(work.path);
+          try {
+            execFileSync("git", ["worktree", "remove", "--force", work.path], { cwd: env.dir, encoding: "utf8" });
+          } catch (error) {
+            if (existsSync(work.path)) throw error;
+          }
+        }
+        await waitForPathAbsence(work.path);
+      }
+    }
+    for (const workspaceId of env.workspaceIds) await waitForWorkspaceTeardown(workspaceId);
     await waitForProcessCwdRelease(env.dir);
   } catch (error) {
     cleanupError = error;
@@ -445,6 +516,10 @@ export async function cleanupTestEnv(env: TestEnv): Promise<void> {
       process.env.HERDR_WORKSPACE_ID = env.previousWorkspaceId;
     } else {
       delete process.env.HERDR_WORKSPACE_ID;
+    }
+    for (const [key, value] of [["HERDR_PANE_ID", env.previousPaneId], ["HERDR_TAB_ID", env.previousTabId]] as const) {
+      if (value) process.env[key] = value;
+      else delete process.env[key];
     }
     if (env.previousAgentDir) {
       process.env.PI_CODING_AGENT_DIR = env.previousAgentDir;
@@ -493,6 +568,33 @@ export function untrackSurface(env: TestEnv, surface: string): void {
   env.surfaces = env.surfaces.filter((s) => s !== surface);
 }
 
+/** Ask the runner to replace only its test-owned Herdr process and endpoint. */
+export async function restartIsolatedHerdr(env: TestEnv): Promise<void> {
+  const runDir = process.env.PI_INTEGRATION_HERDR_RUN_DIR;
+  const socket = process.env.PI_INTEGRATION_HERDR_SOCKET;
+  if (!runDir || !socket || process.env.HERDR_SOCKET_PATH !== socket) throw new Error("Restart requires the isolated runner");
+  const id = randomUUID();
+  writeBindingFile(join(runDir, "restart-request.json"), { id });
+  const deadline = Date.now() + PI_TIMEOUT;
+  let response: { id?: string; pid?: number; error?: string } | undefined;
+  while (Date.now() < deadline) {
+    try { response = JSON.parse(readFileSync(join(runDir, "restart-response.json"), "utf8")); } catch {}
+    if (response?.id === id) break;
+    await sleep(50);
+  }
+  if (response?.id !== id || response.error || !response.pid) throw new Error(response?.error ?? "Isolated restart timed out");
+  if (env.replication && workspaceExists(env.workspaceId)) {
+    // Herdr keeps the source workspace while it owns linked worktrees. Reuse
+    // this isolated fixture's restored source instead of deleting recovery work.
+    bindTestWorkspace(env.workspaceId);
+  } else {
+    await waitForWorkspaceTeardown(env.workspaceId);
+    env.workspaceId = createTestWorkspace(env.dir);
+    env.workspaceIds.push(env.workspaceId);
+    bindTestWorkspace(env.workspaceId);
+  }
+  env.surfaces = [];
+}
 // ── Pi session management ──
 
 /**
@@ -510,12 +612,28 @@ export function startPi(
     model?: string;
     extraArgs?: string;
     extensionSource?: string;
+    agentDir?: string;
     environment?: Record<string, string>;
   },
 ): void {
   const model = opts?.model ?? TEST_MODEL;
   const extra = opts?.extraArgs ?? "";
-  const agentDir = USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "";
+  const ideEntry = process.env.PI_INTEGRATION_IDE_ENTRY;
+  let ideFixture: string | undefined;
+  const ideEnvironment: Record<string, string> = {};
+  if (ideEntry) {
+    ideFixture = join(testDir, "ide-under-test.ts");
+    const source = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dirname(dirname(ideEntry)), encoding: "utf8" }).trim();
+    const latest = execFileSync("git", ["rev-parse", "origin/develop"], { cwd: dirname(dirname(ideEntry)), encoding: "utf8" }).trim();
+    if (source !== latest) throw new Error("IDE checkout must match origin/develop");
+    const version = JSON.parse(readFileSync(join(dirname(dirname(ideEntry)), "package.json"), "utf8")).version;
+    const evidence = { loaded: true, entry: ideEntry, version, source };
+    ideEnvironment.PI_INTEGRATION_IDE_SOURCE_COMMIT = source;
+    ideEnvironment.PI_INTEGRATION_IDE_PACKAGE_VERSION = version;
+    const record = process.env.PI_INTEGRATION_IDE_RECORD ?? join(testDir, "ide-runtime.jsonl");
+    writeFileSync(ideFixture, `import ide from ${JSON.stringify(ideEntry)}; import {appendFileSync} from "node:fs"; export default async function(pi){await ide(pi); pi.on("session_start",()=>appendFileSync(${JSON.stringify(record)},JSON.stringify(${JSON.stringify(evidence)})+"\\n"));}`);
+  }
+  const agentDir = opts?.agentDir ?? (USE_TEST_PROVIDER ? join(testDir, ".pi", "agent") : "");
   const extensionSource = opts?.extensionSource ?? (USE_TEST_PROVIDER
     ? join(agentDir, "extensions", "subagents-under-test.ts")
     : EXTENSION_SOURCE);
@@ -524,13 +642,14 @@ export function startPi(
   // their isolated extension path while keeping all automatic extensions off.
   const cmd = [
     `cd ${shellQuote(testDir)} &&`,
-    ...Object.entries(opts?.environment ?? {}).map(
+    ...Object.entries({ ...ideEnvironment, ...opts?.environment }).map(
       ([name, value]) => `${name}=${shellQuote(value)}`,
     ),
     agentDir ? `PI_CODING_AGENT_DIR=${shellQuote(agentDir)}` : "",
     `pi`,
     `-ne`,
     `-e ${shellQuote(extensionSource)}`,
+    ideFixture ? `-e ${shellQuote(ideFixture)}` : "",
     `--model ${shellQuote(model)}`,
     extra,
     shellQuote(task),

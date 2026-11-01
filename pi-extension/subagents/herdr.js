@@ -68,8 +68,10 @@ function extractHerdrTabSurface(output, context) {
     const parsed = parseHerdrJson(output);
     const paneId = parsed?.result?.root_pane?.pane_id;
     const tabId = parsed?.result?.tab?.tab_id ?? parsed?.result?.root_pane?.tab_id;
-    if (typeof paneId !== "string" || !paneId ||
-        typeof tabId !== "string" || !tabId) {
+    if (typeof paneId !== "string" ||
+        !paneId ||
+        typeof tabId !== "string" ||
+        !tabId) {
         throw new Error(`Unexpected herdr ${context} output: ${output.trim() || "(empty)"}`);
     }
     return { paneId, tabId };
@@ -140,6 +142,17 @@ function getHerdrCurrentPaneInfo(run = herdrExec) {
     }
     return { pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id };
 }
+/** Read the current pane's manual name; unavailable metadata must not block a launch. */
+export function getHerdrCurrentPaneTitle(run = herdrExec) {
+    try {
+        const parsed = parseHerdrJson(run(buildCurrentPaneArgs()));
+        const pane = parsed?.result?.pane;
+        return [pane?.title, pane?.label].find((value) => typeof value === "string" && !!value.trim());
+    }
+    catch {
+        return undefined;
+    }
+}
 function buildTabCreateArgs(name, cwd, workspaceId) {
     return [
         "tab",
@@ -201,7 +214,8 @@ export function parseHerdrWorktreeList(output) {
     if (parsed?.result?.type !== "worktree_list" || !Array.isArray(worktrees)) {
         throw new Error("Unexpected herdr worktree list output");
     }
-    return worktrees.map((worktree) => {
+    // Detached checkouts have no branch and cannot match an owned replica.
+    return worktrees.filter((worktree) => !(worktree.is_detached === true && worktree.branch === undefined && typeof worktree.path === "string")).map((worktree) => {
         if (typeof worktree.branch !== "string" ||
             typeof worktree.path !== "string") {
             throw new Error("Unexpected herdr worktree list entry");
@@ -306,13 +320,13 @@ export function readHerdrScreen(surface, lines = 50) {
         String(lines),
     ]);
 }
-export async function readHerdrScreenAsync(surface, lines = 50) {
+export async function readHerdrScreenAsync(surface, lines = 50, source = "visible") {
     return herdrExecAsync([
         "pane",
         "read",
         surface,
         "--source",
-        "visible",
+        source,
         "--lines",
         String(lines),
     ]);

@@ -6,7 +6,7 @@ The published version must be unique on npm.
 
 ## Public versioning
 
-`0.0.1` was a manual bootstrap publication that established the npm package. `0.0.2` is the first release published through the trusted GitHub Actions workflow and is the current public baseline.
+`pi-agent-replicate` is a new npm package name and needs its first publication. The upstream `pi-herdr-agents` package used `0.0.1` for its manual bootstrap and `0.0.2` for its first trusted-publishing release. Those versions are upstream history, not publications of this renamed package.
 
 Do not design a release that creates a GitHub Release without a successful npm publish for a new version. The workflow publishes first, then tags and creates the GitHub Release.
 
@@ -14,7 +14,7 @@ Do not design a release that creates a GitHub Release without a successful npm p
 
 You need:
 
-- Permission to manage this repository's GitHub Actions settings and npm package access for `pi-herdr-agents`
+- Permission to manage this repository's GitHub Actions settings and npm package access for `pi-agent-replicate`
 - A clean local `main` branch
 
 Automated release gates (run by the workflow and required locally):
@@ -47,10 +47,10 @@ Do not release from skipped Herdr tests. Confirm the package preview includes `R
 
 After the package exists on npm, steady-state releases use npm trusted publishing (OIDC). No long-lived `NPM_TOKEN` is required.
 
-1. Open the package settings for `pi-herdr-agents` on [npmjs.com](https://www.npmjs.com/).
+1. Open the package settings for `pi-agent-replicate` on [npmjs.com](https://www.npmjs.com/).
 2. Add a trusted publisher for GitHub Actions with:
-   - Organization or user: `giuseppecrj`
-   - Repository: `pi-herdr-agents`
+   - Organization or user: `alexshpunt`
+   - Repository: `pi-agent-replicate`
    - Workflow filename: `publish.yml`
    - Allowed action: `npm publish`
 3. Confirm the release job has `permissions.id-token: write` and runs on a GitHub-hosted runner (already set in `.github/workflows/publish.yml`).
@@ -61,7 +61,9 @@ When the repository secret `NPM_TOKEN` is absent, the publish step unsets `NODE_
 
 ### Bootstrap history
 
-The initial `0.0.1` publication established the npm package. Trusted publishing is now configured for `giuseppecrj/pi-herdr-agents` and `publish.yml`, so all later releases use OIDC only. Later version bumps use trusted publishing only. Do not add `NPM_TOKEN`: the workflow rejects it once the package exists.
+The upstream `0.0.1` publication and documented trusted publisher for `giuseppecrj/pi-herdr-agents` do not establish the renamed npm package or authorize its releases.
+
+Only during an explicitly requested first release, configure a temporary `NPM_TOKEN` if `pi-agent-replicate` does not yet exist on npm. After that publication, revoke and remove the token, then configure the trusted publisher above. The workflow rejects `NPM_TOKEN` once the package exists. Renaming the project does not publish a package or configure its trusted publisher.
 
 ## Publish a release
 
@@ -92,16 +94,16 @@ You can rerun a failed or incomplete release from **Actions → Release → Run 
 After the workflow succeeds, inspect the published package:
 
 ```bash
-npm view pi-herdr-agents
+npm view pi-agent-replicate
 ```
 
 Test installation through Pi:
 
 ```bash
-pi install npm:pi-herdr-agents
+pi install npm:pi-agent-replicate
 ```
 
-The package should appear at <https://pi.dev/packages/pi-herdr-agents> after the gallery indexes the npm release.
+The package should appear at <https://pi.dev/packages/pi-agent-replicate> after the gallery indexes the npm release.
 
 ## Troubleshooting
 
@@ -111,7 +113,7 @@ The workflow stops if the matching version tag already points to a different com
 
 ### npm rejects authentication
 
-Confirm that the trusted publisher matches owner `giuseppecrj`, repository `pi-herdr-agents`, and workflow `publish.yml`, that the job has `id-token: write`, and that the runner is GitHub-hosted. If a release reports that `NPM_TOKEN` is bootstrap-only, remove the secret and use the trusted publisher.
+Confirm that the trusted publisher matches owner `alexshpunt`, repository `pi-agent-replicate`, and workflow `publish.yml`, that the job has `id-token: write`, and that the runner is GitHub-hosted. If a release reports that `NPM_TOKEN` is bootstrap-only, remove the secret and use the trusted publisher.
 
 ### npm reports that the version already exists
 
@@ -119,7 +121,7 @@ If the published `gitHead` does not match this commit, the workflow fails before
 
 ### Initial branch creation did not release
 
-A clean repository's first push has `github.event.before` all zeroes. The workflow treats that as `release=false`. This package is already established on npm, so use tokenless trusted publishing for later releases.
+A clean repository's first push has `github.event.before` all zeroes. The workflow treats that as `release=false`. For the renamed package's first publication, follow the bootstrap instructions above. Once it exists on npm, use tokenless trusted publishing for later releases.
 
 ### The package is absent from pi.dev
 

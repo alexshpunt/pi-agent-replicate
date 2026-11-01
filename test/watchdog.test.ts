@@ -10,6 +10,7 @@ import {
   DEFAULT_QUIET_THRESHOLD_MS,
   resolveQuietThreshold,
   shouldStartStaleRecovery,
+  replicaStopDue,
 } from "../pi-extension/subagents/watchdog.ts";
 
 function activity(overrides: Partial<SubagentActivityState> = {}): SubagentActivityState {
@@ -28,6 +29,17 @@ function activity(overrides: Partial<SubagentActivityState> = {}): SubagentActiv
     ...overrides,
   };
 }
+
+test("the safety net needs ten continuous stopped seconds", () => {
+  const stopped = { now: 11_000, idleSince: 1_000, idle: true, pendingMessages: false, moving: false, descendants: false };
+  assert.equal(replicaStopDue({ ...stopped, now: 10_999 }), false);
+  assert.equal(replicaStopDue(stopped), true);
+  for (const flag of ["pendingMessages", "moving", "descendants"] as const) {
+    assert.equal(replicaStopDue({ ...stopped, [flag]: true }), false, flag);
+  }
+  assert.equal(replicaStopDue({ ...stopped, idle: false }), false, "tools, retries and compaction keep Pi nonidle");
+  assert.equal(replicaStopDue({ ...stopped, idleSince: undefined }), false, "silence is not stopped evidence");
+});
 
 test("resolves the quiet threshold with environment precedence and strict validation", () => {
   assert.equal(resolveQuietThreshold(undefined, undefined), DEFAULT_QUIET_THRESHOLD_MS);

@@ -13,6 +13,21 @@ import type { SubagentActivityState } from "./activity.ts";
 export const DEFAULT_QUIET_THRESHOLD_MS = 120_000;
 export const MAX_RECOVERY_ATTEMPTS = 3;
 
+export const REPLICA_STOP_GRACE_MS = 10_000;
+
+/** A stopped replica gets a safety net, never an inactivity-based relaunch. */
+export function replicaStopDue(input: {
+  now: number;
+  idleSince: number | undefined;
+  idle: boolean;
+  pendingMessages: boolean;
+  moving: boolean;
+  descendants: boolean;
+}): boolean {
+  return input.idleSince !== undefined && input.idle && !input.pendingMessages &&
+    !input.moving && !input.descendants && input.now - input.idleSince >= REPLICA_STOP_GRACE_MS;
+}
+
 export type RecoveryCause = "crash" | "stale";
 export type StaleVerdict = "active" | "waiting" | "stale";
 

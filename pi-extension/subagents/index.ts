@@ -22,7 +22,6 @@ import {
 } from "node:fs";
 import {
 	isTerminalAvailable,
-	terminalSetupHint,
 	closePane,
 	rememberPaneTab,
 	interruptPane,
@@ -35,6 +34,16 @@ import {
 import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } from "./completion.ts";
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
+import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
+import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { readReplicaDirectoryMode, registerReplicaDirectoryCommand } from "./replica-directory-settings.ts";
+import { snapshotSource } from "./source-state.ts";
+import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
+import { runReplicaBackground } from "./replica-background.ts";
+import { reserveReplicaBranch } from "./replica-branch.ts";
+import { getHerdrCurrentPaneTitle, readHerdrScreenAsync } from "./herdr.ts";
+import { replicaWorkFile, createReplicaWork, createSharedReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, replicaLaunchFailureReported, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
+import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive, launchOwnsPane, type LaunchPaneOwnership } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
 import { createDeliveryLog } from "./delivery-log.ts";
@@ -56,7 +65,6 @@ import {
 	discoverAgentCatalog,
 	resolveDenyTools,
 	type AgentDefinition,
-	type AgentDiagnostic,
 	type ListedAgentDefinition,
 } from "./role-catalog.ts";
 type AgentDefaults = AgentDefinition;
@@ -114,6 +122,7 @@ import {
 import {
   appendLineageEvent,
   appendLineageInbox,
+  acknowledgeReportedLaunchFailure,
   claimLineageInboxMaterialization,
   completeLineageInboxMaterialization,
   releaseLineageInboxMaterialization,
@@ -123,7 +132,6 @@ import {
   latestDescendantDeliveryAt,
   lineageIntegrityError,
   pendingLineageInboxes,
-  readLineageAttachment,
   reduceLineage,
   type LineageRegistration,
   type LineageNodeState,
@@ -149,12 +157,7 @@ const RUNTIME_KEY = Symbol.for("pi-subagents/runtime");
 
 
 
-function getFirstText(
-	content: readonly { type: string; text?: string }[],
-): string {
-	const first = content[0];
-	return first?.type === "text" ? (first.text ?? "") : "";
-}
+
 
 {
 	const prevInterval = (globalThis as any)[WIDGET_INTERVAL_KEY];
@@ -169,14 +172,8 @@ function getFirstText(
 	}
 }
 
-function buildSubagentRoutingGuidelines(): string[] {
-	return [
-		"Subagents inherit the parent model and thinking unless the selected role declares them in frontmatter. A subagent call cannot override either value.",
-		"Before launching a new group of subagents, choose a short task slug and name each new child <task>-<role>[-n], for example login-api or login-test2. Use only plan, research, ui, api, build, test, review, browser, security, perf, or merge as roles; leave existing names unchanged. After the final launch, print name | agent kind | role | model | worktree, then use each name in prompts, handoffs, and results.",
-	];
-}
 
-const subagentRoutingGuidelines = buildSubagentRoutingGuidelines();
+
 
 const SubagentParams = Type.Object({
 	name: Type.String({
@@ -243,34 +240,18 @@ const SubagentParams = Type.Object({
 
 
 
+
 function discoverAgentDefinitions(
 	pi?: Pick<ExtensionAPI, "events">,
 ): ListedAgentDefinition[] {
 	return discoverAgentCatalog(pi).agents;
 }
 
-function formatAgentSource(agent: ListedAgentDefinition): string {
-	return agent.source === "package" && agent.provider
-		? `package:${agent.provider}`
-		: agent.source;
-}
 
-function formatVisibleAgentDefinitions(
-	agents: ListedAgentDefinition[],
-): string[] {
-	return agents
-		.filter((agent) => !agent.disableModelInvocation)
-		.map((agent) => {
-			const badge = ` (${formatAgentSource(agent)})`;
-			const desc = agent.description ? ` — ${agent.description}` : "";
-			const model = agent.model ? ` [${agent.model}]` : "";
-			return `• ${agent.name}${badge}${model}${desc}`;
-		});
-}
 
-function formatAgentDiagnostics(diagnostics: AgentDiagnostic[]): string[] {
-	return diagnostics.map((diagnostic) => `! ${diagnostic.message}`);
-}
+
+
+
 
 function resolveEffectiveSessionMode(
 	params: Static<typeof SubagentParams>,
@@ -310,14 +291,14 @@ function resolveLaunchBehavior(
  *      woken on stall/recovery transitions. Agents that don't auto-exit are
  *      driven by the user in their own pane and stall pings are noise.
  *
- * A bare `subagent({ name, task })` call has no role defaults and runs
- * autonomously unless the caller explicitly sets `interactive: true`.
+ * An internal bare launch has no role defaults and runs autonomously
+ * unless the caller explicitly sets `interactive: true`.
  */
 function resolveEffectiveAutoExit(
 	params: Static<typeof SubagentParams>,
 	agentDefs: AgentDefaults | null,
 ): boolean {
-	// Named agents preserve their declared behavior. Bare tool calls are
+	// Named agents preserve their declared behavior. Internal bare calls are
 	// autonomous by default, including full-context forks: `fork` controls
 	// context inheritance, not whether the child should remain open.
 	// Interactive callers opt out explicitly with `interactive: true`.
@@ -366,17 +347,7 @@ function formatElapsed(seconds: number): string {
 	return `${m}m ${s}s`;
 }
 
-function muxUnavailableResult() {
-	return {
-		content: [
-			{
-				type: "text" as const,
-				text: `Subagents require herdr. ${terminalSetupHint()}`,
-			},
-		],
-		details: { error: "herdr not available" },
-	};
-}
+
 
 function shouldRetainSubagentSurface(
 	running: Pick<RunningSubagent, "worktree"> | { worktree?: unknown },
@@ -408,7 +379,7 @@ function finalizeSubagentSurface(
 		return handoff;
 	}
 
-	if (!closeOrdinaryPane) return undefined;
+	if (!closeOrdinaryPane || running.lineage?.launchKind === "worktree" || !childPaneOwned(running)) return undefined;
 	try {
 		closePane(running.surface);
 	} catch (error) {
@@ -465,11 +436,19 @@ function sendSubagentResult(
 ): void {
 	const childId = typeof details.childId === "string" ? details.childId : undefined;
 	const running = childId ? runningSubagents.get(childId) : undefined;
-	const resultContent = running?.deliveryPayload ??
+	// A replay must keep its saved payload, file and owner together.
+	const savedDelivery = Object.hasOwn(details, "executionOwner");
+	const executionOwner = savedDelivery
+		? readExecutionOwner(details.executionOwner)
+		: running?.executionOwner;
+	const resultContent = (savedDelivery ? undefined : running?.deliveryPayload) ??
 		(typeof details.resultContent === "string"
 			? details.resultContent
 			: boundResultPresentation(content, ""));
-	const promptContent = boundResultPresentation(
+	if (details.replication && runtime.latestCtx) {
+		details = { ...details, receiverSessionId: runtime.latestCtx.sessionManager.getSessionId() };
+	}
+	const promptContent = details.replication ? resultContent : boundResultPresentation(
 		`${resultContent}\n\n${RESULT_CONTINUATION_PROMPT}`,
 		"",
 	);
@@ -480,8 +459,9 @@ function sendSubagentResult(
 			display: true,
 			details: {
 				...details,
+				...linkedOutputDetails(executionOwner),
 				resultContent,
-				...(running?.resultPath ? { resultPath: running.resultPath } : {}),
+				...(!savedDelivery && running?.resultPath ? { resultPath: running.resultPath } : {}),
 			},
 		},
 		{ triggerTurn: true, deliverAs: "steer" },
@@ -600,6 +580,8 @@ interface SubagentResult {
 }
 
 interface PendingTerminalDelivery {
+  /** Its exact native tool error already reached the parent session. */
+  alreadyReported?: boolean;
   finalAssistant?: SettledDeliveryIdentity;
   resultContent?: string;
 
@@ -612,6 +594,18 @@ interface PendingTerminalDelivery {
  * State for a launched (but not yet completed) subagent.
  */
 interface RunningSubagent {
+	executionOwner?: ExecutionOwner;
+	/** Current-session replica, not a named-role launch. */
+	replication?: boolean;
+	replicaWorkFile?: string;
+	launchPane?: LaunchPaneOwnership;
+	launchError?: string;
+	/** Settled task waiting for its exact parent before integration. */
+	pendingReplicaResult?: ReplicaCompletion;
+	/** In-flight background work must not be resubmitted by status ticks or reload. */
+	replicaFinishing?: boolean;
+	replicaRetryAt?: number;
+	replicaCleaning?: boolean;
 	lineage?: LineageRegistration;
 	id: string;
 	name: string;
@@ -684,11 +678,14 @@ interface InflightDelivery {
 }
 
 interface SubagentRuntime {
+	resolveExecutionOwner?: (id: string) => ExecutionOwner | undefined;
 	runningSubagents: Map<string, RunningSubagent>;
 	resultDeliveryQueue: ResultDeliveryQueue;
 	inflightDeliveries: Map<string, InflightDelivery>;
 	pi?: ExtensionAPI;
 	latestCtx?: ExtensionContext;
+	/** Do not queue into a source session after Teleport takes its snapshot. */
+	handoffPending?: boolean;
 }
 
 function createSubagentRuntime(): SubagentRuntime {
@@ -765,6 +762,7 @@ function acknowledgeRestoredInboxDelivery(input: {
 
 /** Materialize inbox records left by a crash into this exact session once. */
 async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void> {
+	if (runtime.handoffPending) return;
 	const manager = ctx.sessionManager;
 	if (
 		!manager ||
@@ -825,9 +823,11 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 				continue;
 			}
 
-			const childSessionFile = reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
+			const childSessionFile = childSessionLocation(rootDir, inbox.nodeId)?.sessionFile ?? reduceLineage(rootDir).nodes.get(inbox.nodeId)?.sessionFile ?? inbox.sessionFile;
 			try {
 				sendSubagentResult(runtime.pi, resultContent, {
+					...inbox.payload,
+					executionOwner: readExecutionOwner(inbox.payload.executionOwner),
 					kind,
 					childId: inbox.nodeId,
 					sessionFile: childSessionFile,
@@ -858,15 +858,98 @@ async function restorePendingLineageInboxes(ctx: ExtensionContext): Promise<void
 		}
 	}
 }
+/** Save task facts and integration outcome before delivery and owned-resource cleanup. */
+function replicaRecordFor(running: RunningSubagent): string | undefined {
+  return running.replicaWorkFile ?? readSessionBinding(running.sessionFile)?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+}
+function finishReplicationResult(running: RunningSubagent, result: SubagentResult): void {
+  if (running.pendingTerminalDelivery || running.replicaFinishing || (running.replicaRetryAt ?? 0) > Date.now()) return;
+  const failed = !!running.launchError || result.exitCode !== 0 || !!result.errorMessage || !!result.error || !result.summary?.trim();
+  const completion: ReplicaCompletion = {
+    name: running.name, task: running.task, summary: result.summary ?? "", exitCode: failed ? 1 : 0, elapsed: result.elapsed,
+    ...(failed ? { errorMessage: running.launchError ?? result.errorMessage ?? result.error ?? "Replica failed." } : {}),
+  };
+  running.pendingReplicaResult = completion;
+  running.replicaFinishing = true;
+  void completeReplicaInBackground(running, completion).catch((error) => {
+    recordDeliveryFailure(running, `terminal:${running.id}`, error, "replica-completion");
+    running.replicaRetryAt = Date.now() + 2_000;
+  }).finally(() => { running.replicaFinishing = false; });
+}
+/** Retire resource work without sending a second result over an already saved tool error. */
+function acknowledgeFailedLaunch(running: RunningSubagent, error: string): void {
+  queueTerminalDelivery(running, undefined, () => {}, error, "error", true);
+}
+
+/** An ambiguous dispatch error cannot settle a process that actually started. */
+function launchFailureProcessActive(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  if (location && sessionLocationAlive(location)) return true;
+  if (!running.surface) return false;
+  try {
+    const info = getPaneProcessInfo(running.surface);
+    const owned = location ? sessionOwnsPane(location, running.surface, info.shellPid)
+      : running.launchPane ? launchOwnsPane(running.launchPane, running.surface, info.shellPid) : true;
+    return !owned || info.pids.some(pid => pid !== info.shellPid);
+  } catch (error) {
+    return !/pane_not_found|pane.*not found/i.test(String(error));
+  } // Unknown failures still leave pane/process loss to the ordinary observer.
+}
+async function completeReplicaInBackground(running: RunningSubagent, completion: ReplicaCompletion): Promise<void> {
+  const recordFile = replicaRecordFor(running);
+  if (!recordFile) throw new Error("Replica has no durable work record.");
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  const ctx = exactParentSessionActive(running) ? runtime.latestCtx : undefined;
+  const sessionFile = ctx?.sessionManager.getSessionFile();
+  const parent = sessionFile ? parentSessionLocation(sessionBindingStore(sessionFile), ctx!.sessionManager.getSessionId()) : undefined;
+  const { work } = await runReplicaBackground({
+    operation: "complete", file: recordFile, cwd: location?.cwd ?? running.worktree?.path ?? readReplicaWork(recordFile).sharedCwd!,
+    sessionFile: running.sessionFile, completion, parent,
+  });
+  if (!work?.completion) throw new Error("Replica worker returned no saved completion.");
+  running.pendingReplicaResult = work.completion;
+  if (work.integration.status === "pending" || !exactParentSessionActive(running)) return;
+  const saved = work.completion;
+  if (work.launchError && ctx && replicaLaunchFailureReported(work, ctx.sessionManager.getBranch(), running.executionOwner)) {
+    running.pendingReplicaResult = undefined;
+    acknowledgeFailedLaunch(running, work.launchError);
+    return;
+  }
+  const failed = saved.exitCode !== 0 || !!saved.error || !!saved.errorMessage || !saved.summary.trim();
+  const history = saved.historyPath
+    ? `Textual answer history: ${saved.historyPath}`
+    : `Textual answer history unavailable: ${saved.historyError ?? "No saved history."}`;
+  let summary = failed ? [`Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}`, saved.summary.trim(), history].filter(Boolean).join("\n\n") : saved.summary;
+  const report = work.mode === "shared" ? (failed ? "The copy worked in the shared directory; partial changes may already be present." : "")
+    : work.integration.status === "applied" ? ""
+    : work.integration.status === "conflict"
+      ? "The copy finished, but its changes conflict with your current work and were not included."
+      : work.integration.status === "not-attempted"
+        ? "The copy's unfinished work was not included in your work."
+        : "The copy finished, but its changes could not be safely included in your work.";
+  if (report) summary += `\n\n${report}`;
+  running.pendingReplicaResult = undefined;
+  queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
+    if (runtime.pi) sendSubagentResult(runtime.pi, summary, {
+      name: running.name, task: running.task, childId: running.id, sessionFile: work.sessionCheckpoint ?? running.sessionFile,
+      deliveryId: `terminal:${running.id}`, resultContent: summary,
+      exitCode: saved.exitCode, elapsed: saved.elapsed, replication: true,
+      ...(failed ? { errorMessage: saved.errorMessage, historyPath: saved.historyPath, historyError: saved.historyError } : {}),
+      worktreePath: work.worktree?.path, checkpoint: work.checkpoint?.commit,
+      integration: work.integration,
+    });
+  }, summary, failed ? "error" : "completed");
+}
 /** Rebuild direct-child watchers from durable launch metadata after a process restart. */
 function startRecoveredWatcher(running: RunningSubagent): void {
   const controller = new AbortController();
   running.abortController = controller;
   void watchSubagent(running, controller.signal).then((result) => {
     if (result.supervisionEpoch !== (running.supervisionEpoch ?? 0)) return;
+    if (running.replication) { finishReplicationResult(running, result); return; }
     if (result.ping) {
       queueTerminalDelivery(running, undefined, () => {
-        if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
+        if (runtime.pi) runtime.pi.sendMessage({ customType: "subagent_ping", content: result.ping?.message ?? "Recovered subagent needs help.", display: true, details: { ...linkedOutputDetails(running.executionOwner), name: running.name, childId: running.id, sessionFile: running.sessionFile } }, { triggerTurn: true, deliverAs: "steer" });
       }, result.ping.message);
       return;
     }
@@ -891,7 +974,6 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
   const sessionId = manager.getSessionId();
   const sessionFile = manager.getSessionFile();
   if (!sessionFile) return;
-  const attachment = readLineageAttachment(sessionFile);
   const roots = discoverLineageRoots(manager.getSessionDir(), sessionFile);
   try {
     for (const run of readdirSync(join(ctx.cwd, ".pi", "plans"), { withFileTypes: true })) {
@@ -906,16 +988,19 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
     const integrity = lineageIntegrityError(state);
     if (integrity) throw new Error(integrity);
     for (const node of state.nodes.values()) {
-      const isAttachedNode = attachment?.rootDir === rootDir && attachment.nodeId === node.nodeId;
       const cancellationPending = !!node.cancellation?.intent && !node.terminal;
-      if (!isAttachedNode && (node.parentSessionId !== sessionId || node.parentSessionFile !== sessionFile)) continue;
-      if (!node.sessionFile || !node.surface) continue;
-      if (!cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
+      if (node.parentSessionId !== sessionId) continue;
+      const earlyWork = node.replication && node.replicaWorkFile ? readReplicaWork(node.replicaWorkFile) : undefined;
+      const failedLaunch = !!earlyWork?.launchError;
+      if (!failedLaunch && (!node.sessionFile || !node.surface)) continue;
+      if (!failedLaunch && !cancellationPending && (!node.activityFile || !node.settledEventsFile)) continue;
+      const recoveredSession = node.sessionFile ?? earlyWork?.sessionFile ?? "";
+      const recoveredWorktree = node.worktree ?? earlyWork?.worktree;
       const drained = node.terminal && node.terminalDelivered;
       if (drained && !node.cleanupPending) continue;
       if (runningSubagents.has(node.nodeId)) continue;
       let baseline: SessionBaselineCursor;
-      try { baseline = captureSessionBaseline(node.sessionFile); } catch { baseline = { sessionFile: node.sessionFile, entryCount: 0, leafId: null, assistantEntryIds: [] }; }
+      try { baseline = captureSessionBaseline(recoveredSession); } catch { baseline = { sessionFile: recoveredSession, entryCount: 0, leafId: null, assistantEntryIds: [] }; }
       const lineage: LineageRegistration = {
         rootDir,
         rootId: state.rootId,
@@ -927,14 +1012,15 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
       };
       const running: RunningSubagent = {
         lineage,
+        executionOwner: node.executionOwner,
         id: node.nodeId,
         name: node.name ?? node.nodeId,
         task: node.task ?? "recovered subagent",
         agent: node.agent,
-        surface: node.surface,
+        surface: node.surface ?? recoveredWorktree?.paneId ?? "",
         startTime: node.startTime ?? Date.now(),
         ...(node.tabId ? { tabId: node.tabId } : {}),
-        sessionFile: node.sessionFile,
+        sessionFile: recoveredSession,
         activityFile: node.activityFile,
         settledEventsFile: node.settledEventsFile,
         sessionBaseline: baseline,
@@ -943,6 +1029,8 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         ...(node.workspaceId && node.cwd
           ? { recoveryWorkspace: { id: node.workspaceId, cwd: node.cwd } }
           : {}),
+        ...(recoveredWorktree ? { worktree: recoveredWorktree } : {}),
+        ...(node.replication ? { replication: true, replicaWorkFile: node.replicaWorkFile } : {}),
         lifecycle: createLifecycle(node.startTime ?? Date.now()),
         cleanupPending: !!node.cleanupPending,
         // A drained node is finished: its result was delivered in an earlier
@@ -950,8 +1038,38 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         ...(drained ? { retired: true } : {}),
       };
       runningSubagents.set(running.id, running);
+      refreshChildLocation(running);
+      if (running.lineage) running.lineage.parentSessionFile = sessionFile;
       if (running.tabId) rememberPaneTab(running.surface, running.tabId);
-      if (cancellationPending) {
+      const recordFile = running.replication && replicaRecordFor(running);
+      const savedWork = earlyWork ?? (recordFile ? readReplicaWork(recordFile) : undefined);
+      running.launchPane = savedWork?.launchPane;
+      running.launchError = savedWork?.launchError;
+      const savedReplica = savedWork?.completion;
+      if (savedWork?.launchError && !savedReplica && !drained && !launchFailureProcessActive(running)) {
+        const reported = replicaLaunchFailureReported(savedWork, manager.getBranch(), node.executionOwner);
+        if (reported) {
+          acknowledgeFailedLaunch(running, savedWork.launchError);
+          continue;
+        } else if (!running.worktree && savedWork.mode !== "shared") {
+          const summary = `Replica failed during launch: ${savedWork.launchError}`;
+          queueTerminalDelivery(running, undefined, () => {
+            if (runtime.pi) sendSubagentResult(runtime.pi, summary, {
+              name: running.name, childId: running.id, replication: true, exitCode: 1,
+              errorMessage: savedWork.launchError, resultContent: summary,
+              deliveryId: `terminal:${running.id}`, integration: { status: "not-attempted" },
+            });
+          }, summary, "error");
+          continue;
+        } else {
+          finishReplicationResult(running, { name: running.name, task: running.task, summary: "", exitCode: 1,
+            elapsed: Math.floor((Date.now() - running.startTime) / 1000), errorMessage: savedWork.launchError });
+          continue;
+        }
+      }
+      if (savedReplica && !drained) {
+        finishReplicationResult(running, savedReplica);
+      } else if (cancellationPending) {
         void attemptPendingCancellation(running);
       } else if (node.terminal && !node.terminalDelivered) {
         queueTerminalDelivery(running, undefined, () => {
@@ -968,6 +1086,11 @@ function restoreLineageRuntime(ctx: ExtensionContext): void {
         if (tryCleanupSubagentSurface(running)) runningSubagents.delete(running.id);
       }
     }
+  }
+  if (runningSubagents.size > 0 && runtime.pi) {
+    startWidgetRefresh();
+    startStatusRefresh(runtime.pi);
+    updateWidget();
   }
 }
 
@@ -1012,6 +1135,9 @@ export function selectCompletionApi<T>(previous: T, current: T | undefined): T {
 }
 
 // ── Widget management ──
+
+// Native tool errors become durable before agent_end; reconcile failed launch nodes then.
+let launchFailurePending = false;
 
 /** Interval timer for widget re-renders. */
 let widgetInterval: ReturnType<typeof setInterval> | null = null;
@@ -1159,7 +1285,7 @@ function renderSubagentWidgetLines(
 			: `${openCount} open`;
 	const accent = activeCount > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
 
-	const lines: string[] = [borderTop("Subagents", info, width, accent)];
+	const lines: string[] = [borderTop(rendered.every(({ agent }) => agent.replication) ? "Replicas" : "Subagents", info, width, accent)];
 
 	for (const { agent, projection } of rendered) {
 		const elapsed = formatElapsedMMSS(
@@ -1458,18 +1584,61 @@ function settledAssistants(running: RunningSubagent): NewestAssistantEntry[] {
 	}
 }
 
+/** Follow a child whose new Pi incarnation registered before the source pane closed. */
+function refreshChildLocation(running: RunningSubagent): void {
+  if (!running.lineage) return;
+  const location = childSessionLocation(running.lineage.rootDir, running.id);
+  if (!location) return;
+  running.sessionFile = location.sessionFile;
+  if (running.sessionBaseline) running.sessionBaseline.sessionFile = location.sessionFile;
+  if (location.paneId) running.surface = location.paneId;
+  if (location.tabId) { running.tabId = location.tabId; rememberPaneTab(running.surface, location.tabId); }
+  if (location.workspaceId) running.recoveryWorkspace = { id: location.workspaceId, cwd: location.cwd };
+}
+
+function childMovePending(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  return Boolean(location?.moveDeadline && location.moveDeadline > Date.now());
+}
+/** Never operate on a pane ID reused by a restarted Herdr server. */
+function childPaneOwned(running: RunningSubagent): boolean {
+  const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+  try {
+    if (!location) {
+      const owner = running.launchPane;
+      return owner ? launchOwnsPane(owner, running.surface, getPaneProcessInfo(running.surface).shellPid) : true;
+    }
+    return sessionOwnsPane(location, running.surface, getPaneProcessInfo(running.surface).shellPid);
+  }
+  catch { return false; }
+}
 function exactParentSessionActive(running: RunningSubagent): boolean {
   const lineage = running.lineage;
   if (!lineage) return true;
   if (!lineage.parentSessionId || !lineage.parentSessionFile) return false;
   const ctx = runtime.latestCtx;
-  if (!ctx) return false;
-  try { return ctx.sessionManager.getSessionId() === lineage.parentSessionId && ctx.sessionManager.getSessionFile() === lineage.parentSessionFile; }
+  if (!ctx || runtime.handoffPending) return false;
+  try {
+    if (ctx.sessionManager.getSessionId() !== lineage.parentSessionId) return false;
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return false;
+    const location = parentSessionLocation(sessionBindingStore(file), lineage.parentSessionId);
+    if (location && (location.pid !== process.pid || !sessionLocationAlive(location))) return false;
+    lineage.parentSessionFile = file;
+    return true;
+  }
   catch { return false; }
 }
 
 function sessionContainsDelivery(sessionFile: string, deliveryId: string): boolean {
-  try { return readFileSync(sessionFile, "utf8").includes(deliveryId); } catch { return false; }
+  try {
+    return readFileSync(sessionFile, "utf8").split("\n").some((line) => {
+      try {
+        const entry = JSON.parse(line);
+        return entry.type === "custom_message" && entry.customType === "subagent_result" && entry.details?.deliveryId === deliveryId;
+      } catch { return false; }
+    });
+  } catch { return false; }
 }
 
 /** Wait for durable descendant delivery before releasing a terminal result. */
@@ -1527,8 +1696,10 @@ function prepareDurableDelivery(
 	status?: DeliveryStatus,
 ): { resultPath: string; payload: string; status: DeliveryStatus } {
 	const resolvedStatus = deliveryStatusFor(running, answer, status);
+	const replicaFile = running.replication && replicaRecordFor(running);
+	const savedSession = replicaFile ? readReplicaWork(replicaFile).sessionCheckpoint : undefined;
 	const handle = materializeResultFile({
-		sessionsDir: dirname(running.sessionFile),
+		sessionsDir: savedSession || running.sessionFile ? dirname(savedSession ?? running.sessionFile) : join(replicaFile + ".artifacts", "sessions"),
 		childSessionId: running.id,
 		deliveryId,
 		status: resolvedStatus,
@@ -1537,10 +1708,11 @@ function prepareDurableDelivery(
 		now: Date.now(),
 	});
 	const payload = frameDeliveryPayload({
+		...(running.replication ? { subject: "Replica" as const } : {}),
 		status: resolvedStatus,
 		agentName: running.name,
 		childSessionId: running.id,
-		childSessionFile: running.sessionFile,
+		childSessionFile: savedSession ?? running.sessionFile,
 		answer,
 		resultPath: handle.path,
 		deliveryId,
@@ -1572,9 +1744,29 @@ function observeSettledInterruptBoundary(running: RunningSubagent): void {
 }
 
 function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
-  if (running.worktree) return true;
+  if (running.worktree && !running.replication) return true;
   try {
-    finalizeSubagentSurface(running, "ready_for_review", false, true);
+    const workFile = running.replication && replicaRecordFor(running);
+    if (workFile) {
+      if (!runtime.latestCtx || running.replicaCleaning) return false;
+      running.replicaCleaning = true;
+      void runReplicaBackground({
+        operation: "cleanup", file: workFile, parentCwd: runtime.latestCtx.cwd, surface: running.surface,
+        ...(running.lineage ? { child: { rootDir: running.lineage.rootDir, nodeId: running.id } } : {}),
+      }).then(({ cleaned }) => {
+        if (!cleaned) return;
+        if (running.lineage) {
+          const ackId = `cleanup-done:${running.id}`;
+          if (!appendLineageEvent(running.lineage.rootDir, ackId, "cleanup_done", running.id) && !hasLineageEvent(running.lineage.rootDir, ackId, "cleanup_done")) throw new Error("Unable to publish cleanup acknowledgement");
+        }
+        running.cleanupPending = false;
+        runningSubagents.delete(running.id);
+        updateWidget();
+      }).catch((error) => {
+        if (running.lineage) appendLineageEvent(running.lineage.rootDir, `cleanup-pending:${running.id}`, "cleanup_pending", running.id, { error: String(error) });
+      }).finally(() => { running.replicaCleaning = false; });
+      return false;
+    } else finalizeSubagentSurface(running, "ready_for_review", false, true);
     running.cleanupPending = false;
     if (running.lineage) {
       const ackId = `cleanup-done:${running.id}`;
@@ -1583,7 +1775,7 @@ function tryCleanupSubagentSurface(running: RunningSubagent): boolean {
     return true;
   } catch (error) {
     const text = String(error);
-    if (text.includes("pane_not_found") || text.includes("not found")) {
+    if (!running.replication && (text.includes("pane_not_found") || text.includes("not found"))) {
       running.cleanupPending = false;
       if (running.lineage) {
         const ackId = `cleanup-done:${running.id}`;
@@ -1612,6 +1804,13 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
       // published its terminal-delivered event. Wait here rather than relying
       // on another tick from a pane that may already be gone.
       await waitForDescendantDrain(running);
+      if (pending.alreadyReported) {
+        if (!running.lineage) throw new Error("Reported launch has no lineage ownership.");
+        acknowledgeReportedLaunchFailure(running.lineage, pending.resultContent ?? "Replica launch failed.");
+        running.lifecycle = markDelivery(running.lifecycle, "delivered");
+        retireDeliveredSubagent(running);
+        return;
+      }
       const deliveryId = `terminal:${running.id}`;
 
       const durable = prepareDurableDelivery(running, deliveryId, pending.resultContent, pending.status);
@@ -1627,7 +1826,7 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
         if (!appendLineageInbox(running.lineage.rootDir, running.id, deliveryId, {
           sessionId: running.lineage.parentSessionId,
           sessionFile: running.lineage.parentSessionFile,
-        }, { kind: "terminal", resultContent: durable.payload, resultPath: durable.resultPath, status: durable.status })) {
+        }, { kind: "terminal", executionOwner: running.executionOwner, resultContent: durable.payload, resultPath: durable.resultPath, status: durable.status })) {
           throw new Error("Unable to publish terminal inbox");
         }
 
@@ -1650,9 +1849,11 @@ function attemptPendingTerminalDelivery(running: RunningSubagent): void {
           if (claim.status === "acquired") {
             try {
               await pending.finalize();
-              if (!completeLineageInboxMaterialization(running.lineage.rootDir, deliveryId, running.id, claim.token)) {
-                throw new Error("Unable to publish terminal materialization acknowledgement");
-              }
+              runtime.inflightDeliveries.set(deliveryId, { rootDir: running.lineage.rootDir, nodeId: running.id, token: claim.token });
+              acknowledgeRestoredInboxDelivery({
+                rootDir: running.lineage.rootDir, nodeId: running.id, deliveryId,
+                token: claim.token, sessionFile: running.lineage.parentSessionFile!, requiresParentRecord: true,
+              });
             } catch (error) {
               releaseLineageInboxMaterialization({
                 rootDir: running.lineage.rootDir,
@@ -1704,6 +1905,7 @@ function retireDeliveredSubagent(running: RunningSubagent): void {
 
 /** Retry one retired child's surface cleanup without observing it again. */
 function retryRetiredSubagentCleanup(running: RunningSubagent, now: number): void {
+  if (running.replicaCleaning) return;
   if ((running.cleanupRetryAt ?? 0) > now) return;
   if (tryCleanupSubagentSurface(running)) {
     runningSubagents.delete(running.id);
@@ -1739,9 +1941,10 @@ function queueTerminalDelivery(
   finalize: () => void | Promise<void>,
   resultContent?: string,
   status?: DeliveryStatus,
+  alreadyReported = false,
 ): void {
   if (running.pendingTerminalDelivery) return;
-  running.pendingTerminalDelivery = { finalAssistant, resultContent, status, queued: false, finalize };
+  running.pendingTerminalDelivery = { finalAssistant, resultContent, status, alreadyReported, queued: false, finalize };
   attemptPendingTerminalDelivery(running);
 }
 
@@ -1749,6 +1952,7 @@ function observeRunningSubagent(
 	running: RunningSubagent,
 	observedAt = Date.now(),
 ) {
+	refreshChildLocation(running);
 	if (running.retired) {
 		retryRetiredSubagentCleanup(running, observedAt);
 		return;
@@ -1782,6 +1986,7 @@ function observeRunningSubagent(
 	);
 	observeSettledInterruptBoundary(running);
   if (running.lineage && reduceLineage(running.lineage.rootDir).nodes.get(running.id)?.cancellation?.intent) void attemptPendingCancellation(running);
+	if (running.pendingReplicaResult && exactParentSessionActive(running)) finishReplicationResult(running, running.pendingReplicaResult);
 	attemptPendingTerminalDelivery(running);
 	if (running.cleanupPending) retryRetiredSubagentCleanup(running, observedAt);
 }
@@ -1942,6 +2147,7 @@ function recoveredLineageRunning(
       launchKind: (node.launchKind as LineageRegistration["launchKind"]) ?? "fresh",
     },
     id: node.nodeId,
+    executionOwner: node.executionOwner,
     name: node.name ?? node.nodeId,
     task: node.task ?? "destroyed descendant",
     agent: node.agent,
@@ -1980,6 +2186,7 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
         sessionFile: node.parentSessionFile,
       }, {
         kind: "terminal",
+        executionOwner: node.executionOwner,
         ...(node.terminal?.resultContent ? { resultContent: node.terminal.resultContent } : {}),
       });
       appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
@@ -2011,7 +2218,7 @@ async function destroyOwnedLineageSubtree(owner: RunningSubagent): Promise<void>
         if (!appendLineageInbox(rootDir, node.nodeId, deliveryId, {
           sessionId: node.parentSessionId,
           sessionFile: node.parentSessionFile,
-        }, { kind: "terminal", resultContent })) continue;
+        }, { kind: "terminal", executionOwner: node.executionOwner, resultContent })) continue;
         appendLineageEvent(rootDir, `terminal-delivered:${node.nodeId}`, "terminal_delivered", node.nodeId, { deliveryId });
         progressed = true;
         continue;
@@ -2182,7 +2389,8 @@ function deliverRecoveryFailure(running: RunningSubagent, reason: string): void 
 }
 
 async function superviseStaleSubagent(running: RunningSubagent, now: number): Promise<void> {
-	if (running.retired) return;
+	// Replica continuation belongs to its parent, never the stale watchdog.
+	if (running.retired || running.replication) return;
 	if (!shouldStartStaleRecovery({
 		interactive: running.interactive,
 		pendingTerminalDelivery: Boolean(running.pendingTerminalDelivery),
@@ -2250,6 +2458,7 @@ function startStatusRefresh(_pi: ExtensionAPI) {
 }
 
 export const __test__ = {
+	launchSubagent,
 	borderLine,
 	renderSubagentWidgetLines,
 	loadAgentDefaults,
@@ -2319,6 +2528,7 @@ async function launchSubagent(
 	parentThinking: ThinkingLevel,
 	options?: {
 		surface?: string;
+		executionOwner?: ExecutionOwner;
 		runtimePlan?: ResolvedRuntimePlan;
 		id?: string;
 	},
@@ -2359,6 +2569,7 @@ async function launchSubagent(
 	const running = await launchPiSubagent({
 		kind: "fresh",
 		id,
+		executionOwner: options?.executionOwner,
 		name: params.name,
 		task: params.task,
 		agent: params.agent,
@@ -2423,7 +2634,7 @@ async function deliverHelpRequest(
 				sessionId: running.lineage.parentSessionId,
 				sessionFile: running.lineage.parentSessionFile,
 			},
-			{ kind: "help-request", resultContent: durable.payload, resultPath: durable.resultPath, status: "help-request" },
+			{ kind: "help-request", executionOwner: running.executionOwner, resultContent: durable.payload, resultPath: durable.resultPath, status: "help-request" },
 		)) throw new Error("Unable to publish help-request inbox");
 
 		acknowledgePingSidecar(running.sessionFile, ping.id);
@@ -2505,7 +2716,7 @@ async function attemptRecovery(
 	}
 	running.supervisionEpoch = (running.supervisionEpoch ?? 0) + 1;
 
-	if (cause === "stale") {
+	if (cause === "stale" && childPaneOwned(running)) {
 		recoveryDeliveryLog(running).record("recovery-kill", {
 			childId: running.id,
 			attempt: budget.attempt,
@@ -2529,16 +2740,20 @@ async function attemptRecovery(
 	let reusableSurface: string | undefined;
 	if (cause === "crash") {
 		try {
-			getPaneProcessInfo(running.surface);
-			reusableSurface = running.surface;
+			if (childPaneOwned(running)) {
+				getPaneProcessInfo(running.surface);
+				reusableSurface = running.surface;
+			}
 		} catch {
 			reusableSurface = undefined;
 		}
 	}
 
+	const priorLocation = childSessionLocation(lineage.rootDir, running.id);
 	try {
 		const resumed = await launchPiSubagent({
 			kind: "resume",
+			executionOwner: running.executionOwner,
 			id: running.id,
 			name: running.name,
 			sessionFile: running.sessionFile,
@@ -2556,6 +2771,17 @@ async function attemptRecovery(
 				interactive: running.interactive,
 			},
 		});
+		// A launch returns before Pi binds. Do not let the new watcher follow
+		// the old closed pane and mistake recovery for a user's cancellation.
+		const bindDeadline = Date.now() + 30_000;
+		for (;;) {
+			const location = childSessionLocation(lineage.rootDir, running.id);
+			if (location?.paneId === resumed.surface &&
+				(location.pid !== priorLocation?.pid || location.processStart !== priorLocation?.processStart) &&
+				sessionOwnsPane(location, resumed.surface, getPaneProcessInfo(resumed.surface).shellPid)) break;
+			if (Date.now() >= bindDeadline) throw new Error("Recovery replacement did not register its session location.");
+			await new Promise<void>((resolve) => setTimeout(resolve, 100));
+		}
 		const epoch = running.supervisionEpoch;
 		const recoveryState = running.recoveryState;
 		const stable = {
@@ -2600,7 +2826,8 @@ async function watchSubagent(
 	running: RunningSubagent,
 	signal: AbortSignal,
 ): Promise<SubagentResult> {
-	const { name, task, surface, startTime, sessionFile } = running;
+	const { name, task, startTime } = running;
+	let sessionFile = running.sessionFile;
 
 	const supervisionEpoch = running.supervisionEpoch ?? 0;
 	let recoveryFailed = false;
@@ -2613,8 +2840,27 @@ async function watchSubagent(
 			result = await waitForCompletion(signal, {
 				intervalMs: 1000,
 				sessionFile,
-				readTerminalTail: () => readPaneAsync(surface, 5),
-				inspectPane: async () => inspectPane(surface),
+				resolveSessionFile: () => { refreshChildLocation(running); return running.sessionFile; },
+				readTerminalTail: () => {
+					refreshChildLocation(running);
+					const active = running.replication ? launchFailureProcessActive(running) : !childPaneOwned(running);
+					return !childMovePending(running) && !active ? readPaneAsync(running.surface, 5) : Promise.resolve("");
+				},
+				confirmTerminalExit: running.replication ? () => !childMovePending(running) && !launchFailureProcessActive(running) : undefined,
+				readFailureOutput: running.replication ? async () => {
+					refreshChildLocation(running);
+					if (childMovePending(running) || !childPaneOwned(running)) return "";
+					try {
+						const output = await readHerdrScreenAsync(running.surface, 100, "recent-unwrapped");
+						if (output.trim()) return output;
+					} catch { /* The visible tail remains useful if scrollback is unavailable. */ }
+					return readPaneAsync(running.surface, 100);
+				} : undefined,
+				inspectPane: async () => {
+					refreshChildLocation(running);
+					if (childMovePending(running)) return { kind: "unavailable" as const, error: "Waiting for the Teleport replacement to bind" };
+					return childPaneOwned(running) ? inspectPane(running.surface) : { kind: "missing" as const, error: "Original child pane incarnation is gone" };
+				},
 				onPaneInspection: (inspection: PaneInspection, observedAt: number) => {
 					ensureLifecycle(running);
 					running.lifecycle = observePaneInspection(
@@ -2628,6 +2874,7 @@ async function watchSubagent(
 					observeRunningSubagent(running);
 				},
 			});
+			sessionFile = running.sessionFile;
 			if (supervisionEpoch !== (running.supervisionEpoch ?? 0)) {
 				return {
 					name,
@@ -2642,8 +2889,12 @@ async function watchSubagent(
 			if (!result.ping) {
 				observeRunningSubagent(running);
 				if (result.paneDisappeared) {
-					cancelledByUser = await recordManualTabCancellation(running);
-					break;
+					const location = running.lineage && childSessionLocation(running.lineage.rootDir, running.id);
+					if (!location || (!location.moveDeadline && sessionServerAlive(location) !== false)) {
+						cancelledByUser = await recordManualTabCancellation(running);
+						break;
+					}
+					result = { ...result, reason: "sentinel" as const, exitCode: 1, paneDisappeared: undefined };
 				}
 
 				if (
@@ -2653,6 +2904,13 @@ async function watchSubagent(
 				) {
 					running.ignorePriorSentinelEpoch = undefined;
 					continue;
+				}
+				if (running.replication && result.reason === "sentinel") {
+					const errorMessage = result.errorMessage
+						? `Replica process exited with code ${result.exitCode} before saving completion.\n\n${result.errorMessage}`
+						: "Replica process closed without a saved completion.";
+					result = { reason: "error" as const, exitCode: 1, errorMessage };
+					break;
 				}
 				if (result.reason === "sentinel" && result.exitCode !== 0 && !result.errorMessage) {
 					let recovery: Awaited<ReturnType<typeof attemptRecovery>> | undefined;
@@ -2730,7 +2988,11 @@ async function watchSubagent(
 					...(mismatch ? { runtimeMismatch: mismatch } : {}),
 				};
 			}
-			lastAssistant = findLastAssistantMessage(allEntries);
+			lastAssistant = running.replication
+				? running.sessionBaseline
+					? findLastAssistantMessage(readEntriesAfterBaseline(sessionFile, running.sessionBaseline).entries.filter(entry => findNewestAppendedAssistant([entry])?.text?.trim()))
+					: null // Without a fork boundary, inherited parent answers are not replica output.
+				: findLastAssistantMessage(allEntries);
 			summary =
 				result.summary ??
 				lastAssistant ??
@@ -2747,12 +3009,12 @@ async function watchSubagent(
 					: `Sub-agent exited with code ${result.exitCode}`;
 		}
 
-		if (cancelledByUser) summary = "Subagent cancelled by user.";
-		const closeWithAnswer = !cancelledByUser && !!result.paneDisappeared && !!lastAssistant?.trim();
+		if (cancelledByUser && !running.replication) summary = "Subagent cancelled by user.";
+		const closeWithAnswer = !running.replication && !cancelledByUser && !!result.paneDisappeared && !!lastAssistant?.trim();
 		const effectiveExitCode = closeWithAnswer ? 0 : result.exitCode;
 		if (closeWithAnswer) summary = lastAssistant!;
 
-		const worktreeHandoff = finalizeSubagentSurface(
+		const worktreeHandoff = running.replication ? undefined : finalizeSubagentSurface(
 			running,
 			result.ping
 				? "needs_help"
@@ -2780,7 +3042,7 @@ async function watchSubagent(
 			exitCode: effectiveExitCode,
 			elapsed,
 			ping: result.ping,
-			...(!closeWithAnswer && !cancelledByUser && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+			...(running.replication && cancelledByUser ? { errorMessage: "Replica pane closed without a saved completion." } : !closeWithAnswer && !cancelledByUser && result.errorMessage ? { errorMessage: result.errorMessage } : {}),
 			...(closeWithAnswer ? { closeWithAnswer: true as const } : {}),
 
 			supervisionEpoch,
@@ -2791,7 +3053,7 @@ async function watchSubagent(
 			...(worktreeHandoff ? { worktree: worktreeHandoff } : {}),
 		};
 	} catch (err: any) {
-		const worktreeHandoff = finalizeSubagentSurface(running, "failed", true, false);
+		const worktreeHandoff = running.replication ? undefined : finalizeSubagentSurface(running, "failed", true, false);
 		running.lifecycle = markFailed(
 			running.lifecycle,
 			signal.aborted ? "Subagent cancelled." : (err?.message ?? String(err)),
@@ -2828,12 +3090,19 @@ async function watchSubagent(
 	}
 }
 
-export default function subagentsExtension(pi: ExtensionAPI) {
+function installSubagentRuntime(pi: ExtensionAPI) {
 	runtime.pi = pi;
+	runtime.resolveExecutionOwner = trackExecutionOwners(pi);
 	// Capture the UI context for widget updates and restore presentation for
 	// subagents whose watchers survived a reload.
 	pi.on("session_start", (_event, ctx) => {
 		runtime.latestCtx = ctx;
+		runtime.handoffPending = false;
+		const binding = bindSessionRuntime(pi, ctx);
+		const workFile = binding?.child?.environment.PI_SUBAGENT_REPLICA_WORK_FILE;
+		const location = binding?.child && childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
+		if (workFile && location) captureReplicaWorkLocation(workFile, location);
+		if (binding?.child && !hasChildLifecycle(pi)) subagentLifecycle(pi, ctx);
 		restoreLineageRuntime(ctx);
 		void restorePendingLineageInboxes(ctx);
 		if (runningSubagents.size > 0) {
@@ -2845,12 +3114,34 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
 	// A session-start replay can race the parent's startup turn. Retry after the
 	// agent becomes idle so an "already processing" steer stays durable and pending.
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
+		if (launchFailurePending) {
+			launchFailurePending = false;
+			restoreLineageRuntime(ctx);
+		}
 		setTimeout(() => {
 			if (runtime.latestCtx) void restorePendingLineageInboxes(runtime.latestCtx);
 		}, 0);
 	});
 
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "teleport" || !["jump", "back"].includes(String(event.input.action))) return;
+		runtime.handoffPending = true;
+		const file = ctx.sessionManager.getSessionFile();
+		const binding = file && readSessionBinding(file);
+		if (binding) beginChildSessionMove(binding);
+	});
+	pi.on("tool_result", (event, ctx) => {
+		if (event.toolName !== "teleport" || !event.isError) return;
+		runtime.handoffPending = false;
+		bindSessionRuntime(pi, ctx);
+	});
+	pi.on("message_end", (event, ctx) => {
+		const message = event.message as { customType?: string };
+		if (message.customType !== "pi-agent-teleport-failure") return;
+		runtime.handoffPending = false;
+		bindSessionRuntime(pi, ctx);
+	});
 	// Clean up on session shutdown
 	pi.on("session_shutdown", async (event, _ctx) => {
 		runtime.latestCtx = undefined;
@@ -2869,699 +3160,65 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 		cleanupSubagentsForShutdown(shutdownReason, runningSubagents);
 	});
 
-	// Tools denied via PI_DENY_TOOLS env var (set by parent agent based on frontmatter)
-	const deniedTools = new Set(
-		(process.env.PI_SUBAGENT_ID ? (process.env.PI_DENY_TOOLS ?? "") : "")
-			.split(",")
-			.map((s) => s.trim())
-			.filter(Boolean),
-	);
+	registerSubagentRenderers(pi);
+}
 
-	const shouldRegister = (name: string) => !deniedTools.has(name);
-	// ── subagent tool ──
-	if (shouldRegister("subagent"))
-		pi.registerTool({
-			name: "subagent",
-			label: "Subagent",
-			description:
-				"Spawn a sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
-				"Use unique worktree branches for independent writing tasks; use ordinary panes for read-only tasks. The worktree base is committed state, so uncommitted parent changes are not copied. " +
-				"Worktree runs retain their workspace after completion for parent review; they are not pushed, merged, or removed automatically. " +
-				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-				"When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
-				"DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
-				"DO NOT fabricate, assume, or summarize results after calling this tool. " +
-				"After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
-			promptSnippet:
-				"Spawn a sub-agent in a dedicated terminal herdr pane, or in an isolated Herdr-managed Git worktree when worktree is provided. " +
-				"Use unique worktree branches for independent writing tasks; use ordinary panes for read-only tasks. The worktree base is committed state, so uncommitted parent changes are not copied. " +
-				"Worktree runs retain their workspace after completion for parent review; they are not pushed, merged, or removed automatically. " +
-				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-				"When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
-				"DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
-				"DO NOT fabricate, assume, or summarize results after calling this tool. " +
-				"After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
-			promptGuidelines: subagentRoutingGuidelines,
-			parameters: SubagentParams,
-
-			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				// Self-spawn stays denied unless the current role opts in explicitly.
-				const currentAgent = process.env.PI_SUBAGENT_AGENT;
-				const currentAgentDefaults = currentAgent
-					? loadAgentDefaults(currentAgent, runtime.pi)
-					: null;
-				if (isSelfSpawnBlocked(params.agent, currentAgent, currentAgentDefaults)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `You are the ${currentAgent} agent — do not start another ${currentAgent}. You were spawned to do this work yourself. Complete the task directly.`,
-							},
-						],
-						details: { error: "self-spawn blocked" },
-					};
-				}
-
-				const legacyRoleDiagnostic = params.agent
-					? discoverAgentCatalog(runtime.pi).diagnostics.find(
-							(candidate) =>
-								candidate.agentName === params.agent &&
-								candidate.code === "external-cli-unsupported",
-						)
-					: undefined;
-				if (legacyRoleDiagnostic) {
-					return {
-						content: [
-							{ type: "text", text: `Error: ${legacyRoleDiagnostic.message}` },
-						],
-						details: { error: legacyRoleDiagnostic.code },
-					};
-				}
-
-				// Validate prerequisites
-				if (!isTerminalAvailable()) {
-					return muxUnavailableResult();
-				}
-
-				if (!ctx.sessionManager.getSessionFile()) {
-					return {
-						content: [
-							{
-								type: "text",
-                text: "Error: no session file. Start pi with a persistent session to use subagents.",
-							},
-						],
-						details: { error: "no session file" },
-					};
-				}
-
-				// Launch the subagent (creates pane, sends command)
-				const parentThinking = pi.getThinkingLevel();
-				if (
-					parentThinking !== "off" &&
-					parentThinking !== "minimal" &&
-					parentThinking !== "low" &&
-					parentThinking !== "medium" &&
-					parentThinking !== "high" &&
-					parentThinking !== "xhigh" &&
-					parentThinking !== "max"
-				) {
-          throw new Error(
-            `Unsupported parent thinking level: ${parentThinking}`,
-          );
-				}
-				const running = await launchSubagent(params, ctx, parentThinking);
-
-				// Create a separate AbortController for the watcher
-				// (the tool's signal completes when we return)
-				const watcherAbort = new AbortController();
-				running.abortController = watcherAbort;
-
-				// Start widget refresh and status supervision when the first agent launches
-				startWidgetRefresh();
-				startStatusRefresh(pi);
-
-				// Fire-and-forget: start watching in background
-				watchSubagent(running, watcherAbort.signal).then((result) => ({ running, result }))
-					.then(async ({ running: completedRunning, result }) => {
-
-						if (result.supervisionEpoch !== (completedRunning.supervisionEpoch ?? 0)) return;
-						if (!shouldDeliverSubagentCompletion(completedRunning)) {
-							completedRunning.lifecycle = markDelivery(
-								completedRunning.lifecycle,
-								"suppressed",
-							);
-							runningSubagents.delete(completedRunning.id);
-							updateWidget();
-							return;
-						}
-						if (result.ping) {
-							const ping = result.ping;
-							const worktreeRef = result.worktree
-								? `\n\n${formatWorktreeHandoff(result.worktree)}`
-								: "";
-							const sessionRef = `\n\nSession: ${result.sessionFile}\nResume: pi --session ${result.sessionFile}`;
-              queueTerminalDelivery(completedRunning, undefined, () => {
-                const completionApi = selectCompletionApi(pi, runtime.pi);
-							completionApi.sendMessage(
-								{
-									customType: "subagent_ping",
-                    content: `Sub-agent "${ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${ping.message}${worktreeRef}${sessionRef}`,
-									display: true,
-									details: {
-                      name: ping.name,
-                      message: ping.message,
-										agent: running.agent,
-										sessionFile: result.sessionFile,
-										...(result.worktree ? { worktree: result.worktree } : {}),
-									},
-								},
-								{ triggerTurn: true, deliverAs: "steer" },
-							);
-              }, ping.message);
-							return;
-						}
-
-						const presentation = resolveResultPresentation(
-							result,
-							completedRunning.name,
-							completedRunning.runtimePlan?.runtimeMismatch,
-						);
-            queueTerminalDelivery(
-              completedRunning,
-              terminalAssistantIdentityFor(completedRunning),
-              () => {
-                const completionApi = selectCompletionApi(pi, runtime.pi);
-						sendSubagentResult(completionApi, presentation, {
-							name: completedRunning.name,
-							task: completedRunning.task,
-
-							childId: completedRunning.id,
-							agent: completedRunning.agent,
-							...(result.closeWithAnswer ? {} : { exitCode: result.exitCode }),
-							elapsed: result.elapsed,
-							sessionFile: result.sessionFile,
-							deliveryId: `terminal:${completedRunning.id}`,
-                  ...(result.errorMessage
-                    ? { errorMessage: result.errorMessage }
-                    : {}),
-                  ...(result.summary ? { resultContent: result.summary } : {}),
-							...(result.fallbackAttempts
-								? { fallbackAttempts: result.fallbackAttempts }
-								: {}),
-							...(result.worktree ? { worktree: result.worktree } : {}),
-							...(completedRunning.runtimePlan
-								? { runtimePlan: completedRunning.runtimePlan }
-								: {}),
-						});
-              }, result.summary, result.cancelledByUser ? "cancelled" : result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
-					})
-					.catch((err) => {
-            if (running.pendingTerminalDelivery) {
-              attemptPendingTerminalDelivery(running);
-              return;
-            }
-						if (!shouldDeliverSubagentCompletion(running)) {
-							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-							runningSubagents.delete(running.id);
-							updateWidget();
-							return;
-						}
-            const presentation = resolveUnexpectedErrorPresentation(
-								`Sub-agent "${running.name}" error`,
-								err,
-								running.sessionFile,
-            );
-            queueTerminalDelivery(running, undefined, () => {
-              sendSubagentResult(
-                selectCompletionApi(pi, runtime.pi),
-                presentation,
-							{
-								name: running.name,
-								task: running.task,
-								error: err?.message,
-								childId: running.id,
-								sessionFile: running.sessionFile,
-								deliveryId: `terminal:${running.id}`,
-								...(running.worktree ? { worktree: running.worktree } : {}),
-							},
-						);
-					}, presentation);
-          });
-
-				// Return immediately
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Sub-agent "${params.name}" launched and is now running in the background` +
-								(running.worktree
-									? ` in worktree ${running.worktree.path} on branch ${running.worktree.branch}. `
-									: ". ") +
-								`Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
-								`The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
-								`Until then, move on to other work or tell the user you're waiting.`,
-						},
-					],
-					details: {
-						id: running.id,
-						name: params.name,
-						task: params.task,
-						agent: params.agent,
-						sessionFile: running.sessionFile,
-						launchScriptFile: running.launchScriptFile,
-						model: running.runtimePlan?.model,
-						thinking: running.runtimePlan?.thinking,
-						runtimePlan: running.runtimePlan,
-						...(running.worktree ? { worktree: running.worktree } : {}),
-						status: "started",
-					},
-				};
-			},
-
-			renderCall(args, theme) {
-				const partialArgs = args as Record<string, unknown>;
-				const name =
-					typeof partialArgs.name === "string" && partialArgs.name
-						? partialArgs.name
-						: "(unnamed)";
-        const task =
-          typeof partialArgs.task === "string" ? partialArgs.task : "";
-				const agent =
-					typeof partialArgs.agent === "string" && partialArgs.agent
-						? theme.fg("dim", ` (${partialArgs.agent})`)
-						: "";
-				const cwdHint =
-					typeof partialArgs.cwd === "string" && partialArgs.cwd
-						? theme.fg("dim", ` in ${partialArgs.cwd}`)
-						: "";
-        const worktree = partialArgs.worktree as
-          { branch?: unknown } | undefined;
-				const worktreeHint =
-					typeof worktree?.branch === "string"
-						? theme.fg("dim", ` on ${worktree.branch} (worktree)`)
-						: "";
-				let text =
-					"▸ " +
-					theme.fg("toolTitle", theme.bold(name)) +
-					agent +
-					cwdHint +
-					worktreeHint;
-
-				// Show a one-line task preview. renderCall is called repeatedly as the
-				// LLM generates tool arguments, so args.task grows token by token.
-				// We keep it compact here — Ctrl+O on renderResult expands the full content.
-				if (task) {
-          const firstLine =
-            task.split("\n").find((l: string) => l.trim()) ?? "";
-					const preview =
-						firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
-					if (preview) {
-						text += "\n" + theme.fg("toolOutput", preview);
-					}
-					const totalLines = task.split("\n").length;
-					if (totalLines > 1) {
-						text += theme.fg("muted", ` (${totalLines} lines)`);
-					}
-				}
-
-				return new Text(text, 0, 0);
-			},
-
-			renderResult(result, _opts, theme) {
-				const details = result.details as any;
-				const name = details?.name ?? "(unnamed)";
-
-				// "Started" result — tool returned immediately
-				if (details?.status === "started") {
-					const runtime = details?.model
-						? ` — ${details.model}${details.thinking ? ` · ${details.thinking}` : ""}`
-						: " — started";
-					const worktree = details?.worktree?.branch
-						? ` · ${details.worktree.branch}`
-						: "";
-					return new Text(
-						theme.fg("accent", "▸") +
-							" " +
-							theme.fg("toolTitle", theme.bold(name)) +
-							theme.fg("dim", runtime + worktree),
-						0,
-						0,
-					);
-				}
-
-				// Fallback (shouldn't happen)
-				return new Text(theme.fg("dim", getFirstText(result.content)), 0, 0);
-			},
-		});
-
-	// ── subagent_interrupt tool ──
-	if (shouldRegister("subagent_interrupt"))
-		pi.registerTool({
-			name: "subagent_interrupt",
-			label: "Interrupt Subagent",
-			description:
-				"Send Escape to the active turn of a currently running Pi-backed subagent. " +
-				"The child pane, session, watcher, and running entry remain alive; this returns only a local acknowledgement " +
-				"and does not emit a subagent_result solely because of this request.",
-			promptSnippet:
-				"Send Escape to the active turn of a currently running Pi-backed subagent. " +
-				"The child pane, session, watcher, and running entry remain alive; this returns only a local acknowledgement " +
-				"and does not emit a subagent_result solely because of this request.",
-			parameters: Type.Object({
-				id: Type.Optional(
-					Type.String({ description: "Exact running subagent id" }),
-				),
-				name: Type.Optional(
-					Type.String({ description: "Exact running subagent display name" }),
-				),
-			}),
-
-			async execute(_toolCallId, params) {
-				return handleSubagentInterrupt(params);
-			},
-
-			renderCall(args, theme) {
-				const target = args.id ? `${args.id}` : (args.name ?? "(unknown)");
-				return new Text(
-					theme.fg("accent", "▸") +
-						" " +
-						theme.fg("toolTitle", theme.bold(target)) +
-						theme.fg("dim", " — interrupt turn"),
-					0,
-					0,
-				);
-			},
-
-			renderResult(result, _opts, theme) {
-				const details = result.details as any;
-				if (details?.status === "interrupt_requested") {
-					return new Text(
-						theme.fg("accent", "▸") +
-							" " +
-							theme.fg(
-								"toolTitle",
-								theme.bold(details.name ?? details.id ?? "subagent"),
-							) +
-							theme.fg("dim", " — interrupt requested"),
-						0,
-						0,
-					);
-				}
-
-				return new Text(theme.fg("dim", getFirstText(result.content)), 0, 0);
-			},
-		});
-
-	// ── subagents_list tool ──
-
-	// ── subagent_cancel tool ──
-	if (shouldRegister("subagent_cancel"))
-		pi.registerTool({
-			name: "subagent_cancel",
-			label: "Cancel Subagent",
-			description: "Cancel one exact subagent and deliver a result only after pane absence and process exit are verified. Uncertain termination remains pending.",
-			parameters: Type.Object({
-				id: Type.Optional(Type.String({ description: "Exact running subagent id" })),
-				name: Type.Optional(Type.String({ description: "Exact running subagent display name" })),
-			}),
-			async execute(_toolCallId, params) { return handleSubagentCancel(params); },
-		});
-
-	if (shouldRegister("subagents_list"))
-		pi.registerTool({
-			name: "subagents_list",
-			label: "List Subagents",
-			description:
-				"List all available package, global, and project subagent definitions. " +
-				"Project agents override global definitions, which override package definitions.",
-			promptSnippet:
-				"List all available package, global, and project subagent definitions. " +
-				"Project agents override global definitions, which override package definitions.",
-			parameters: Type.Object({}),
-
-			async execute() {
-				const catalog = discoverAgentCatalog(pi);
-				const list = catalog.agents.filter(
-					(agent) => !agent.disableModelInvocation,
-				);
-				const lines = [
-					...formatVisibleAgentDefinitions(list),
-					...formatAgentDiagnostics(catalog.diagnostics),
-				];
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: lines.join("\n") || "No subagent definitions found.",
-						},
-					],
-					details: { agents: list, diagnostics: catalog.diagnostics },
-				};
-			},
-
-			renderResult(result, _opts, theme) {
-				const details = result.details as any;
-				const agents = details?.agents ?? [];
-				const diagnostics = details?.diagnostics ?? [];
-				if (agents.length === 0 && diagnostics.length === 0) {
-          return new Text(
-            theme.fg("dim", "No subagent definitions found."),
-            0,
-            0,
-          );
-				}
-				const lines = agents.map((a: any) => {
-					const source =
-            a.source === "package" && a.provider
-              ? `package:${a.provider}`
-              : a.source;
-					const badge = theme.fg("accent", ` (${source})`);
-          const desc = a.description
-            ? theme.fg("dim", ` — ${a.description}`)
-            : "";
-					const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
-					return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
-				});
-				for (const diagnostic of diagnostics) {
-					lines.push(theme.fg("warning", `  ! ${diagnostic.message}`));
-				}
-				return new Text(lines.join("\n"), 0, 0);
-			},
-		});
-
-	// ── subagent_resume tool ──
-	if (shouldRegister("subagent_resume"))
-		pi.registerTool({
-			name: "subagent_resume",
-			label: "Resume Subagent",
-			description:
-				"Resume a previous Pi-backed sub-agent session in a new herdr pane. " +
-				"This does not reattach a retained managed worktree; continue worktree-bound follow-up in its existing workspace. " +
-				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-				"When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
-				"DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
-				"DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
-				"Use when a sub-agent was cancelled or needs follow-up work.",
-			promptSnippet:
-				"Resume a previous Pi-backed sub-agent session in a new herdr pane. " +
-				"This does not reattach a retained managed worktree; continue worktree-bound follow-up in its existing workspace. " +
-				"This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-				"When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
-				"DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
-				"DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
-				"Use when a sub-agent was cancelled or needs follow-up work.",
-			parameters: Type.Object({
-				sessionPath: Type.String({
-					description: "Path to the session .jsonl file to resume",
-				}),
-				name: Type.Optional(
-					Type.String({
-						description: "Display name for the terminal tab. Default: 'Resume'",
-					}),
-				),
-				message: Type.Optional(
-					Type.String({
-						description:
-							"Optional message to send after resuming (e.g. follow-up instructions)",
-					}),
-				),
-				autoExit: Type.Optional(
-					Type.Boolean({
-						description:
-							"Whether a clean or empty response records auto-exit intent. Delivery and closure for the resumed session occur only after recursively owned descendants drain. Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
-					}),
-				),
-			}),
-
-			renderCall(args, theme) {
-				const name = args.name ?? "Resume";
-				const text =
-					"▸ " +
-					theme.fg("toolTitle", theme.bold(name)) +
-					theme.fg("dim", " — resuming session");
-				return new Text(text, 0, 0);
-			},
-
-			renderResult(result, _opts, theme) {
-				const details = result.details as any;
-				const name = details?.name ?? "Resume";
-
-				if (details?.status === "started") {
-					return new Text(
-						theme.fg("accent", "▸") +
-							" " +
-							theme.fg("toolTitle", theme.bold(name)) +
-							theme.fg("dim", " — resumed"),
-						0,
-						0,
-					);
-				}
-
-				// Fallback
-				return new Text(theme.fg("dim", getFirstText(result.content)), 0, 0);
-			},
-
-			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-				const name = params.name ?? "Resume";
-				const id = Math.random().toString(16).slice(2, 10);
-
-				if (!isTerminalAvailable()) {
-					return muxUnavailableResult();
-				}
-
-				const parentSessionFile = ctx.sessionManager.getSessionFile();
-				if (!parentSessionFile) {
-					return { content: [{ type: "text", text: "Error: no parent session file." }], details: { error: "no session file" } };
-				}
-
-				if (!existsSync(params.sessionPath)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Error: session file not found: ${params.sessionPath}`,
-							},
-						],
-						details: { error: "session not found" },
-					};
-				}
-
-				const running: RunningSubagent = await launchPiSubagent({
-					kind: "resume",
-					id,
-					name,
-					sessionFile: params.sessionPath,
-					message: params.message,
-					parent: {
-						sessionId: ctx.sessionManager.getSessionId(),
-						sessionFile: parentSessionFile,
-						sessionDir: ctx.sessionManager.getSessionDir(),
-					},
-					behavior: { autoExit: params.autoExit },
-				});
-				runningSubagents.set(id, running);
-				startWidgetRefresh();
-				startStatusRefresh(pi);
-
-				// Fire-and-forget watcher
-				const watcherAbort = new AbortController();
-				running.abortController = watcherAbort;
-
-				watchSubagent(running, watcherAbort.signal)
-					.then(async (result) => {
-						if (result.supervisionEpoch !== (running.supervisionEpoch ?? 0)) return;
-						if (!shouldDeliverSubagentCompletion(running)) {
-							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-							runningSubagents.delete(running.id);
-							updateWidget();
-							return;
-						}
-						if (result.ping) {
-							const ping = result.ping;
-							const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
-              queueTerminalDelivery(running, undefined, () => {
-                const completionApi = selectCompletionApi(pi, runtime.pi);
-							completionApi.sendMessage(
-								{
-									customType: "subagent_ping",
-                    content: `Sub-agent "${ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${ping.message}${sessionRef}`,
-									display: true,
-									details: {
-                      name: ping.name,
-                      message: ping.message,
-										sessionFile: params.sessionPath,
-									},
-								},
-								{ triggerTurn: true, deliverAs: "steer" },
-							);
-              });
-							return;
-						}
-
-						const finalIdentity = terminalAssistantIdentityFor(running);
-						const allEntries = running.sessionBaseline
-              ? readEntriesAfterBaseline(
-                  params.sessionPath,
-                  running.sessionBaseline,
-                ).entries
-							: [];
-						const summary =
-							findLastAssistantMessage(allEntries) ??
-							(result.errorMessage
-								? `Subagent error: ${result.errorMessage}`
-								: result.exitCode === 0
-									? "Resumed session exited without new output"
-									: `Resumed session exited with code ${result.exitCode}`);
-						const presentation = resolveResultPresentation(
-							{ ...result, summary, sessionFile: params.sessionPath },
-							name,
-							running.runtimePlan?.runtimeMismatch,
-						);
-            queueTerminalDelivery(
-              running,
-              finalIdentity,
-              () => {
-                const completionApi = selectCompletionApi(pi, runtime.pi);
-						sendSubagentResult(completionApi, presentation, {
-							name,
-							task: params.message ?? "resumed session",
-							childId: running.id,
-							...(result.closeWithAnswer ? {} : { exitCode: result.exitCode }),
-							elapsed: result.elapsed,
-							sessionFile: params.sessionPath,
-							deliveryId: `terminal:${running.id}`,
-                  ...(result.errorMessage
-                    ? { errorMessage: result.errorMessage }
-                    : {}),
-                  resultContent: summary,
-                  ...(running.runtimePlan
-                    ? { runtimePlan: running.runtimePlan }
-                    : {}),
-						});
-              }, summary, result.cancelledByUser ? "cancelled" : result.recoveryFailed ? "recovery-failed" : result.closeWithAnswer ? "closed" : undefined);
-					})
-					.catch((err) => {
-            if (running.pendingTerminalDelivery) {
-              attemptPendingTerminalDelivery(running);
-              return;
-            }
-						if (!shouldDeliverSubagentCompletion(running)) {
-							running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-							runningSubagents.delete(running.id);
-							updateWidget();
-							return;
-						}
-            const presentation = resolveUnexpectedErrorPresentation(
-								"Resume error",
-								err,
-								params.sessionPath,
-            );
-            queueTerminalDelivery(running, undefined, () => {
-              sendSubagentResult(
-                selectCompletionApi(pi, runtime.pi),
-                presentation,
-							{ name, childId: running.id, error: err?.message, sessionFile: params.sessionPath, deliveryId: `terminal:${running.id}` },
-						);
-					}, presentation);
-          });
-
-				return {
-					content: [{ type: "text", text: `Session "${name}" resumed.` }],
-					details: {
-						id,
-						name,
-						sessionPath: params.sessionPath,
-						launchScriptFile: running.launchScriptFile,
-						status: "started",
-					},
-				};
-			},
-		});
+/** Register fresh replication while retaining internal launch and delivery APIs. */
+export default function subagentsExtension(pi: ExtensionAPI) {
+	registerReplicaDirectoryCommand(pi);
+	// Discard the old disclosure handle on reload; in-flight watchers may still use it.
+	delete (runtime as SubagentRuntime & { replicateTool?: unknown }).replicateTool;
+	registerReplicateTool(pi, async (params, ctx, toolCallId) => {
+		const executionOwner = runtime.resolveExecutionOwner?.(toolCallId);
+		if (!isTerminalAvailable()) throw new Error("Replication requires Herdr.");
+		const file = ctx.sessionManager.getSessionFile();
+		if (!file || !ctx.model) throw new Error("Replication requires a persisted session and selected model.");
+		const snapshot = {
+			entries: JSON.parse(JSON.stringify(ctx.sessionManager.getBranch())),
+			contextMessages: JSON.parse(JSON.stringify(replicationContextMessages(ctx))),
+			systemPrompt: ctx.getSystemPrompt(),
+			extensionArgs: replicationExtensionArgs(process.argv, ctx.cwd),
+		};
+		bindSessionRuntime(pi, ctx);
+		const id = Math.random().toString(16).slice(2, 10);
+		const name = replicationName(params.name, pi, ctx, getHerdrCurrentPaneTitle);
+		const recordFile = replicaWorkFile(sessionBindingStore(file), id);
+		try {
+			const mode = readReplicaDirectoryMode(ctx.cwd);
+			const source = mode === "worktree" ? snapshotSource(ctx.cwd, join(recordFile + ".artifacts", "fork")) : undefined;
+			const inherited = { systemPrompt: snapshot.systemPrompt, extensionArgs: snapshot.extensionArgs, provider: ctx.model.provider, modelId: ctx.model.id, thinking: pi.getThinkingLevel(), tools: pi.getActiveTools() };
+			if (source) createReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), source);
+			else createSharedReplicaWork(recordFile, id, ctx.sessionManager.getSessionId(), ctx.cwd);
+			saveReplicaRuntime(recordFile, inherited);
+			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
+			const child = await launchPiSubagent({
+				kind: "fresh", id, name, task: replicationAssignment(params.task), executionOwner,
+				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
+				...(source ? { worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit } } : {}),
+				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
+				behavior: { tools: inherited.tools.join(","), deniedTools: [], autoExit: true, interactive: false, sessionMode: "fork", includeControlTools: false },
+			});
+			runningSubagents.set(id, child);
+			startWidgetRefresh();
+			startStatusRefresh(pi);
+			startRecoveredWatcher(child);
+			return { id, name, sessionFile: child.sessionFile, worktreePath: child.worktree?.path };
+		} catch (error) {
+			if (existsSync(recordFile)) {
+				failReplicaLaunch(recordFile, error, toolCallId);
+				launchFailurePending = true;
+			}
+			throw error;
+		}
+	});
+	installSubagentRuntime(pi);
+}
 
 
+
+
+
+function registerSubagentRenderers(pi: ExtensionAPI) {
 	// ── subagent_result message renderer ──
 	pi.registerMessageRenderer("subagent_result", (message, options, theme) => {
 		const details = message.details as any;
@@ -3574,18 +3231,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 				const exitCode = details.exitCode ?? 0;
 				const errorMessage =
 					typeof details.errorMessage === "string" ? details.errorMessage : "";
-				const failed = exitCode !== 0 || !!errorMessage;
+				const failed = exitCode !== 0 || !!errorMessage || ["error", "crashed", "recovery-failed", "cancelled"].includes(details.status);
+				const needsHelp = details.kind === "help-request" || details.status === "help-request";
 				const elapsed =
 					details.elapsed == null ? "?" : formatElapsed(details.elapsed);
-				const bgFn = failed
-					? (text: string) => theme.bg("toolErrorBg", text)
-					: (text: string) => theme.bg("toolSuccessBg", text);
-				const icon = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const bgFn = (text: string) => theme.bg(failed ? "toolErrorBg" : needsHelp ? "customMessageBg" : "toolSuccessBg", text);
+				const icon = failed ? theme.fg("error", "✗") : needsHelp ? theme.fg("warning", "?") : theme.fg("success", "✓");
 				const status = errorMessage
 					? "failed (provider/agent error)"
 					: failed
 						? `failed (exit ${exitCode})`
-						: "completed";
+						: needsHelp ? "needs help" : "completed";
 				const agentTag = details.agent
 					? theme.fg("dim", ` (${details.agent})`)
 					: "";
@@ -3620,7 +3276,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 					// Full view: complete summary + session info
 					if (summary) {
 						for (const line of summary.split("\n")) {
-							contentLines.push(line.slice(0, width - 6));
+							contentLines.push(line);
 						}
 					}
 					if (details.sessionFile) {

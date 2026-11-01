@@ -1,6 +1,23 @@
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.js";
+import { readExecutionOwner } from "./execution-owner.js";
+/** Acknowledge an exact-parent native launch error without sending a second result. */
+export function acknowledgeReportedLaunchFailure(lineage, error, publishEvent = appendLineageEvent) {
+    const { rootDir, nodeId } = lineage;
+    if (hasUndrainedDescendants(reduceLineage(rootDir), nodeId))
+        throw new Error("Replica descendants have not drained.");
+    const publish = (eventId, type, fields = {}) => {
+        if (!publishEvent(rootDir, eventId, type, nodeId, fields) && !hasLineageEvent(rootDir, eventId, type)) {
+            throw new Error(`Unable to publish reported launch acknowledgement: ${type}`);
+        }
+    };
+    publish(`terminal:${nodeId}`, "terminal", { outcome: "error", resultContent: error });
+    // A crash after delivery must leave resource cleanup discoverable.
+    publish(`cleanup-pending:${nodeId}`, "cleanup_pending");
+    publish(`terminal-delivered:${nodeId}`, "terminal_delivered", { deliveryId: `terminal:${nodeId}` });
+}
 function safeId(value) {
     return Buffer.from(value, "utf8").toString("base64url");
 }
@@ -184,6 +201,7 @@ export function reduceLineage(rootDir) {
             const runStart = typeof event.startTime === "number" ? event.startTime : 0;
             if (node.startTime !== undefined && runStart < node.startTime)
                 continue;
+            node.executionOwner = readExecutionOwner(event.executionOwner);
             if (typeof event.name === "string")
                 node.name = event.name;
             if (typeof event.task === "string")
@@ -206,10 +224,18 @@ export function reduceLineage(rootDir) {
                 node.interactive = event.interactive;
             if (typeof event.autoExit === "boolean")
                 node.autoExit = event.autoExit;
+            if (typeof event.replication === "boolean")
+                node.replication = event.replication;
+            if (typeof event.replicaWorkFile === "string")
+                node.replicaWorkFile = event.replicaWorkFile;
             if (typeof event.workspaceId === "string")
                 node.workspaceId = event.workspaceId;
             if (typeof event.cwd === "string")
                 node.cwd = event.cwd;
+            if (event.worktree && typeof event.worktree === "object" &&
+                ["path", "workspaceId", "paneId", "branch", "baseRef", "baseSha", "manifestFile"].every((key) => typeof event.worktree[key] === "string")) {
+                node.worktree = event.worktree;
+            }
         }
         else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
             const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
@@ -350,28 +376,34 @@ function materializationClaimDir(rootDir) {
 function claimFile(rootDir, deliveryId) {
     return join(materializationClaimDir(rootDir), `${safeId(deliveryId)}.claim`);
 }
-function processAlive(pid) {
-    try {
-        process.kill(pid, 0);
-        return true;
-    }
-    catch (error) {
-        return error.code === "EPERM";
-    }
-}
-/** Linux process start time (field 22 of /proc/<pid>/stat). */
-function processStartTime(pid) {
+/** Linux stat fields after the command name, starting with process state. */
+function linuxProcessFields(pid) {
     if (process.platform !== "linux")
         return undefined;
     try {
         const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
         const closingParen = stat.lastIndexOf(")");
-        const fields = closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : [];
-        return fields[19] || undefined;
+        return closingParen >= 0 ? stat.slice(closingParen + 2).trim().split(/\s+/) : undefined;
     }
     catch {
         return undefined;
     }
+}
+function processAlive(pid) {
+    try {
+        process.kill(pid, 0);
+    }
+    catch (error) {
+        if (error.code !== "EPERM")
+            return false;
+    }
+    // A zombie retains its PID and start time but cannot finish or release its gate.
+    const state = linuxProcessFields(pid)?.[0];
+    return state !== "Z" && state !== "X";
+}
+/** Linux process start time (field 22 of /proc/<pid>/stat). */
+function processStartTime(pid) {
+    return linuxProcessFields(pid)?.[19] || undefined;
 }
 function currentProcessIncarnation() {
     const startTime = processStartTime(process.pid);
@@ -413,7 +445,8 @@ function readMaterializationGate(path) {
         return undefined;
     }
 }
-function processIncarnationAlive(identity, observer) {
+/** Check a saved process identity without treating an unknown live incarnation as dead. */
+export function processIncarnationAlive(identity, observer) {
     if (!processAlive(identity.pid))
         return false;
     const observed = identity.pid === observer.pid ? observer : { pid: identity.pid, startTime: processStartTime(identity.pid) };
@@ -469,6 +502,19 @@ function releaseMaterializationGate(rootDir, token) {
             unlinkSync(path);
         }
         catch { }
+}
+/** Run one synchronous durable mutation under a process-owned filesystem gate. */
+export function withLineageMutationGate(rootDir, mutate) {
+    const owner = currentProcessIncarnation();
+    const gate = acquireMaterializationGate(rootDir, owner);
+    if (!gate)
+        throw new Error("Durable state has an active mutation.");
+    try {
+        return mutate(owner);
+    }
+    finally {
+        releaseMaterializationGate(rootDir, gate.token);
+    }
 }
 function readLineageInboxes(rootDir) {
     const result = [];
@@ -651,7 +697,7 @@ export function pendingLineageInboxes(rootDir, sessionId, sessionFile) {
                 continue;
             if (value.type === "inbox_materialized" && typeof value.deliveryId === "string")
                 materialized.add(value.deliveryId);
-            else if (value.type === "inbox" && value.sessionId === sessionId && value.sessionFile === sessionFile && typeof value.deliveryId === "string") {
+            else if (value.type === "inbox" && value.sessionId === sessionId && typeof value.deliveryId === "string") {
                 const payload = value.payload && typeof value.payload === "object" ? value.payload : {};
                 inboxes.push({ rootDir, nodeId: value.nodeId, deliveryId: value.deliveryId, sessionId, sessionFile, payload, activitySequence: typeof payload.activitySequence === "number" ? payload.activitySequence : undefined });
             }
@@ -665,6 +711,9 @@ export function pendingLineageInboxes(rootDir, sessionId, sessionFile) {
 }
 /** Read the authoritative lineage pointer attached to a child session. */
 export function readLineageAttachment(sessionFile) {
+    const embedded = readSessionBinding(sessionFile)?.child?.lineage;
+    if (embedded && existsSync(join(embedded.rootDir, "events")))
+        return embedded;
     try {
         const value = JSON.parse(readFileSync(`${sessionFile}.lineage.json`, "utf8"));
         if (typeof value.rootDir !== "string" || typeof value.rootId !== "string" || typeof value.nodeId !== "string")
@@ -684,6 +733,25 @@ export function discoverLineageRoots(sessionDir, sessionFile) {
         const attachment = readLineageAttachment(sessionFile);
         if (attachment)
             result.add(attachment.rootDir);
+        const binding = readSessionBinding(sessionFile);
+        const header = readSessionHeader(sessionFile);
+        if (header) {
+            for (const rootDir of sessionLineageRoots(binding?.storeDir ?? sessionBindingStore(), header.id))
+                result.add(rootDir);
+        }
+        // Bound sessions need only their index and their own legacy artifacts,
+        // including a root published after startup but not yet indexed by a launcher.
+        if (binding) {
+            const lineageDir = join(sessionDir, "artifacts", binding.sessionId, "lineage");
+            try {
+                for (const root of readdirSync(lineageDir, { withFileTypes: true })) {
+                    if (root.isDirectory())
+                        result.add(join(lineageDir, root.name));
+                }
+            }
+            catch { /* This session may have no local artifacts after a move. */ }
+            return [...result].sort();
+        }
     }
     try {
         for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {

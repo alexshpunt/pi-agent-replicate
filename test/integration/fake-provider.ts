@@ -13,7 +13,7 @@ interface ChatMessage {
 interface ChatRequest {
 	model?: string;
 	messages?: ChatMessage[];
-	tools?: Array<{ function?: { name?: string } }>;
+	tools?: Array<{ function?: { name?: string; parameters?: { properties?: Record<string, unknown> } } }>;
 }
 
 interface ToolCall {
@@ -36,6 +36,8 @@ export interface ProviderRequest {
 	status: number;
 	messages: ChatMessage[];
 	tools: string[];
+	/** Tool schemas actually sent to the deterministic provider. */
+	toolParameters: Record<string, { properties?: Record<string, unknown> }>;
 	text: string;
 	userText: string;
 }
@@ -96,6 +98,7 @@ function providerRequest(request: ChatRequest, status: number): ProviderRequest 
 		status,
 		messages: request.messages ?? [],
 		tools: [...toolNames(request)].sort(),
+		toolParameters: Object.fromEntries((request.tools ?? []).filter((tool) => tool.function?.name).map((tool) => [tool.function!.name!, tool.function!.parameters ?? {}])),
 		text: requestText(request),
 		userText: lastUserText(request),
 	};
@@ -205,6 +208,65 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	const source = requestText(request);
 	const user = lastUserText(request);
 	const lastRole = request.messages?.at(-1)?.role;
+	if (user.includes("BACKGROUND_WORK_COMPLETED") || user.startsWith("Session-owned processes exited:")) {
+		return { text: user.includes("exit 7") ? "BACKGROUND_WORK_FAILED" : "BACKGROUND_WORK_PROCESSED" };
+	}
+
+	if (user.includes("Your assignment:\nDELETED_TERMINAL_WORK")) {
+		if (lastRole !== "tool") return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
+		if (messageText(request.messages?.at(-1)?.content).includes("DELETED_TERMINAL_STARTED")) {
+			return { toolCalls: [user.includes("DELETED_TERMINAL_WORK_CODEMODE")
+				? { name: "codemode", arguments: { code: 'text(await tools.delete({path: "shell:fixture-work"}));' } }
+				: { name: "delete", arguments: { path: "shell:fixture-work" } }] };
+		}
+		return { text: "DELETED_TERMINAL_FINISHED" };
+	}
+	if (names.has("web_search") && user.includes("Your assignment:\nSEARCH_REQUEST_")) {
+		if (lastRole !== "tool") return { toolCalls: [{ name: "web_search", arguments: {} }] };
+		if (user.includes("SEARCH_REQUEST_STOP")) return { holdQuiet: true };
+		const latestTool = request.messages?.at(-1);
+		if (messageText(latestTool?.content).includes("SEARCH_REQUEST_STARTED")) return { toolCalls: [{ name: "wait_for_web_searches", arguments: {} }] };
+		return { text: "SEARCH_REQUEST_DRAINED" };
+	}
+	if (names.has("replication_output_wrapper") && lastRole !== "tool" && /Call the replica output wrapper/i.test(user)) {
+		const task = quotedValue(user, "task");
+		if (task) return { toolCalls: [{ name: "replication_output_wrapper", arguments: { name: quotedValue(user, "name"), task } }] };
+	}
+	if (names.has("replicate") && lastRole !== "tool" && /Call the replicate tool/i.test(user)) {
+		const task = quotedValue(user, "task");
+		if (task) {
+			const continuation = quotedValue(user, "continuation"), mode = quotedValue(user, "mode");
+			return { toolCalls: [{ name: "replicate", arguments: { name: quotedValue(user, "name") ?? "integration-copy", task, ...(continuation ? { continuation, mode } : {}) } }] };
+		}
+	}
+
+	if (names.has("pi_extension_dev_reload_self") && user.includes("Your assignment:\nSELF_RELOAD_OWNER")) {
+		return lastRole === "tool" ? { text: "REPLICA_RELOAD_SCHEDULED" } : { toolCalls: [{ name: "pi_extension_dev_reload_self", arguments: { blocked: user.includes("BLOCK_RELOAD") } }] };
+	}
+	if (lastRole === "tool" && user.startsWith("INTEGRATION_VISUAL_PARENT")) return { text: "REPLICATION_PARENT_WAITING" };
+	if (lastRole === "tool" && /Call the replicate tool/i.test(user) && user.includes("STOP_CHILD_SUMMARY")) return { text: "REPLICATION_PARENT_WAITING" };
+	if (names.has("replication_probe") && user.includes("Your assignment:") && /Use replication_probe/.test(user) && lastRole !== "tool") {
+		return { toolCalls: [{ name: "replication_probe", arguments: {} }] };
+	}
+	const latestAssignment = [...(request.messages ?? [])].reverse().find((message) => message.role === "user" && messageText(message.content).includes("Your assignment:\n"));
+	const replicaOwner = !!latestAssignment && messageText(latestAssignment.content).includes("Your assignment:\nREPLICATION_NESTED_OWNER");
+	if (replicaOwner && !/Call the teleport tool/i.test(user)) {
+		if (user.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && lastRole !== "tool") {
+			const gate = user.match(/INTEGRATION_DESCENDANT_GATE:\s*(\S+)/)?.[1];
+			if (gate) return { toolCalls: [{ name: "replicate", arguments: { name: "check-descendant", task: `Use replication_probe INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly REPLICATION_GRANDCHILD` } }] };
+		}
+		if (/Replica .* completed\./.test(user) && /REPLICATION_GRANDCHILD/.test(user)) return { text: "REPLICATION_NESTED_SUMMARY" };
+		if (lastRole === "tool" && user.includes("INTEGRATION_INTERRUPT_OWNER")) return { holdQuiet: true };
+		if (lastRole === "tool") return { text: "REPLICATION_OWNER_WAITING" };
+	}
+	if (user.includes("Your assignment:") && /REPLICATION_FAIL_WITH_HISTORY/.test(user)) {
+		return { text: "REPLICA_FIRST_ANSWER", toolCalls: [{ name: "bash", arguments: { command: "echo TOOL_OUTPUT_NOT_AN_ANSWER" } }] };
+	}
+	if (names.has("teleport") && lastRole !== "tool" && /Call the teleport tool/i.test(user)) {
+		const action = quotedValue(user, "action");
+		const target = quotedValue(user, "target");
+		if (action) return { toolCalls: [{ name: "teleport", arguments: { action, ...(target ? { target } : {}) } }] };
+	}
 
 	if (/previous process became (?:stale|unavailable)/i.test(user)) {
 		if (/subagent-resume\/crash-/i.test(user)) return { text: "QUIET_RECOVERY_COMPLETE" };
@@ -299,7 +361,9 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 	}
 
 
-	await waitForIntegrationGate(user);
+	// The parent's launch request contains the gate too; only its child waits.
+	if (!names.has("subagent")) await waitForIntegrationGate(source);
+	else if (!/Call the subagent tool/i.test(user)) await waitForIntegrationGate(user);
 
 	const descendantOwner = source.includes("DESCENDANT_OWNER_FIXTURE");
 	if (
@@ -320,7 +384,8 @@ async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
 		return { text: "OWNER_WAITING" };
 	}
 
-		return { text: markerText(source) ?? "completed" };
+		const marker = markerText(source);
+		return marker === "EMPTY_COMPLETION" ? { emptyCompletion: true } : { text: marker ?? "completed" };
 	}
 
 
@@ -435,6 +500,7 @@ function writeResponse(
 	});
 
 	if (plan.toolCalls && plan.toolCalls.length > 0) {
+		if (plan.text) writeEvent(response, request, { role: "assistant", content: plan.text }, null);
 		writeEvent(
 			response,
 			request,
@@ -475,6 +541,12 @@ const server = createServer(async (request, response) => {
 	}
 	try {
 		const chatRequest = await readJson(request);
+		if (chatRequest.messages?.at(-1)?.role === "tool" && lastUserText(chatRequest).includes("Your assignment:") && lastUserText(chatRequest).includes("REPLICATION_FAIL_WITH_HISTORY")) {
+			providerRequests.push(providerRequest(chatRequest, 400));
+			response.writeHead(400, { "content-type": "application/json" });
+			response.end(JSON.stringify({ error: { message: "deterministic replica terminal failure" } }));
+			return;
+		}
 		if (chatRequest.model === "fallback-primary" || chatRequest.model === "fallback-fail") {
 			providerRequests.push(providerRequest(chatRequest, 503));
 			response.writeHead(503, { "content-type": "application/json" });
@@ -495,7 +567,7 @@ const server = createServer(async (request, response) => {
 		}
 		writeResponse(response, chatRequest, plan);
 	} catch (error) {
-		providerRequests.push({ status: 500, messages: [], tools: [], text: "", userText: "" });
+		providerRequests.push({ status: 500, messages: [], tools: [], toolParameters: {}, text: "", userText: "" });
 		response.writeHead(500, { "content-type": "application/json" });
 		response.end(
 			JSON.stringify({

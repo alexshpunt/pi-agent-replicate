@@ -1,14 +1,16 @@
 # Public subagent tree API
 
-`@alexshp/pi-lpt-herdr-subagents` exports a registration-free API for installed Pi extensions running in Herdr. Importing the package root does not register model-facing tools.
+`pi-agent-replicate` exports a registration-free API for installed Pi extensions running in Herdr. Importing the package root does not register model-facing tools.
 
 ## Create and launch
+
+The model-facing `replicate` tool uses source-snapshot worktrees and host-owned joins. This separate API still supports named roles, bare children and managed worktrees. Its ownership and runtime contracts are unchanged.
 
 ```ts
 import {
   createSubagentTree,
   type SubagentTreeResult,
-} from "@alexshp/pi-lpt-herdr-subagents";
+} from "pi-agent-replicate";
 
 const tree = createSubagentTree({ pi, ctx, metadata: { requestId: "search-1" } });
 const child = await tree.launchChild({
@@ -35,9 +37,11 @@ const grandchild = await handle.launchChild({
 
 The package owns `callerId`, `treeId`, `ownerId`, node IDs, parent IDs, and the opaque `ownershipToken`. Consumer metadata is JSON-compatible and limited to 64 KiB of serialized UTF-8 bytes. Returned metadata, results, and the `children` map are read-only. Child result metadata carries those immutable identities plus the consumer value.
 
-Launching accepts the same `cwd` and `worktree` options as the model-facing tool and reuses the managed-worktree contract described in [Worktree subagents](worktree-subagents.md). Results carry a `SubagentWorktree` with the created path, branch, base, and observed Git state. The package keeps every worktree workspace, including after failures; the caller owns review, integration, and cleanup.
+Launching accepts explicit `cwd` and `worktree` options and reuses the managed-worktree contract described in [Worktree subagents](worktree-subagents.md). Results carry a `SubagentWorktree` with the created path, branch, base, and observed Git state. The package keeps every worktree workspace, including after failures; the caller owns review, integration, and cleanup.
 
 ## Reattach and fork
+
+Internal Pi launches carry their child lifecycle binding in the session, so moving a child does not depend on copying a `.lineage.json` sidecar. This does not replace a consumer's explicit callback reattachment described below; automatic model-facing result delivery and consumer callback delivery are separate contracts.
 
 A consumer calls `attachSubagentTree` from every fresh `session_start` with the current `pi`, `ctx`, and caller credentials, then calls `bindFinalCallback()` on the returned handle. For `/reload`, `/new`, and `/resume`, this replaces the stale session references. For `/fork`, pass `forkLineage: { previousSessionFile }`. The API checks the previous binding and the new session header's `parentSession` before replacing the active context. A failed check leaves the old context untouched.
 

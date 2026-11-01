@@ -1,5 +1,5 @@
 {
-  "name": "pi-lpt-herdr-subagents",
+  "name": "pi-agent-replicate",
   "version": "1.3.0",
   "description": "LPT-owned Herdr subagents for reliable Pi lifecycle, result, and control foundations",
   "keywords": [
@@ -17,12 +17,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alexshpunt/pi-lpt-herdr-subagents.git"
+    "url": "git+https://github.com/alexshpunt/pi-agent-replicate.git"
   },
   "bugs": {
-    "url": "https://github.com/alexshpunt/pi-lpt-herdr-subagents/issues"
+    "url": "https://github.com/alexshpunt/pi-agent-replicate/issues"
   },
-  "homepage": "https://github.com/alexshpunt/pi-lpt-herdr-subagents#readme",
+  "homepage": "https://github.com/alexshpunt/pi-agent-replicate#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -37,7 +37,7 @@
   "scripts": {
     "changelog": "auto-changelog",
     "lint": "oxlint pi-extension test",
-    "test": "node --experimental-strip-types --test test/test.ts test/launch.test.ts test/lineage.test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/settled-contract.test.ts test/settled-observer.test.ts test/public-subagent-tree-api.test.ts test/package-skill.test.js test/result-file.test.ts test/delivery-payload.test.ts test/status-framing.test.ts test/delivery-log.test.ts test/delivery-truth.test.ts test/sidecar-ack.test.ts test/delivery-uniformity.test.ts test/delivery-recovery.test.ts test/watchdog.test.ts test/delivery-storm.test.ts",
+    "test": "node --experimental-strip-types --test test/replica-directory-settings.test.ts test/replica-shared-work.test.ts test/replica-startup-cleanup.test.ts test/replica-startup-error.test.ts test/reported-launch.test.ts test/session-work-lifecycle.test.ts test/session-work.test.ts test/test.ts test/replication.test.ts test/delayed-output.test.ts test/replica-branch.test.ts test/source-state.test.ts test/replica-work.test.ts test/replica-background.test.ts test/launch.test.ts test/lineage.test.ts test/session-binding.test.ts test/session-binding-reads.test.ts test/runtime-routing.test.ts test/release-workflow.test.ts test/settled-contract.test.ts test/settled-observer.test.ts test/public-subagent-tree-api.test.ts test/package-skill.test.js test/result-file.test.ts test/delivery-payload.test.ts test/status-framing.test.ts test/delivery-log.test.ts test/delivery-truth.test.ts test/sidecar-ack.test.ts test/delivery-uniformity.test.ts test/delivery-recovery.test.ts test/watchdog.test.ts test/delivery-storm.test.ts",
     "test:integration": "node --experimental-strip-types test/integration/run-isolated.ts",
     "test:integration:live": "PI_TEST_LIVE=1 node --experimental-strip-types test/integration/run-isolated.ts",
     "version": "auto-changelog --package && git add CHANGELOG.md"
@@ -57,14 +57,16 @@
     "extensions": [
       "./pi-extension/subagents/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/alexshpunt/pi-lpt-herdr-subagents/main/docs/assets/pi-herdr-agents-gallery.png"
+    "image": "https://raw.githubusercontent.com/alexshpunt/pi-agent-replicate/main/docs/assets/pi-herdr-agents-gallery.png"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@earendil-works/pi-tui": "0.84.4",
     "@sinclair/typebox": "^0.34.52",
+    "@types/node": "^26.6.4",
     "auto-changelog": "^2.6.0",
-    "oxlint": "^1.73.0"
+    "oxlint": "^1.73.0",
+    "typescript": "^7.0.2"
   }
 }

@@ -196,6 +196,17 @@ function getHerdrCurrentPaneInfo(run = herdrExec): {
 	return { pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id };
 }
 
+/** Read the current pane's manual name; unavailable metadata must not block a launch. */
+export function getHerdrCurrentPaneTitle(run = herdrExec): string | undefined {
+	try {
+		const parsed = parseHerdrJson(run(buildCurrentPaneArgs())) as { result?: { pane?: { title?: unknown; label?: unknown } } } | null;
+		const pane = parsed?.result?.pane;
+		return [pane?.title, pane?.label].find((value): value is string => typeof value === "string" && !!value.trim());
+	} catch {
+		return undefined;
+	}
+}
+
 function buildTabCreateArgs(
 	name: string,
 	cwd: string,
@@ -259,7 +270,7 @@ export function createHerdrSurface(name: string): string {
 	return createHerdrSurfaceInWorkspace(name, process.cwd(), workspaceId);
 }
 
-/** Worktree records returned by `herdr worktree list`. */
+/** Branch-backed worktree records returned by `herdr worktree list`. */
 export interface HerdrWorktreeInfo {
 	branch: string;
 	path: string;
@@ -297,6 +308,7 @@ export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
 				label?: unknown;
 				open_workspace_id?: unknown;
 				is_linked_worktree?: unknown;
+				is_detached?: unknown;
 			}>;
 		};
 	} | null;
@@ -304,7 +316,10 @@ export function parseHerdrWorktreeList(output: string): HerdrWorktreeInfo[] {
 	if (parsed?.result?.type !== "worktree_list" || !Array.isArray(worktrees)) {
 		throw new Error("Unexpected herdr worktree list output");
 	}
-	return worktrees.map((worktree) => {
+	// Detached checkouts have no branch and cannot match an owned replica.
+	return worktrees.filter((worktree) => !(
+		worktree.is_detached === true && worktree.branch === undefined && typeof worktree.path === "string"
+	)).map((worktree) => {
 		if (
 			typeof worktree.branch !== "string" ||
 			typeof worktree.path !== "string"
@@ -439,13 +454,14 @@ export function readHerdrScreen(surface: string, lines = 50): string {
 export async function readHerdrScreenAsync(
 	surface: string,
 	lines = 50,
+	source: "visible" | "recent-unwrapped" = "visible",
 ): Promise<string> {
 	return herdrExecAsync([
 		"pane",
 		"read",
 		surface,
 		"--source",
-		"visible",
+		source,
 		"--lines",
 		String(lines),
 	]);

@@ -1,0 +1,220 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { it } from "node:test";
+import { buildSessionContext } from "@earendil-works/pi-coding-agent";
+import { seedReplicationSessionFile } from "../pi-extension/subagents/session.ts";
+import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
+import { materializeReplicationHistory, registerReplicateTool, replicationName } from "../pi-extension/subagents/replication.ts";
+import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
+import subagentsExtension from "../pi-extension/subagents/index.ts";
+
+it("reads the current pane name without falling back to another pane", () => {
+	assert.equal(getHerdrCurrentPaneTitle((args) => {
+		assert.deepEqual(args, ["pane", "current", "--current"]);
+		return JSON.stringify({ result: { pane: { title: "Проверка панели" } } });
+	}), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => JSON.stringify({ result: { pane: { label: "Проверка панели" } } })), "Проверка панели");
+	assert.equal(getHerdrCurrentPaneTitle(() => "{}"), undefined);
+	assert.equal(getHerdrCurrentPaneTitle(() => { throw new Error("Herdr unavailable"); }), undefined);
+});
+
+it("adds the origin from the session, then pane, then project", () => {
+	let sessionName: string | undefined = "  Настройки  ";
+	const pi = { getSessionName: () => sessionName };
+	const ctx = { cwd: "/work/settings" };
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => { throw new Error("session has priority"); }), "check-tests ← Настройки");
+	sessionName = " \n ";
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => "Проверка\nпанели"), "check-tests ← Проверка панели");
+	assert.equal(replicationName("check-tests", pi as any, ctx as any, () => undefined), "check-tests ← settings");
+});
+
+it("keeps the supplied task name without automatic numbering", () => {
+	const pi = { getSessionName: () => "check-owner ← Settings" };
+	const ctx = { cwd: "/work/settings" };
+	for (const name of ["check-tests", "check-tests", "check-types"]) {
+		assert.equal(replicationName(name, pi as any, ctx as any, () => undefined), `${name} ← check-owner ← Settings`);
+	}
+});
+
+it("saves the copy name without changing inherited session entries", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-name-"));
+	try {
+		const child = join(dir, "child.jsonl");
+		const branch = [{ type: "session_info", id: "parent-name", name: "Настройки" }];
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: [], name: "check-tests ← Настройки" });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(rows.filter((row) => row.type === "session_info").map((row) => row.name), ["Настройки", "check-tests ← Настройки"]);
+		assert.equal(rows.at(-1).parentId, "parent-name");
+		assert.equal(branch[0].name, "Настройки");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+it("registers only the fresh replication tool", () => {
+	const registered: string[] = [];
+	subagentsExtension({
+		registerTool: (tool: { name: string }) => registered.push(tool.name),
+		registerCommand: () => {},
+		on: () => () => {},
+		registerMessageRenderer: () => {},
+	} as any);
+	assert.deepEqual(registered, ["replicate"]);
+});
+function toolSurface() {
+	let definition: any;
+	const handlers = new Map<string, Function>();
+	const pi = { registerTool: (tool: any) => { definition = tool; }, on: (event: string, handler: Function) => { handlers.set(event, handler); } };
+	const launches: any[] = [];
+	registerReplicateTool(pi as any, async (params) => {
+		launches.push(params);
+		return { id: "copy", name: params.name, sessionFile: "/saved" };
+	});
+	const context = (id: string, branch: any[] = []): any => ({ sessionManager: { getSessionId: () => id, getBranch: () => branch } });
+	return { handlers, context, launches, definition: () => definition };
+}
+
+it("keeps name and task as its only parameters after delivered results and session changes", () => {
+	const surface = toolSurface();
+	const branch = [{ type: "custom_message", customType: "subagent_result", details: { replication: true, recoveryAvailable: true, receiverSessionId: "original" } }];
+	for (const id of ["original", "fresh-copy", "unrelated"]) {
+		surface.handlers.get("session_start")?.({}, surface.context(id, branch));
+		assert.deepEqual(Object.keys(surface.definition().parameters.properties), ["name", "task"]);
+		assert.deepEqual(surface.definition().parameters.required, ["name", "task"]);
+		assert.equal(surface.definition().parameters.additionalProperties, false);
+		assert.equal(surface.definition().name, "replicate");
+	}
+});
+
+it("rejects missing or non-kebab-case names before launching", async () => {
+	const surface = toolSurface(), ctx = surface.context("original");
+	for (const name of [undefined, "", "Check-tests", "check tests", "check_tests", "check--tests", "-check", "check-", "проверка", "check\nname", "check\n", "check\r\n"]) {
+		await assert.rejects(surface.definition().execute("call", { name, task: "review" }, undefined, undefined, ctx), /kebab-case name/);
+	}
+	assert.equal(surface.launches.length, 0);
+});
+
+it("passes valid caller names unchanged to launch", async () => {
+	const surface = toolSurface(), ctx = surface.context("original");
+	for (const name of ["review", "check-auth-risks", "check-types-2"]) {
+		const result = await surface.definition().execute("call", { name, task: "review" }, undefined, undefined, ctx);
+		assert.equal(surface.launches.at(-1).name, name);
+		assert.equal(result.details.name, name);
+	}
+});
+it("rejects old continuation arguments through direct execution", async () => {
+	const surface = toolSurface(), ctx = surface.context("original");
+	for (const extra of [
+		{ continuation: "old", mode: "resume" },
+		{ continuation: "old", mode: "fork" },
+		{ continuation: undefined },
+		{ mode: undefined },
+		{ resume: "old" },
+		{ fork: true },
+	]) {
+		await assert.rejects(surface.definition().execute("call", { name: "continue-check", task: "continue", ...extra }, undefined, undefined, ctx), /only name and task/);
+	}
+	assert.equal(surface.launches.length, 0);
+});
+it("copies only the captured branch and settles inherited pending calls without executing them", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-contract-"));
+	try {
+		const parent = join(dir, "parent.jsonl"), child = join(dir, "child.jsonl");
+		writeFileSync(parent, JSON.stringify({ type: "session", id: "parent", cwd: dir }) + "\n" + JSON.stringify({ type: "message", id: "other-branch", message: { role: "user", content: [{ type: "text", text: "other branch" }] } }) + "\n");
+		const branch = [
+			{ type: "message", id: "current-user", parentId: "not-in-branch", message: { role: "user", content: [{ type: "text", text: "current request" }] } },
+			{ type: "message", id: "pending", parentId: "current-user", message: { role: "assistant", content: [{ type: "toolCall", id: "one", name: "replicate" }, { type: "toolCall", id: "two", name: "bash" }] } },
+		];
+		seedReplicationSessionFile({ parentSessionFile: parent, childSessionFile: child, childCwd: dir, entries: branch, contextMessages: buildSessionContext(branch as any).messages });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.notEqual(rows[0].id, "parent");
+		assert.equal(rows[0].cwd, dir);
+		assert.deepEqual(rows.slice(1, 3).map((row) => row.id), ["current-user", "pending"]);
+		assert.equal(rows[1].parentId, null);
+		assert.deepEqual(rows.slice(3).map((row) => row.message.toolCallId), ["one", "two"]);
+		assert.equal(rows[4].parentId, rows[3].id);
+		assert.equal(branch[0].parentId, "not-in-branch", "the caller snapshot is not mutated");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const resumeSessionId of [undefined, "saved-copy"]) {
+	it(`keeps conversation and runtime without replaying extension control state (${resumeSessionId ? "resume" : "fork"})`, () => {
+		const dir = mkdtempSync(join(tmpdir(), "replication-controls-"));
+		try {
+			const branch: any[] = [
+				{ type: "model_change", id: "model", provider: "local", modelId: "test" },
+				{ type: "thinking_level_change", id: "thinking", thinkingLevel: "high" },
+				{ type: "message", id: "user", message: { role: "user", content: [{ type: "text", text: "current assignment context" }] } },
+				{ type: "custom", id: "queue", customType: "ask:queued", data: { requestId: "parent-question" } },
+				{ type: "custom", id: "ready", customType: "ask:queue-completed", data: { requestId: "parent-question" } },
+				{ type: "custom", id: "other-control", customType: "another-extension:pending", data: { active: true } },
+				{ type: "custom_message", id: "answer", customType: "ask:background-answer", content: "already delivered context", display: true, details: {} },
+			];
+			branch.forEach((row, i) => { row.parentId = i ? branch[i - 1].id : null; });
+			const original = JSON.stringify(branch);
+			const context = buildSessionContext(branch);
+			const child = join(dir, "child.jsonl");
+			seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: context.messages, resumeSessionId });
+			const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(rows.filter((row) => row.type === "custom"), [], "pending control state belongs to its source, not a launched attempt");
+			assert.deepEqual(buildSessionContext(rows.slice(1)), context, "model, thinking and conversation stay unchanged");
+			assert.equal(rows.at(-1).parentId, "user");
+			if (resumeSessionId) assert.equal(rows[0].id, resumeSessionId);
+			assert.equal(JSON.stringify(branch), original);
+		} finally { rmSync(dir, { recursive: true, force: true }); }
+	});
+}
+
+it("keeps compacted context when its first retained entry was extension control state", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-control-compaction-"));
+	try {
+		const branch: any[] = [
+			{ type: "custom", id: "control", parentId: null, customType: "pending", data: {} },
+			{ type: "message", id: "kept", parentId: "control", message: { role: "user", content: [{ type: "text", text: "keep this fact" }] } },
+			{ type: "compaction", id: "compact", parentId: "kept", firstKeptEntryId: "control", summary: "older facts", tokensBefore: 1000 },
+		];
+		const context = buildSessionContext(branch), child = join(dir, "child.jsonl");
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "parent.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: context.messages });
+		const rows = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(rows.filter((row) => row.type === "custom"), []);
+		assert.deepEqual(buildSessionContext(rows.slice(1)), context);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+it("does not add outputs for abandoned, errored or compacted historical calls", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-orphans-"));
+	try {
+		const branch = [
+			{ type: "message", id: "error", parentId: null, message: { role: "assistant", stopReason: "error", content: [{ type: "toolCall", id: "failed-call", name: "write" }] } },
+			{ type: "message", id: "abandoned", parentId: "error", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "abandoned-call", name: "bash" }] } },
+			{ type: "message", id: "user", parentId: "abandoned", message: { role: "user", content: [{ type: "text", text: "current request" }] } },
+			{ type: "compaction", id: "compact", parentId: "user", firstKeptEntryId: "user", summary: "older context", tokensBefore: 1000 },
+			{ type: "message", id: "current", parentId: "compact", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "current-call", name: "replicate" }] } },
+		];
+		const child = join(dir, "child.jsonl");
+		seedReplicationSessionFile({ parentSessionFile: join(dir, "original.jsonl"), childSessionFile: child, childCwd: dir, entries: branch, contextMessages: buildSessionContext(branch as any).messages });
+		const outputs = readFileSync(child, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.message?.role === "toolResult");
+		assert.deepEqual(outputs.map((row) => row.message.toolCallId), ["current-call"]);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("saves all post-fork answer text in order without inherited answers, tools or reasoning", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replication-history-"));
+	try {
+		const session = join(dir, "child.jsonl");
+		const longAnswer = "answer line\n".repeat(10_000);
+		const rows = [
+			{ type: "session", id: "clone", version: 3, cwd: dir },
+			{ type: "message", id: "inherited", message: { role: "assistant", content: [{ type: "text", text: "ORIGINAL_ANSWER" }] } },
+			{ type: "message", id: "first", message: { role: "assistant", content: [{ type: "thinking", thinking: "HIDDEN_REASONING" }, { type: "text", text: "FIRST_ANSWER" }, { type: "toolCall", name: "bash", arguments: { command: "SECRET_TOOL_INPUT" } }] } },
+			{ type: "message", id: "tool", message: { role: "toolResult", content: [{ type: "text", text: "TOOL_OUTPUT" }] } },
+			{ type: "message", id: "last", message: { role: "assistant", content: [{ type: "text", text: longAnswer }] } },
+		];
+		writeFileSync(session, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+		seedSessionBinding(session, { version: 1, storeDir: join(dir, "store"), child: { lineage: { rootDir: join(dir, "lineage"), rootId: "root", nodeId: "clone", launchKind: "fork" }, environment: { PI_SUBAGENT_REPLICATION_ASSISTANTS: JSON.stringify(["inherited"]) } } });
+		const path = materializeReplicationHistory(session, "clone", "replica");
+		const history = readFileSync(path, "utf8");
+		assert.ok(history.includes(longAnswer));
+		assert.ok(history.indexOf("FIRST_ANSWER") < history.indexOf(longAnswer));
+		assert.doesNotMatch(history, /ORIGINAL_ANSWER|HIDDEN_REASONING|SECRET_TOOL_INPUT|TOOL_OUTPUT/);
+		assert.equal(materializeReplicationHistory(session, "clone", "replica"), path, "recovery reuses the immutable history");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});

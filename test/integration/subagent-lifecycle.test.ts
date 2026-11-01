@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { getProviderRequests, resetProviderRequests } from "./fake-provider.ts";
+import { childSessionLocation, readSessionBinding, sessionLocationAlive, sessionOwnsPane, type SessionLocation } from "../../pi-extension/subagents/session-binding.ts";
 import {
 	getAvailableBackends,
 
@@ -55,6 +56,8 @@ const backends = getAvailableBackends();
 
 
 interface IntegrationResultDetails {
+	parentToolCallId?: unknown;
+	originatingToolCallId?: unknown;
 	kind?: unknown;
 	outcome?: unknown;
 	childId?: unknown;
@@ -341,6 +344,35 @@ async function waitForChildSession(
 	throw new Error(`Timeout waiting for session for child ${childId}`);
 }
 
+/** Wait for the saved session to identify the live Pi process, not a startup helper. */
+async function waitForChildIncarnation(sessionFile: string, paneId: string): Promise<SessionLocation> {
+	const deadline = Date.now() + PI_TIMEOUT;
+	while (Date.now() < deadline) {
+		const binding = readSessionBinding(sessionFile);
+		const location = binding?.child && childSessionLocation(binding.child.lineage.rootDir, binding.child.lineage.nodeId);
+		if (location && sessionLocationAlive(location)) {
+			const info = getPaneProcessInfo(paneId);
+			if (sessionOwnsPane(location, paneId, info.shellPid) && info.pids.includes(location.pid)) return location;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for live child incarnation: ${sessionFile}`);
+}
+
+/** Herdr must register an agent before its prompt command can address it. */
+async function waitForRegisteredAgent(paneId: string): Promise<void> {
+	const deadline = Date.now() + PI_TIMEOUT;
+	while (Date.now() < deadline) {
+		try {
+			execFileSync("herdr", ["agent", "get", paneId], { encoding: "utf8", stdio: "pipe" });
+			return;
+		} catch (error) {
+			if (!String((error as { stderr?: unknown }).stderr).includes('"code":"agent_not_found"')) throw error;
+		}
+		await sleep(50);
+	}
+	throw new Error(`Timeout waiting for Herdr agent registration: ${paneId}`);
+}
 function listWorkspacePanes(workspaceId: string): Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }> {
 	return JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", workspaceId], { encoding: "utf8" }))
 		.result.panes as Array<{ pane_id?: string; label?: string; agent_session?: { value?: string } }>;
@@ -419,6 +451,14 @@ for (const backend of backends) {
 
 
 		afterEach(async () => {
+			const artifacts = process.env.PI_INTEGRATION_DEBUG_ARTIFACT_DIR;
+			if (artifacts) {
+				mkdirSync(artifacts, { recursive: true });
+				const parents = readdirSync(env.dir).filter((file) => file.endsWith(".jsonl")).map((file) => ({ file, entries: readSessionEntries(join(env.dir, file)) }));
+				const files = [...new Set(parents.flatMap((parent) => parent.entries).map((entry) => entry.message?.details?.sessionFile).filter((file): file is string => typeof file === "string"))];
+				const children = files.map((file) => ({ file, entries: existsSync(file) ? readSessionEntries(file) : [] }));
+				writeFileSync(join(artifacts, `${env.dir.split("/").at(-1)}.json`), JSON.stringify({ parents, children, requests: getProviderRequests(), screens: env.surfaces.map((surface) => readPane(surface, 80)) }));
+			}
 			await cleanupTestEnv(env);
 			restoreBackend(prevMux);
 		});
@@ -812,7 +852,8 @@ for (const backend of backends) {
 			const parentSession = join(env.dir, `direct-skills-parent-${id}.jsonl`);
 			writeIntegrationSkill(env.dir, "ale54-role-default", roleBody);
 			writeIntegrationSkill(env.dir, "ale54-direct", directBody);
-			writeSkillRole(env.dir, role, "ale54-role-default", false);
+			writeSkillRole(env.dir, role, "ale54-role-default");
+			const gate = join(env.dir, "direct-skill-release");
 
 			const childName = `DirectSkills-${id}`;
 			const surface = createTrackedSurface(env, `direct-skills-${id}`);
@@ -822,22 +863,23 @@ for (const backend of backends) {
 				`  name: "${childName}"`,
 				`  agent: "${role}"`,
 				'  skills: "ale54-direct, ale54-missing, ale54-direct, ale54-missing"',
-				`  task: "Return exactly ${report}"`,
+				`  task: "INTEGRATION_WAIT_FOR_FILE: ${gate} Return exactly ${report}"`,
 				"Do not do anything else. Just call the subagent tool once.",
 			].join("\n"), { extraArgs: `--session ${shellQuote(parentSession)}` });
 
-			await waitForParentEvidence(
-				parentSession,
-				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
-				surface,
-				PI_TIMEOUT,
-			);
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			const childScreen = await waitForScreen(
 				childPane,
 				/ale54-missing/i,
 				PI_TIMEOUT,
 				300,
+			);
+			writeFileSync(gate, "release");
+			await waitForParentEvidence(
+				parentSession,
+				new RegExp(`"customType":"subagent_result"[^\\n]*${report}`),
+				surface,
+				PI_TIMEOUT,
 			);
 			const parentEntries = readSessionEntries(parentSession);
 			const results = parentEntries.filter((entry) =>
@@ -1390,14 +1432,11 @@ for (const backend of backends) {
 			});
 
 			const childPane = await waitForAgentPane(`Crash-${id}`, env.workspaceId);
-			const processDeadline = Date.now() + 5_000;
-			let childPids = getPaneProcessInfo(childPane).pids;
-			while (childPids.length < 2 && Date.now() < processDeadline) {
-				await sleep(50);
-				childPids = getPaneProcessInfo(childPane).pids;
-			}
-			assert.ok(childPids.length > 1, "crash fixture must observe the pane shell and Pi process");
-			process.kill(Math.max(...childPids), "SIGKILL");
+			await waitForParentEvidence(parentSession, /"status":"started"/, surface, PI_TIMEOUT);
+			const launch = readSessionEntries(parentSession).find(entry => entry.message?.toolName === "subagent" && entry.message.details?.status === "started");
+			const childSession = await waitForChildSession(env.dir, launch.message.details.id);
+			const location = await waitForChildIncarnation(childSession, childPane);
+			process.kill(location.pid, "SIGKILL");
 			await waitForCustomResultCount(parentSession, 1);
 
 			await waitForAgentGone(childPane, env.workspaceId);
@@ -1474,6 +1513,9 @@ for (const backend of backends) {
 				/previous process became stale/.test(request.userText)
 			);
 			assert.equal(revives.length, 3, "exactly three same-session revives must run");
+			const lineage = JSON.parse(readFileSync(`${details.sessionFile}.lineage.json`, "utf8")) as { rootDir: string };
+			const events = readdirSync(join(lineage.rootDir, "events")).map(file => readFileSync(join(lineage.rootDir, "events", file), "utf8")).join("\n");
+			assert.doesNotMatch(events, /user_tab_close/, "a replacement must never be mistaken for a manually closed pane");
 		});
 
 
@@ -1488,9 +1530,10 @@ for (const backend of backends) {
 			const task = [
 				`Call the subagent tool with these EXACT parameters:`,
 				`  name: "Fork-${id}"`,
+				`  agent: "test-echo"`,
 				`  fork: true`,
 				`  task: "Run this bash command: echo 'FORK_OK_${id}' > '${markerFile}'"`,
-				`Do not set the agent or interactive parameters. Just set name, fork, and task.`,
+				`Do not set the interactive parameter. Use the named role's default.`,
 				`After you receive the result, say FORK_COMPLETE.`,
 			].join("\n");
 
@@ -1510,7 +1553,7 @@ for (const backend of backends) {
 				PI_TIMEOUT,
 			);
 
-			// Receiving the result proves the bare fork auto-exited and its child pane
+			// Receiving the result proves the named fork auto-exited and its child pane
 			// was finalized instead of remaining at the editor as an interactive run.
 
 			// Verify: the forked session has a parent link
@@ -1565,6 +1608,10 @@ for (const backend of backends) {
 			const firstEntries = await waitForCustomResultCount(parentSession, 1);
 			const first = customResultEntries(firstEntries)[0]?.details ?? {};
 			assert.equal(first.kind, "help-request");
+			const launchCall = readSessionEntries(parentSession).find(entry => entry.message?.role === "toolResult" && entry.message.toolName === "subagent")?.message.toolCallId;
+			assert.ok(launchCall);
+			assert.equal(first.parentToolCallId, launchCall);
+			assert.equal(first.originatingToolCallId, launchCall);
 			assert.equal(typeof first.sessionFile, "string");
 			assert.equal(typeof first.resultPath, "string");
 			assert.match(readFileSync(first.resultPath as string, "utf8"), /Status: help-request/);
@@ -1573,27 +1620,28 @@ for (const backend of backends) {
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.pane_id === childPane));
 
-			const settledEntries = await waitForCustomResultCount(parentSession, 2);
-			const results = customResultEntries(settledEntries);
-			assert.equal(results.length, 2);
-			assert.notEqual(results[1]?.details?.deliveryId, first.deliveryId);
-			assert.equal(results[1]?.details?.sessionFile, first.sessionFile);
-			assert.match(String(results[1]?.details?.resultContent), /completed/);
+			await waitForScreen(childPane, /completed/, PI_TIMEOUT);
+			await waitForParentTurnAfterResult(parentSession);
+			assert.equal(customResultEntries(readSessionEntries(parentSession)).length, 1, "the settled answer stays local");
 			assert.ok(listWorkspacePanes(env.workspaceId).some((pane) => pane.pane_id === childPane), "help and settlement must leave the persistent child open");
 
 			execFileSync("herdr", ["agent", "prompt", childPane, "PING_AGAIN"], { encoding: "utf8" });
-			const repeatedEntries = await waitForCustomResultCount(parentSession, 3);
+			const repeatedEntries = await waitForCustomResultCount(parentSession, 2);
 			const repeated = customResultEntries(repeatedEntries);
-			assert.equal(repeated[2]?.details?.kind, "help-request");
-			assert.notEqual(repeated[2]?.details?.deliveryId, first.deliveryId);
-			assert.notEqual(repeated[2]?.details?.resultPath, first.resultPath);
-			assert.equal(repeated[2]?.details?.sessionFile, first.sessionFile);
+			assert.equal(repeated[1]?.details?.kind, "help-request");
+			assert.notEqual(repeated[1]?.details?.deliveryId, first.deliveryId);
+			assert.notEqual(repeated[1]?.details?.resultPath, first.resultPath);
+			assert.equal(repeated[1]?.details?.sessionFile, first.sessionFile);
+			await waitForPaneTextCount(childPane, "completed", 2);
 
 			execFileSync("herdr", ["agent", "prompt", childPane, "CLOSE_PERSISTENT_CHILD"], { encoding: "utf8" });
+			await waitForCustomResultCount(parentSession, 3);
 			await waitForAgentGone(childPane, env.workspaceId);
 			const finalResults = customResultEntries(readSessionEntries(parentSession));
 			assert.equal(finalResults.filter((entry) => entry.details?.kind === "help-request").length, 2);
-			assert.ok(finalResults.length >= 3 && finalResults.length <= 4, "terminal close must not duplicate the final answer");
+			assert.equal(finalResults.length, 3, "explicit completion publishes exactly one terminal result");
+			for (const result of finalResults) assert.equal(result.details?.parentToolCallId, launchCall);
+			assert.match(String(finalResults[2]?.details?.resultContent), /SETTLED_TWO/);
 		});
 
 
@@ -1602,7 +1650,7 @@ for (const backend of backends) {
 			const sessionFile = join(env.dir, `resume-child-${id}.jsonl`);
 			const seedSurface = createTrackedSurface(env, `resume-seed-${id}`);
 			await waitForPaneReady(seedSurface);
-			startPi(seedSurface, env.dir, "BTW question: Say FIRST", {
+			startPi(seedSurface, env.dir, "Return exactly FIRST", {
 				extraArgs: `--print --session ${shellQuote(sessionFile)}`,
 			});
 			await waitForScreen(seedSurface, /FIRST/);
@@ -1663,23 +1711,23 @@ for (const backend of backends) {
 				{ extraArgs: `--session ${shellQuote(firstParentSession)}` },
 			);
 
-			await waitForParentEvidence(
-				firstParentSession,
-				/"customType":"subagent_result"/,
-				firstParent,
-				PI_TIMEOUT,
+			await waitForParentEvidence(firstParentSession, /"status":"started"/, firstParent, PI_TIMEOUT);
+			const launch = readSessionEntries(firstParentSession).find(
+				(entry) => entry.message?.role === "toolResult" && entry.message.toolName === "subagent",
 			);
-			const firstParentEntries = readSessionEntries(firstParentSession);
-			const firstResults = firstParentEntries.filter(
-				(entry) =>
-					entry.type === "custom_message" &&
-					entry.customType === "subagent_result",
-			);
-			assert.equal(firstResults.length, 1, "initial parent must receive one result");
+			assert.equal(launch?.message.isError, false, JSON.stringify(launch));
+			const childSession = await waitForChildSession(env.dir, launch.message.details.id);
+			const childPane = await waitForAgentPane(`ResumeSkilled-${id}`, env.workspaceId);
+			await waitForActivity(env.dir, (state) => state.runningChildId === launch.message.details.id && state.latestEvent === "agent_settled");
+			assert.match(readFileSync(childSession, "utf8"), new RegExp(initialReport));
+			assert.equal(customResultEntries(readSessionEntries(firstParentSession)).length, 0, "a persistent answer stays local until the child closes");
+			runInPane(childPane, "/quit");
+			await waitForAgentGone(childPane, env.workspaceId);
+			await waitForCustomResultCount(firstParentSession, 1);
+			const firstResults = customResultEntries(readSessionEntries(firstParentSession));
+			assert.equal(firstResults.length, 1, "closing publishes one terminal result before resume");
 			assert.match(String(firstResults[0]?.details?.resultContent), new RegExp(initialReport));
-			const childSession = firstResults[0]?.details?.sessionFile;
-			assert.equal(typeof childSession, "string", "initial result must identify child session");
-			if (typeof childSession !== "string") return;
+			assert.equal(firstResults[0]?.details?.sessionFile, childSession);
 
 			const initialChildRequests = getProviderRequests().filter(
 				(request) =>
@@ -1709,6 +1757,10 @@ for (const backend of backends) {
 				].join("\n"),
 				{ extraArgs: `--session ${shellQuote(secondParentSession)}` },
 			);
+			await waitForParentEvidence(secondParentSession, /"status":"started"/, secondParent, PI_TIMEOUT);
+			const resumedLaunch = readSessionEntries(secondParentSession).find((entry) => entry.message?.toolName === "subagent_resume");
+			await waitForActivity(env.dir, (state) => state.runningChildId === resumedLaunch.message.details.id && state.latestEvent === "agent_settled");
+			assert.equal(countText(readFileSync(childSession, "utf8"), "subagent_skill_initialization"), 1, "resume must reuse the persisted skill initialization");
 			await waitForFile(childSession, PI_TIMEOUT, new RegExp(resumedReport));
 			assert.equal(
 				readSessionEntries(firstParentSession).filter(
@@ -1778,33 +1830,39 @@ for (const backend of backends) {
 			);
 		});
 
-		// ── Subagent with custom system prompt ──
+		for (const agent of [undefined, "missing-role"]) {
+			it(`rejects ${agent ? "unknown" : "missing"} roles without launching a child`, async () => {
+				const id = uniqueId();
+				const markerFile = join(env.dir, `rejected-child-${id}.txt`);
+				const parentSession = join(env.dir, `role-required-${id}.jsonl`);
+				const surface = createTrackedSurface(env, `role-required-${id}`);
+				await waitForPaneReady(surface);
 
-		it("passes systemPrompt to subagent", async () => {
-			const id = uniqueId();
-			const markerFile = `/tmp/pi-integ-sysprompt-${id}.txt`;
-			trackTempFile(env, markerFile);
+				startPi(surface, env.dir, [
+					"Call the subagent tool with these EXACT parameters:",
+					`  name: "Rejected-${id}"`,
+					...(agent ? [`  agent: "${agent}"`] : []),
+					`  task: "Run bash: echo 'UNEXPECTED_CHILD' > '${markerFile}'"`,
+					"Call the tool once, then finish.",
+				].join("\n"), {
+					extraArgs: `-p --session ${shellQuote(parentSession)}`,
+				});
 
-			const surface = createTrackedSurface(env, `sysprompt-${id}`);
-			await waitForPaneReady(surface);
-
-			const task = [
-				`Call the subagent tool with these parameters:`,
-				`  name: "SysP-${id}"`,
-				`  agent: "test-echo"`,
-				`  systemPrompt: "Always start your response with CUSTOM_PROMPT_ACTIVE."`,
-				`  task: "Write 'SYSPROMPT_${id}' to ${markerFile} using bash: echo 'SYSPROMPT_${id}' > '${markerFile}'"`,
-				`After the subagent completes, say SYSPROMPT_TEST_DONE.`,
-			].join("\n");
-
-			startPi(surface, env.dir, task);
-
-			const content = await waitForFile(markerFile, PI_TIMEOUT, /SYSPROMPT/);
-			assert.ok(
-				content.includes(`SYSPROMPT_${id}`),
-				`System prompt test marker should exist`,
-			);
-		});
+				await waitForPiExit(surface);
+				const entries = readSessionEntries(parentSession);
+				const result = entries.find((entry) =>
+					entry.type === "message" &&
+					entry.message?.role === "toolResult" &&
+					entry.message?.toolName === "subagent")?.message;
+				assert.ok(result, "the parent must receive a launch error");
+				assert.equal(result.isError, true);
+				assert.match(JSON.stringify(result.content), agent ? /was not found/ : /agent/);
+				assert.equal(existsSync(markerFile), false);
+				assert.equal(customResultEntries(entries).length, 0);
+				assert.equal(getProviderRequests().some((request) =>
+					!request.tools.includes("subagent")), false, "no child provider request should run");
+			});
+		}
 
 		it("keeps an autonomous owner alive past the stale threshold until its child result is processed", async () => {
 			const id = uniqueId();
@@ -2054,6 +2112,7 @@ for (const backend of backends) {
 
 			const childPane = await waitForAgentPane(childName, env.workspaceId);
 			await waitForPaneTextCount(childPane, "SETTLED_ONE", 2);
+			await waitForRegisteredAgent(childPane);
 			assert.equal(readResults().length, 0, "an open child must not publish an intermediate result");
 
 			const secondPrompt = execFileSync(
