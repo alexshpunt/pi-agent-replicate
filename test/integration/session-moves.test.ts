@@ -49,12 +49,10 @@ const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
 function installTeleport(env: TestEnv): string {
 	assert.ok(teleportSource && existsSync(teleportSource));
 	const agentDir = join(env.dir, ".pi", "agent");
-	const wrapper = join(agentDir, "extensions", "teleport-under-test.ts");
-	writeFileSync(wrapper, `export { default } from ${JSON.stringify(teleportSource)};\n`);
 	const serverAgentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR;
 	assert.ok(serverAgentDir, "Teleport needs the runner-owned agent directory");
 	cpSync(agentDir, serverAgentDir, { recursive: true });
-	return wrapper;
+	return teleportSource;
 }
 
 for (const backend of getAvailableBackends()) {
