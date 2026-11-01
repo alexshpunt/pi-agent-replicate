@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { reduceLineage, type LineageNodeState } from "../../pi-extension/subagents/lineage.ts";
 import { parentSessionLocation, childSessionLocation, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
 import { getProviderRequests } from "./fake-provider.ts";
@@ -52,9 +52,9 @@ function installTeleport(env: TestEnv): string {
 	const serverAgentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR;
 	assert.ok(serverAgentDir, "Teleport needs the runner-owned agent directory");
 	cpSync(agentDir, serverAgentDir, { recursive: true });
-	const link = join(serverAgentDir, "extensions", "teleport-under-test.ts");
+	const link = join(serverAgentDir, "extensions", "teleport-under-test");
 	rmSync(link, { force: true });
-	symlinkSync(teleportSource, link);
+	symlinkSync(dirname(teleportSource), link, "dir");
 	return teleportSource;
 }
 
@@ -303,8 +303,10 @@ export default function(pi){
 			const parent = createTrackedSurface(env, "teleport-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, "Call consumer_tree_open_probe exactly once, then wait.", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `-e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)} --session ${shellQuote(original)}` });
-			await waitForFile(join(env.dir, "ordinary-started"));
-			await waitForFile(join(env.dir, "worktree-started"));
+			try {
+				await waitForFile(join(env.dir, "ordinary-started"));
+				await waitForFile(join(env.dir, "worktree-started"));
+			} catch (error) { assert.fail(`${error}\n${readPane(parent, 200)}`); }
 			const binding = readSessionBinding(original)!;
 			const listed = JSON.parse(execFileSync("herdr", ["worktree", "list", "--cwd", env.dir, "--json"], { encoding: "utf8" })).result.worktrees;
 			const selected = listed.find((worktree: any) => worktree.branch === "integration/mobile");
