@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { reduceLineage, type LineageNodeState } from "../../pi-extension/subagents/lineage.ts";
-import { parentSessionLocation, childSessionLocation, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
+import { parentSessionLocation, childSessionLocation, sessionLocationAlive, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
 import { getProviderRequests } from "./fake-provider.ts";
 import {
 	cleanupTestEnv, createTestEnv, createTrackedSurface, getAvailableBackends,
@@ -287,42 +287,55 @@ for (const backend of getAvailableBackends()) {
 			execFileSync("git", ["add", "README.md"], { cwd: env.dir });
 			execFileSync("git", ["commit", "-qm", "fixture"], { cwd: env.dir });
 			const gate = join(env.dir, "release-both");
-			const credentials = join(env.dir, ".pi", "agent", "move-tree-credentials.json");
-			const deliveries = join(env.dir, ".pi", "agent", "move-tree-deliveries.jsonl");
-			const attachErrors = join(env.dir, ".pi", "agent", "move-tree-attach-errors.jsonl");
+			const witness = join(env.dir, ".pi", "agent", "move-retained-children.json");
 			const consumer = join(env.dir, "move-tree-consumer.ts");
-			const api = new URL("../../index.ts", import.meta.url).pathname;
-			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
-			writeFileSync(consumer, `import {Type} from ${JSON.stringify(typebox)};
-import {appendFileSync,existsSync,readFileSync,writeFileSync} from "node:fs";
-import {createSubagentTree,attachSubagentTree} from ${JSON.stringify(api)};
-const credentials=${JSON.stringify(credentials)};
-const deliveries=${JSON.stringify(deliveries)};
-const attachErrors=${JSON.stringify(attachErrors)};
-const children=${JSON.stringify([
-	{ name: "ordinary-mobile", task: gatedTask(join(env.dir, "ordinary-started"), gate, "ORDINARY_MOBILE_ANSWER") },
-	{ name: "worktree-mobile", task: gatedTask(join(env.dir, "worktree-started"), gate, "WORKTREE_MOBILE_ANSWER"), worktree: { branch: "integration/mobile" } },
-])};
-export default function(pi){
- function bind(tree,ctx){tree.bindFinalCallback(async result=>{appendFileSync(deliveries,JSON.stringify({sessionId:ctx.sessionManager.getSessionId(),sessionFile:ctx.sessionManager.getSessionFile(),result})+"\\n");});}
- pi.on("session_start",async (_event,ctx)=>{if(!existsSync(credentials))return;pi.setActiveTools(pi.getActiveTools().filter(name=>name!=="consumer_tree_open_probe"));const saved=JSON.parse(readFileSync(credentials,"utf8"));if(ctx.sessionManager.getSessionId()!==saved.sessionId)return;for(const credential of saved.trees){try{const tree=attachSubagentTree({pi,ctx,...credential});bind(tree,ctx);}catch(error){appendFileSync(attachErrors,JSON.stringify({error:String(error)})+"\\n");throw error;}}});
- pi.registerTool({name:"consumer_tree_open_probe",label:"Tree",description:"Launch two managed trees",parameters:Type.Object({}),async execute(_id,_args,_signal,_update,ctx){const saved={sessionId:ctx.sessionManager.getSessionId(),trees:[]};for(const child of children){const tree=createSubagentTree({pi,ctx});saved.trees.push({callerId:tree.callerId,treeId:tree.treeId,ownershipToken:tree.ownershipToken});bind(tree,ctx);await tree.launchChild({parentId:tree.callerId,agent:"test-echo",tools:["bash"],cwd:${JSON.stringify(env.dir)},...child});}writeFileSync(credentials,JSON.stringify(saved));pi.setActiveTools(pi.getActiveTools().filter(name=>name!=="consumer_tree_open_probe"));return {content:[{type:"text",text:"launched"}],details:{}};}});
-}\n`);
+			const extension = new URL("../../pi-extension/subagents/index.ts", import.meta.url).pathname;
+			const children = [
+				{ name: "ordinary-mobile", agent: "test-echo", task: gatedTask(join(env.dir, "ordinary-started"), gate, "ORDINARY_MOBILE_ANSWER") },
+				{ name: "worktree-mobile", agent: "test-echo", task: gatedTask(join(env.dir, "worktree-started"), gate, "WORKTREE_MOBILE_ANSWER"), worktree: { branch: "integration/mobile" } },
+			];
+			// This fixture launches retained children without restoring the removed model-facing tool.
+			writeFileSync(consumer, `import {__test__} from ${JSON.stringify(extension)};
+import {existsSync,renameSync,writeFileSync} from "node:fs";
+export default function(pi){pi.on("session_start",async (_event,ctx)=>{
+ if(process.env.PI_SUBAGENT_ID||existsSync(${JSON.stringify(witness)}))return;
+ const children=[];
+ for(const params of ${JSON.stringify(children)}){
+  const running=await __test__.launchSubagent(params,ctx,pi.getThinkingLevel());
+  __test__.startRecoveredWatcher(running);
+  children.push({id:running.id,name:running.name,sessionFile:running.sessionFile,rootDir:running.lineage.rootDir});
+ }
+ const file=${JSON.stringify(witness)};
+ writeFileSync(file+".tmp",JSON.stringify({sessionId:ctx.sessionManager.getSessionId(),children}));
+ renameSync(file+".tmp",file);
+});}
+`);
 			const consumerLink = join(process.env.PI_INTEGRATION_HERDR_AGENT_DIR!, "extensions", "move-tree-consumer.ts");
 			rmSync(consumerLink, { force: true });
 			symlinkSync(consumer, consumerLink);
 			const parent = createTrackedSurface(env, "teleport-parent");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, "Call consumer_tree_open_probe exactly once, then wait.", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `-e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)} --session ${shellQuote(original)}` });
+			startPi(parent, env.dir, "Return exactly TELEPORT_PARENT_READY", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `-e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)} --session ${shellQuote(original)}` });
 			try {
+				await waitForFile(witness);
 				await waitForFile(join(env.dir, "ordinary-started"));
 				await waitForFile(join(env.dir, "worktree-started"));
 			} catch (error) { assert.fail(`${error}\n${readPane(parent, 200)}`); }
+			const launched = JSON.parse(readFileSync(witness, "utf8"));
+			assert.equal(launched.children.length, 2);
+			assert.equal(new Set(launched.children.map((child: any) => child.id)).size, 2);
 			const binding = readSessionBinding(original)!;
+			assert.equal(launched.sessionId, binding.sessionId);
+			const worktreeChild = launched.children.find((child: any) => child.name === "worktree-mobile");
+			assert.ok(worktreeChild);
+			const worktreeNode = ownedNodes(original).find((node) => node.nodeId === worktreeChild.id);
+			assert.ok(worktreeNode);
 			const listed = JSON.parse(execFileSync("herdr", ["worktree", "list", "--cwd", env.dir, "--json"], { encoding: "utf8" })).result.worktrees;
 			const selected = listed.find((worktree: any) => worktree.branch === "integration/mobile");
 			const worktree = { path: selected?.path, workspaceId: selected?.open_workspace_id };
 			assert.ok(worktree.path && worktree.workspaceId);
+			assert.equal(worktreeNode.cwd, worktree.path);
+			assert.equal(worktreeNode.workspaceId, worktree.workspaceId);
 			try {
 				const fork = join(env.dir, "independent-fork.jsonl");
 				const copied = entries(original);
@@ -346,14 +359,15 @@ export default function(pi){
 				assert.equal(new Set(results(returned.sessionFile).map((result) => result.details.deliveryId)).size, 2);
 				assert.match(results(returned.sessionFile).map((result) => result.content).join("\n"), /ORDINARY_MOBILE_ANSWER/);
 				assert.match(results(returned.sessionFile).map((result) => result.content).join("\n"), /WORKTREE_MOBILE_ANSWER/);
-				try { await waitUntil(() => existsSync(deliveries) && entries(deliveries).length === 2, "both tree callbacks must run once"); }
-				catch (error) { assert.fail(`${error}\ncallbacks=${existsSync(deliveries) ? readFileSync(deliveries, "utf8") : "missing"}\nattach=${existsSync(attachErrors) ? readFileSync(attachErrors, "utf8") : "none"}\n${readPane(returned.paneId!, 150)}`); }
-				const callbacks = entries(deliveries);
-				assert.equal(new Set(callbacks.map((callback) => callback.result.terminalId)).size, 2);
-				assert.ok(callbacks.every((callback) => callback.sessionId === binding.sessionId && callback.sessionFile === returned.sessionFile));
-				const workResult = callbacks.find((callback) => callback.result.rootResult.answer?.includes("WORKTREE_MOBILE_ANSWER"));
-				assert.equal(workResult.result.rootResult.outcome, "clean", "the managed child must exit before cleanup");
-				assert.ok(workResult.result.rootResult.sessionReference);
+				for (const child of launched.children) {
+					const result = results(returned.sessionFile).find((entry) => entry.details.childId === child.id);
+					assert.ok(result, `result must belong to launched child ${child.id}`);
+					assert.equal(result.details.deliveryId, `terminal:${child.id}`);
+					assert.equal(result.details.sessionFile, child.sessionFile);
+					assert.equal(result.details.exitCode, 0);
+					const expected = child.name === "ordinary-mobile" ? "ORDINARY_MOBILE_ANSWER" : "WORKTREE_MOBILE_ANSWER";
+					assert.ok(result.details.resultContent.includes(expected), "each result must come from its own child");
+				}
 				assert.equal(results(fork).length, 0);
 				assert.ok(existsSync(worktree.path), "completed worktree remains retained");
 				const workspaces = JSON.parse(execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" })).result.workspaces;
@@ -366,10 +380,12 @@ export default function(pi){
 				startPi(reopened, env.dir, "Return exactly TELEPORT_REOPENED", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(returned.sessionFile)} -e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)}` });
 				await waitForScreen(reopened, /TELEPORT_REOPENED/);
 				assert.equal(results(returned.sessionFile).length, 2, "acknowledged results must not replay after reopening");
-				assert.equal(entries(deliveries).length, 2, "tree callbacks must not replay after reopening");
+				assert.equal(results(fork).length, 0, "an independent copied session must not receive either result");
 				runInPane(reopened, "/quit");
 				await waitForPiExit(reopened);
 			} finally {
+				writeFileSync(gate, "go");
+				await waitUntil(() => { const location = childSessionLocation(worktreeChild.rootDir, worktreeChild.id); return !location || !sessionLocationAlive(location); }, "worktree child must finish before cleanup", 20_000);
 				execFileSync("herdr", ["worktree", "remove", "--workspace", worktree.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
 			}
 		});
