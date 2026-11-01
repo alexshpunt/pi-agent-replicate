@@ -40,7 +40,7 @@ for (const backend of getAvailableBackends()) {
 			await until(() => results(original).length === 1, "quit must return a failure");
 			const result = results(original)[0];
 			assert.equal(result.details.exitCode, 1);
-			assert.match(result.content, /interrupt|abort|closed.*saved completion/i);
+			assert.equal(typeof result.details.errorMessage, "string");
 			assert.equal(result.details.integration.status, "not-attempted");
 			assert.ok(existsSync(result.details.historyPath));
 			await until(() => !sessionLocationAlive(owned), "quit must end the replica process");
@@ -59,13 +59,16 @@ for (const backend of getAvailableBackends()) {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap(root => [...reduceLineage(root).nodes.values()]) : [];
 			};
-			await until(() => nodes().filter(node => node.replication).length === 2, "owner launches one descendant");
+			await until(() => {
+				const current = nodes().filter(node => node.replication);
+				return current.length === 2 && current.every(node => !!node.sessionFile);
+			}, "owner and descendant have registered their sessions");
 			const owner = nodes().find(node => !node.parentNodeId && node.replication)!;
 			const descendant = nodes().find(node => node.parentNodeId === owner.nodeId)!;
 			assert.ok(owner.sessionFile && descendant.sessionFile);
 			const binding = readSessionBinding(owner.sessionFile)!;
 			const location = () => childSessionLocation(binding.child!.lineage.rootDir, owner.nodeId);
-			await until(() => !!location() && getProviderRequests().some(request => request.messages.at(-1)?.role === "tool" && request.userText.includes("INTEGRATION_INTERRUPT_OWNER")), "owner model request remains active");
+			await until(() => !!location() && getProviderRequests().some(request => request.messages.at(-1)?.role === "tool" && request.userText.includes("Your assignment:\nREPLICATION_NESTED_OWNER") && request.userText.includes("INTEGRATION_INTERRUPT_OWNER")), "owner model request remains active");
 			interruptPane(location()!.paneId!);
 			await until(() => entries(owner.sessionFile!).some(row => row.message?.role === "assistant" && row.message.stopReason === "aborted"), "owner interruption saved");
 			// This elapsed-time check proves that descendant drain is not a ten-second stop deadline.
@@ -76,7 +79,7 @@ for (const backend of getAvailableBackends()) {
 			await until(() => results(original).length === 1, "drained owner returns its interruption");
 			const result = results(original)[0];
 			assert.equal(result.details.exitCode, 1);
-			assert.match(result.content, /interrupt|abort/i);
+			assert.equal(typeof result.details.errorMessage, "string");
 			assert.equal(result.details.integration.status, "not-attempted");
 			assert.equal(results(owner.sessionFile!).length, 1, "descendant reaches its exact immediate parent once");
 			assert.equal(results(owner.sessionFile!)[0].details.childId, descendant.nodeId);

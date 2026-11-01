@@ -221,8 +221,10 @@ function createTestWorkspace(cwd: string): string {
 
 function bindTestWorkspace(workspaceId: string): void {
   const panes = workspacePaneIds(workspaceId);
-  if (panes?.length !== 1) throw new Error(`Expected one root pane in test workspace ${workspaceId}`);
-  const pane = JSON.parse(execFileSync("herdr", ["pane", "get", panes[0]], { encoding: "utf8" })).result.pane;
+  const current = process.env.HERDR_WORKSPACE_ID === workspaceId ? process.env.HERDR_PANE_ID : undefined;
+  const paneId = current && panes?.includes(current) ? current : panes?.length === 1 ? panes[0] : undefined;
+  if (!paneId) throw new Error(`Cannot identify the root pane in test workspace ${workspaceId}`);
+  const pane = JSON.parse(execFileSync("herdr", ["pane", "get", paneId], { encoding: "utf8" })).result.pane;
   process.env.HERDR_WORKSPACE_ID = workspaceId;
   process.env.HERDR_PANE_ID = pane.pane_id;
   process.env.HERDR_TAB_ID = pane.tab_id;

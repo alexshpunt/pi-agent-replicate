@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { reduceLineage, type LineageNodeState } from "../../pi-extension/subagents/lineage.ts";
 import { parentSessionLocation, childSessionLocation, sessionLocationAlive, readSessionBinding, sessionLineageRoots } from "../../pi-extension/subagents/session-binding.ts";
 import { getProviderRequests } from "./fake-provider.ts";
@@ -49,19 +49,27 @@ const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
 function installTeleport(env: TestEnv): string {
 	assert.ok(teleportSource && existsSync(teleportSource));
 	const agentDir = join(env.dir, ".pi", "agent");
-	const wrapper = join(agentDir, "extensions", "teleport-under-test.ts");
-	writeFileSync(wrapper, `export { default } from ${JSON.stringify(teleportSource)};\n`);
 	const serverAgentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR;
 	assert.ok(serverAgentDir, "Teleport needs the runner-owned agent directory");
 	cpSync(agentDir, serverAgentDir, { recursive: true });
-	return wrapper;
+	const link = join(serverAgentDir, "extensions", "teleport-under-test");
+	rmSync(link, { force: true });
+	symlinkSync(dirname(teleportSource), link, "dir");
+	return teleportSource;
 }
 
 for (const backend of getAvailableBackends()) {
 	describe(`session moves (${backend})`, { timeout: PI_TIMEOUT * 6 }, () => {
 		let env: TestEnv;
-		beforeEach(() => { env = createTestEnv(backend); });
-		afterEach(async () => { await cleanupTestEnv(env); });
+		beforeEach(() => { env = createTestEnv(backend, { replication: true }); });
+		afterEach(async () => {
+			const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR;
+			if (agentDir) {
+				rmSync(join(agentDir, "extensions", "move-tree-consumer.ts"), { force: true });
+				rmSync(join(agentDir, "extensions", "teleport-under-test"), { force: true });
+			}
+			await cleanupTestEnv(env);
+		});
 
 		it("delivers once after the parent file and process move and the old file disappears", async () => {
 			const original = join(env.dir, "parent.jsonl");
@@ -70,15 +78,18 @@ for (const backend of getAvailableBackends()) {
 			const moved = join(destinationDir, "parent.jsonl");
 			const gate = join(env.dir, "release-child");
 			const started = join(env.dir, "child-started");
+			const probe = join(env.dir, "mobile-probe.ts");
+			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+			writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync,writeFileSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold child until released",parameters:Type.Object({}),async execute(){writeFileSync(${JSON.stringify(started)},"started");while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 			const parent = createTrackedSurface(env, "mobile-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "mobile-child"', 'agent: "test-echo"',
-				`task: ${JSON.stringify(gatedTask(started, gate, "MOBILE_ANSWER"))}`,
-				"Do not do anything else. Just call the subagent tool once.",
-			].join("\n"), { extraArgs: `--session ${shellQuote(original)}` });
-			await waitForFile(started);
+				"Call the replicate tool once with these parameters:",
+				'name: "mobile-child"',
+				'task: "Use replication_probe then Return exactly MOBILE_ANSWER"',
+			].join("\n"), { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}` });
+			try { await waitForFile(started); }
+			catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 			runInPane(parent, "/quit");
 			await waitForPiExit(parent);
 			closePane(parent);
@@ -88,12 +99,13 @@ for (const backend of getAvailableBackends()) {
 			await waitForPaneReady(receiver);
 			startPi(receiver, env.dir, "Return exactly MOBILE_PARENT_OPEN", { extraArgs: `--session ${shellQuote(moved)}` });
 			await waitForScreen(receiver, /MOBILE_PARENT_OPEN/);
+			const requestsBeforeDelivery = getProviderRequests().length;
 			writeFileSync(gate, "go");
 			await waitUntil(() => results(moved).length === 1, `No result reached the moved parent: ${readPane(receiver, 250)}`, 20_000);
 			assert.match(results(moved)[0].content, /MOBILE_ANSWER/);
 			assert.equal(typeof results(moved)[0].details.deliveryId, "string");
-			assert.ok(existsSync(results(moved)[0].details.resultPath));
-			await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("Subagent mobile-child completed.")), "delivery must wake the parent agent");
+			assert.ok(existsSync(results(moved)[0].details.sessionFile));
+			await waitUntil(() => getProviderRequests().slice(requestsBeforeDelivery).some((request) => request.userText.includes(results(moved)[0].content)), "delivery must wake the parent agent");
 			runInPane(receiver, "/quit");
 			await waitForPiExit(receiver);
 			const reopened = createTrackedSurface(env, "reopened-parent");
@@ -109,26 +121,24 @@ for (const backend of getAvailableBackends()) {
 			const original = join(env.dir, "root.jsonl");
 			const gate = join(env.dir, "grandchild-gate");
 
-			if (teleportSource) {
-				installTeleport(env);
-				const role = join(env.dir, ".pi", "agents", "test-descendant-owner.md");
-				writeFileSync(role, readFileSync(role, "utf8").replace(/^tools:.*$/m, "tools: subagent, subagent_done, teleport"));
-			}
+			const teleportWrapper = teleportSource ? installTeleport(env) : undefined;
+			const probe = join(env.dir, "nested-probe.ts");
+			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+			writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold grandchild until released",parameters:Type.Object({}),async execute(){while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 			const parent = createTrackedSurface(env, "nested-root");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "moving-owner"', 'agent: "test-descendant-owner"',
-				`task: "INTEGRATION_DESCENDANT_GATE: ${gate} Launch the descendant and stay open."`,
-				"Call the tool once and wait for its asynchronous result.",
+				"Call the replicate tool once with these parameters:",
+				'name: "moving-owner"',
+				`task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`,
 			].join("\n"), {
-				extraArgs: `--session ${shellQuote(original)}`,
+				extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}${teleportWrapper ? ` -e ${shellQuote(teleportWrapper)}` : ""}`,
 				...(teleportSource ? { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR } : {}),
 			});
 			await waitUntil(() => ownedNodes(original).length === 2, "the owner must launch its grandchild");
-			const owner = ownedNodes(original).find((node) => node.name === "moving-owner");
+			const owner = ownedNodes(original).find((node) => node.name?.startsWith("moving-owner"));
 			assert.ok(owner?.sessionFile && owner.surface);
-			await waitForScreen(owner.surface, /Nested-[^\s]+[\s\S]*active/i);
+			await waitUntil(() => ownedNodes(original).some((node) => node.nodeId !== owner.nodeId && Boolean(node.sessionFile)), "grandchild must have a session before the owner moves");
 			const destinationDir = join(env.dir, "moved-child");
 			mkdirSync(destinationDir);
 			let moved = join(destinationDir, "owner.jsonl");
@@ -155,37 +165,44 @@ for (const backend of getAvailableBackends()) {
 			writeFileSync(gate, "go");
 			await waitUntil(() => results(moved).length === 1, "grandchild must reach its moved immediate parent", 30_000);
 			await waitUntil(() => results(original).length === 1, `owner must drain and reach root: ${readPane(parent, 250)}`, 30_000);
-			assert.match(results(moved)[0].content, /GRANDCHILD_DONE/);
-			assert.match(results(original)[0].content, /OWNER_FINAL/);
+			assert.match(results(moved)[0].content, /REPLICATION_GRANDCHILD/);
+			assert.match(results(original)[0].content, /REPLICATION_NESTED_SUMMARY/);
 			assert.equal(results(original)[0].details.childId, owner.nodeId);
 			runInPane(parent, "/quit");
 			await waitForPiExit(parent);
 		});
 
 		it("lets an autonomous child finish in its Teleport destination, not during the source handoff", { skip: !teleportSource }, async () => {
-			installTeleport(env);
-			const role = join(env.dir, ".pi", "agents", "test-echo.md");
-			writeFileSync(role, readFileSync(role, "utf8").replace(/^tools:.*$/m, "tools: bash, teleport"));
+			const teleportWrapper = installTeleport(env);
 			const destination = join(env.dir, "autonomous-destination");
 			mkdirSync(destination);
 			const original = join(env.dir, "autonomous-parent.jsonl");
 			const parent = createTrackedSurface(env, "autonomous-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "autonomous-mobile"', 'agent: "test-echo"',
+				"Call the replicate tool once with these parameters:",
+				'name: "autonomous-mobile"',
 				`task: ${JSON.stringify(`Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"\nAfter the move, Return exactly AUTONOMOUS_MOVED_ANSWER`)}`,
-				"Do not do anything else. Just call the subagent tool once.",
-			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)}` });
-			await waitUntil(() => results(original).length === 1, `moved autonomous child must finish: ${readPane(parent, 250)}`, 40_000);
+			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(teleportWrapper)}` });
+			try { await waitUntil(() => results(original).length === 1, "moved autonomous child must finish", 40_000); }
+			catch (error) {
+				const binding = readSessionBinding(original);
+				const node = ownedNodes(original)[0];
+				const root = binding && sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
+				const location = root && node ? childSessionLocation(root, node.nodeId) : undefined;
+				const child = location?.sessionFile && entries(location.sessionFile).slice(-15);
+				let screen = "";
+				try { if (location?.paneId) screen = readPane(location.paneId, 150); } catch (screenError) { screen = String(screenError); }
+				assert.fail(`${error}\n${readPane(parent, 250)}\n${JSON.stringify({ node, location, child, screen })}`);
+			}
 			const node = ownedNodes(original)[0];
 			const binding = readSessionBinding(original)!;
 			const root = sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
 			const location = childSessionLocation(root, node.nodeId)!;
-			assert.equal(location.cwd, destination);
+			assert.equal(location.cwd, destination, JSON.stringify({ result: results(original)[0], child: entries(node.sessionFile!) }));
 			assert.notEqual(location.sessionFile, node.sessionFile);
 			assert.match(results(original)[0].content, /AUTONOMOUS_MOVED_ANSWER/);
-			assert.equal(results(original)[0].details.sessionFile, location.sessionFile);
+			assert.equal(entries(results(original)[0].details.sessionFile)[0].id, location.sessionId, "the saved checkpoint must belong to the moved session");
 			if (location.paneId) env.surfaces.push(location.paneId);
 			runInPane(parent, "/quit");
 			await waitForPiExit(parent);
@@ -196,15 +213,17 @@ for (const backend of getAvailableBackends()) {
 				const gate = join(env.dir, "restart-gate");
 				const started = join(env.dir, "restart-started");
 				const queued = join(env.dir, "queued-result");
+				const probe = join(env.dir, "restart-probe.ts");
+				const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+				writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync,writeFileSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold child until released",parameters:Type.Object({}),async execute(){writeFileSync(${JSON.stringify(started)},"started");while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 				const parent = createTrackedSurface(env, "restart-parent");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, [
-					"Call the subagent tool with these EXACT parameters:",
-					'name: "restart-child"', 'agent: "test-echo"',
-					`task: ${JSON.stringify(gatedTask(started, gate, "RESTART_ANSWER"))}`,
-					"Do not do anything else. Just call the subagent tool once.",
+					"Call the replicate tool once with these parameters:",
+					'name: "restart-child"',
+					'task: "Use replication_probe then Return exactly RESTART_ANSWER"',
 				].join("\n"), {
-					extraArgs: `--session ${shellQuote(original)}`,
+					extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}`,
 					...(boundary === "queued-parent" ? { environment: { PI_INTEG_QUEUE_RESULT_MARKER: queued } } : {}),
 				});
 				await waitForFile(started);
@@ -229,16 +248,21 @@ for (const backend of getAvailableBackends()) {
 				}
 				await restartIsolatedHerdr(env);
 				writeFileSync(gate, "go");
+				const requestsBeforeReopen = getProviderRequests().length;
 				const receiver = createTrackedSurface(env, "restart-receiver");
 				await waitForPaneReady(receiver);
 				startPi(receiver, env.dir, "", { extraArgs: `--session ${shellQuote(original)}` });
 				await waitUntil(() => results(original).length === 1, `saved answer must reach reopened parent at ${boundary}: ${readPane(receiver, 250)}`, 40_000);
 				if (boundary !== "active-child") assert.match(results(original)[0].content, /RESTART_ANSWER/);
-				else assert.match(results(original)[0].content, /completed|failed|error|crashed/i, "active loss must recover or report an honest failure");
-				assert.ok(existsSync(results(original)[0].details.resultPath));
+				else {
+					assert.equal(typeof results(original)[0].details.exitCode, "number");
+					assert.notEqual(results(original)[0].details.exitCode, 0, "a lost active replica must report failure");
+					assert.equal(results(original)[0].details.integration.status, "not-attempted");
+				}
+				assert.ok(existsSync(results(original)[0].details.sessionFile));
 				const childLocation = childSessionLocation(root, node.nodeId);
 				if (childLocation?.paneId) env.surfaces.push(childLocation.paneId);
-				await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("Subagent restart-child")), "replay must wake the reopened parent without a user prompt");
+				await waitUntil(() => getProviderRequests().slice(requestsBeforeReopen).some((request) => request.userText.includes(results(original)[0].details.resultContent)), "replay must wake the reopened parent without a user prompt");
 				runInPane(receiver, "/quit");
 				await waitForPiExit(receiver);
 				const reopened = createTrackedSurface(env, "restart-second-receiver");
@@ -263,22 +287,55 @@ for (const backend of getAvailableBackends()) {
 			execFileSync("git", ["add", "README.md"], { cwd: env.dir });
 			execFileSync("git", ["commit", "-qm", "fixture"], { cwd: env.dir });
 			const gate = join(env.dir, "release-both");
+			const witness = join(env.dir, ".pi", "agent", "move-retained-children.json");
+			const consumer = join(env.dir, "move-tree-consumer.ts");
+			const extension = new URL("../../pi-extension/subagents/index.ts", import.meta.url).pathname;
+			const children = [
+				{ name: "ordinary-mobile", agent: "test-echo", task: gatedTask(join(env.dir, "ordinary-started"), gate, "ORDINARY_MOBILE_ANSWER") },
+				{ name: "worktree-mobile", agent: "test-echo", task: gatedTask(join(env.dir, "worktree-started"), gate, "WORKTREE_MOBILE_ANSWER"), worktree: { branch: "integration/mobile" } },
+			];
+			// This fixture launches retained children without restoring the removed model-facing tool.
+			writeFileSync(consumer, `import {__test__} from ${JSON.stringify(extension)};
+import {existsSync,renameSync,writeFileSync} from "node:fs";
+export default function(pi){pi.on("session_start",async (_event,ctx)=>{
+ if(process.env.PI_SUBAGENT_ID||existsSync(${JSON.stringify(witness)}))return;
+ const children=[];
+ for(const params of ${JSON.stringify(children)}){
+  const running=await __test__.launchSubagent(params,ctx,pi.getThinkingLevel());
+  __test__.startRecoveredWatcher(running);
+  children.push({id:running.id,name:running.name,sessionFile:running.sessionFile,rootDir:running.lineage.rootDir});
+ }
+ const file=${JSON.stringify(witness)};
+ writeFileSync(file+".tmp",JSON.stringify({sessionId:ctx.sessionManager.getSessionId(),children}));
+ renameSync(file+".tmp",file);
+});}
+`);
+			const consumerLink = join(process.env.PI_INTEGRATION_HERDR_AGENT_DIR!, "extensions", "move-tree-consumer.ts");
+			rmSync(consumerLink, { force: true });
+			symlinkSync(consumer, consumerLink);
 			const parent = createTrackedSurface(env, "teleport-parent");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, [
-				"Call the subagent tool twice with these EXACT parameters:",
-				'name: "ordinary-mobile"', 'agent: "test-echo"',
-				`task: ${JSON.stringify(gatedTask(join(env.dir, "ordinary-started"), gate, "ORDINARY_MOBILE_ANSWER"))}`,
-				'name: "worktree-mobile"', 'agent: "test-echo"', 'worktree: { branch: "integration/mobile" }',
-				`task: ${JSON.stringify(gatedTask(join(env.dir, "worktree-started"), gate, "WORKTREE_MOBILE_ANSWER"))}`,
-				"Do not do anything else. Just call the subagent tool twice.",
-			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `-e ${shellQuote(teleportWrapper)} --session ${shellQuote(original)}` });
-			await waitForFile(join(env.dir, "ordinary-started"));
-			await waitForFile(join(env.dir, "worktree-started"));
+			startPi(parent, env.dir, "Return exactly TELEPORT_PARENT_READY", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `-e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)} --session ${shellQuote(original)}` });
+			try {
+				await waitForFile(witness);
+				await waitForFile(join(env.dir, "ordinary-started"));
+				await waitForFile(join(env.dir, "worktree-started"));
+			} catch (error) { assert.fail(`${error}\n${readPane(parent, 200)}`); }
+			const launched = JSON.parse(readFileSync(witness, "utf8"));
+			assert.equal(launched.children.length, 2);
+			assert.equal(new Set(launched.children.map((child: any) => child.id)).size, 2);
 			const binding = readSessionBinding(original)!;
-			const worktreeNode = ownedNodes(original).find((node) => node.name === "worktree-mobile");
-			const worktree = { path: worktreeNode?.cwd, workspaceId: worktreeNode?.workspaceId };
-			assert.ok(worktree?.path && worktree.workspaceId);
+			assert.equal(launched.sessionId, binding.sessionId);
+			const worktreeChild = launched.children.find((child: any) => child.name === "worktree-mobile");
+			assert.ok(worktreeChild);
+			const worktreeNode = ownedNodes(original).find((node) => node.nodeId === worktreeChild.id);
+			assert.ok(worktreeNode);
+			const listed = JSON.parse(execFileSync("herdr", ["worktree", "list", "--cwd", env.dir, "--json"], { encoding: "utf8" })).result.worktrees;
+			const selected = listed.find((worktree: any) => worktree.branch === "integration/mobile");
+			const worktree = { path: selected?.path, workspaceId: selected?.open_workspace_id };
+			assert.ok(worktree.path && worktree.workspaceId);
+			assert.equal(worktreeNode.cwd, worktree.path);
+			assert.equal(worktreeNode.workspaceId, worktree.workspaceId);
 			try {
 				const fork = join(env.dir, "independent-fork.jsonl");
 				const copied = entries(original);
@@ -302,6 +359,15 @@ for (const backend of getAvailableBackends()) {
 				assert.equal(new Set(results(returned.sessionFile).map((result) => result.details.deliveryId)).size, 2);
 				assert.match(results(returned.sessionFile).map((result) => result.content).join("\n"), /ORDINARY_MOBILE_ANSWER/);
 				assert.match(results(returned.sessionFile).map((result) => result.content).join("\n"), /WORKTREE_MOBILE_ANSWER/);
+				for (const child of launched.children) {
+					const result = results(returned.sessionFile).find((entry) => entry.details.childId === child.id);
+					assert.ok(result, `result must belong to launched child ${child.id}`);
+					assert.equal(result.details.deliveryId, `terminal:${child.id}`);
+					assert.equal(result.details.sessionFile, child.sessionFile);
+					assert.equal(result.details.exitCode, 0);
+					const expected = child.name === "ordinary-mobile" ? "ORDINARY_MOBILE_ANSWER" : "WORKTREE_MOBILE_ANSWER";
+					assert.ok(result.details.resultContent.includes(expected), "each result must come from its own child");
+				}
 				assert.equal(results(fork).length, 0);
 				assert.ok(existsSync(worktree.path), "completed worktree remains retained");
 				const workspaces = JSON.parse(execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" })).result.workspaces;
@@ -309,9 +375,17 @@ for (const backend of getAvailableBackends()) {
 				env.surfaces.push(returned.paneId!);
 				runInPane(returned.paneId!, "/quit");
 				await waitUntil(() => !existsSync(`/proc/${returned.pid}`), "returned Pi must exit");
+				const reopened = createTrackedSurface(env, "teleport-reopened");
+				await waitForPaneReady(reopened);
+				startPi(reopened, env.dir, "Return exactly TELEPORT_REOPENED", { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(returned.sessionFile)} -e ${shellQuote(teleportWrapper)} -e ${shellQuote(consumer)}` });
+				await waitForScreen(reopened, /TELEPORT_REOPENED/);
+				assert.equal(results(returned.sessionFile).length, 2, "acknowledged results must not replay after reopening");
+				assert.equal(results(fork).length, 0, "an independent copied session must not receive either result");
+				runInPane(reopened, "/quit");
+				await waitForPiExit(reopened);
 			} finally {
-				const root = sessionLineageRoots(binding.storeDir, binding.sessionId).find((dir) => reduceLineage(dir).nodes.has(worktreeNode!.nodeId))!;
-				await waitUntil(() => { const location = childSessionLocation(root, worktreeNode!.nodeId); return !location || !sessionLocationAlive(location); }, "worktree child must finish its Pi shutdown", 20_000);
+				writeFileSync(gate, "go");
+				await waitUntil(() => { const location = childSessionLocation(worktreeChild.rootDir, worktreeChild.id); return !location || !sessionLocationAlive(location); }, "worktree child must finish before cleanup", 20_000);
 				execFileSync("herdr", ["worktree", "remove", "--workspace", worktree.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
 			}
 		});
