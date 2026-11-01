@@ -1,19 +1,15 @@
 /**
  * TS-26 — incident-state recovery at the ledger seam.
  *
- * The frozen 09:46 incident evidence is read-only. This test copies the needed
- * lineage subtree into a run-owned temp directory with `cpSync` and mutates
- * only that copy: it keeps one durable `inbox:*` event, points it at a
- * synthesized parent session, and creates that parent session as a valid Pi
- * session JSONL with **no** matching `customType: "subagent_result"` entry — the
- * incident's parent-side fingerprint. Nothing is written to the evidence source.
+ * A sanitized, synthetic fixture preserves the 09:46 incident's ledger shape:
+ * an original child has delivered, while a resumed child's terminal inbox has
+ * no materialization claim or matching parent-session result. Each test copies
+ * the fixture into a run-owned directory and supplies fresh parent sessions.
  *
  * Seams:
  * - `pi-extension/subagents/lineage.ts` — existing inbox/claims ledger. The
- *   fixture-truth suite below is green at `eacd653` and proves the durable state
- *   that LPT-57 must recover, with no second ledger.
- * - `pi-extension/subagents/delivery.ts` — the recovery seam (capability absent
- *   at `eacd653`; today nothing consumes an orphaned inbox event).
+ *   fixture checks the durable state that LPT-57 must recover, with no second ledger.
+ * - `pi-extension/subagents/delivery.ts` — the recovery seam for an orphaned inbox.
  *
  * Frozen contract for the Coder:
  *
@@ -44,6 +40,7 @@ import { after, describe, it } from "node:test";
 import {
 	cpSync,
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
@@ -52,6 +49,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
 	appendLineageEvent,
 	hasLineageEvent,
@@ -68,14 +66,13 @@ import {
 const DELIVERY_SEAM =
 	process.env.LPT57_DELIVERY_SEAM ?? "../pi-extension/subagents/delivery.ts";
 
-/** Frozen, read-only incident evidence captured 2026-09-01 09:46. */
-const FROZEN_INCIDENT =
-	"/root/.herdr/worktrees/pi-lpt-herdr-subagents/lpt-56-subagent-result-delivery/.lpt/project/tasks/LPT-56-subagent-result-delivery/evidence/incident-2026-09-01-0946/lineage-root";
+/** Sanitized fixture reproducing the incident's durable ledger state. */
+const FROZEN_INCIDENT = fileURLToPath(new URL("./fixtures/incident-lineage-root/", import.meta.url));
 
-const PARENT_SESSION_ID = "01a05831-0e18-75b8-b891-716c8c93eeb9";
+const PARENT_SESSION_ID = "fixture-parent";
 /** The delivery under proof: the resume-created node's terminal inbox. */
-const PROOF_DELIVERY_ID = "terminal:9b5db0d9";
-const PROOF_NODE_ID = "9b5db0d9";
+const PROOF_DELIVERY_ID = "terminal:resumed-child";
+const PROOF_NODE_ID = "resumed-child";
 
 const OTHER_PARENT_SESSION_ID = "unrelated-parent-session";
 const OTHER_DELIVERY_ID = "terminal:unrelated-child";
@@ -92,7 +89,7 @@ interface RecoveryFixture {
 function buildIncidentCopy(): RecoveryFixture {
 	assert.ok(
 		existsSync(FROZEN_INCIDENT),
-		`frozen incident evidence is missing at ${FROZEN_INCIDENT}`,
+		`sanitized incident fixture is missing at ${FROZEN_INCIDENT}`,
 	);
 	const root = mkdtempSync(join(tmpdir(), "pi-ts26-incident-"));
 	const lineageRoot = join(root, "lineage-root");
@@ -103,6 +100,8 @@ function buildIncidentCopy(): RecoveryFixture {
 		readdirSync(lineageRoot)[0] as string,
 	);
 	const eventsDir = join(rootDir, "events");
+	// Git cannot retain an empty claims directory in the fixture.
+	mkdirSync(join(rootDir, "materialization-claims"));
 	const parentSessionFile = join(root, "parent-session.jsonl");
 	writeSessionFile(parentSessionFile, { id: PARENT_SESSION_ID, cwd: root });
 
@@ -199,7 +198,7 @@ after(() => {
 	while (cleanups.length > 0) rmSync(cleanups.pop() as string, { recursive: true, force: true });
 });
 
-describe("TS-26 frozen incident state (existing ledger seams)", () => {
+describe("TS-26 sanitized incident state (existing ledger seams)", () => {
 	it("TS-26 keeps one pending inbox with an empty claims ledger and no parent entry", () => {
 		const fixture = buildIncidentCopy();
 		cleanups.push(fixture.root);

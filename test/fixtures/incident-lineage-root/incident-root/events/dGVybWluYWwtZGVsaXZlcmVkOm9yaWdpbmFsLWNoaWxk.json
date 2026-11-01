@@ -1,0 +1,8 @@
+{
+  "deliveryId": "terminal:original-child",
+  "version": 1,
+  "eventId": "terminal-delivered:original-child",
+  "type": "terminal_delivered",
+  "nodeId": "original-child",
+  "at": 3
+}

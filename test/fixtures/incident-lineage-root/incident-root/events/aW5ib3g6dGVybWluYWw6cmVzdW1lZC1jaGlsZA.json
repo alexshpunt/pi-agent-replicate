@@ -1,0 +1,14 @@
+{
+  "deliveryId": "terminal:resumed-child",
+  "sessionId": "fixture-parent",
+  "sessionFile": "/fixture/parent.jsonl",
+  "payload": {
+    "kind": "terminal",
+    "resultContent": "Resumed child stopped before its result was delivered."
+  },
+  "version": 1,
+  "eventId": "inbox:terminal:resumed-child",
+  "type": "inbox",
+  "nodeId": "resumed-child",
+  "at": 6
+}
