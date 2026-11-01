@@ -5,6 +5,9 @@
 - [Worktree subagents](worktree-subagents.md) — isolation, retained state, review, and cleanup.
 - [Public subagent tree API](public-subagent-tree-api.md) — package-root API and ownership contract.
 - [Settled lifecycle contract](settled-lifecycle-contract.md) — completion and delivery semantics.
+- [Retained role launcher](retained-roles.md) — role definitions and discovery for the package-root API.
+- [Status configuration](configuration.md) — status display settings.
+- [Development](development.md) — checks and isolated integration testing.
 
 ## Architecture decisions
 
