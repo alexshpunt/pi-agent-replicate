@@ -60,7 +60,14 @@ for (const backend of getAvailableBackends()) {
 						const destination = join(env.dir, "held-destination"); mkdirSync(destination);
 						runInPane(parent, `Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"`);
 						try { await waitUntil(() => parentSessionLocation(binding.storeDir, binding.sessionId)?.cwd === destination && !existsSync(original), "Teleport must replace the original while checkpoint is held"); }
-						catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}\n${JSON.stringify(parentSessionLocation(binding.storeDir, binding.sessionId))}`); }
+						catch (error) {
+							const teleportFile = join(agentDir, "teleport", binding.sessionId, "state.json");
+							const teleport = existsSync(teleportFile) ? JSON.parse(readFileSync(teleportFile, "utf8")) : null;
+							const destinationFile = teleport?.transition?.destinationSession ?? teleport?.active?.sessionFile;
+							let workspaces = "";
+							try { workspaces = execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" }); } catch (e) { workspaces = String(e); }
+							assert.fail(`${error}\n${readPane(parent, 150)}\n${JSON.stringify({ location: parentSessionLocation(binding.storeDir, binding.sessionId), teleport, workspaces, original: entries(original), destination: destinationFile && entries(destinationFile), foreign: entries(copied) })}`);
+						}
 						receiverFile = parentSessionLocation(binding.storeDir, binding.sessionId)!.sessionFile;
 					} else {
 						runInPane(parent, "/quit"); await waitForPiExit(parent); closePane(parent);
