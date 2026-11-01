@@ -89,12 +89,13 @@ for (const backend of getAvailableBackends()) {
 			await waitForPaneReady(receiver);
 			startPi(receiver, env.dir, "Return exactly MOBILE_PARENT_OPEN", { extraArgs: `--session ${shellQuote(moved)}` });
 			await waitForScreen(receiver, /MOBILE_PARENT_OPEN/);
+			const requestsBeforeDelivery = getProviderRequests().length;
 			writeFileSync(gate, "go");
 			await waitUntil(() => results(moved).length === 1, `No result reached the moved parent: ${readPane(receiver, 250)}`, 20_000);
 			assert.match(results(moved)[0].content, /MOBILE_ANSWER/);
 			assert.equal(typeof results(moved)[0].details.deliveryId, "string");
 			assert.ok(existsSync(results(moved)[0].details.sessionFile));
-			await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("MOBILE_ANSWER")), "delivery must wake the parent agent");
+			await waitUntil(() => getProviderRequests().slice(requestsBeforeDelivery).some((request) => request.userText.includes(results(moved)[0].content)), "delivery must wake the parent agent");
 			runInPane(receiver, "/quit");
 			await waitForPiExit(receiver);
 			const reopened = createTrackedSurface(env, "reopened-parent");
