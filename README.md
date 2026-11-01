@@ -46,7 +46,7 @@ By default, each copy works in a separate Git worktree. It starts with a snapsho
 
 Worktree mode requires a non-bare Git checkout with a commit. Snapshots do not support unresolved index conflicts, sparse or assume-unchanged index entries, submodules or nested Git repositories. Worktrees isolate files, not shared processes, ports or databases.
 
-For projects that need the same directory, such as Unity projects, switch to shared mode:
+When copies need the same directory, switch to shared mode:
 
 ```text
 /replica-directory shared
