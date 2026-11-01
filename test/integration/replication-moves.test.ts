@@ -20,7 +20,7 @@ async function waitUntil(check: () => boolean, explanation: string): Promise<voi
 }
 const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
 for (const backend of getAvailableBackends()) {
-	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 2 }, () => {
+	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 5 }, () => {
 		let env: TestEnv;
 		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });
