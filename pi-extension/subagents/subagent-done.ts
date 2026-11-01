@@ -681,9 +681,7 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
       }
       persistWork();
     }
-    const outcome = replication && stopPayload?.type === "error"
-      ? "error"
-      : classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
+    const outcome = classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
     const assistant = newestAssistantEntry(latestAgentEndMessages);
     if (!outcome || !assistant) {
       if (replication && resumeTurnStarted && !movePending) {
@@ -729,7 +727,7 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
       outcome,
       assistantId: assistant.id,
       stopReason: assistant.stopReason,
-      errorMessage: replication && typeof stopPayload?.errorMessage === "string" ? stopPayload.errorMessage : assistant.errorMessage,
+      errorMessage: assistant.errorMessage,
       empty: assistant.empty,
       turnIndex: latestTurnIndex,
       autoExit: terminalAutoExit && !waitsForChildResult,
