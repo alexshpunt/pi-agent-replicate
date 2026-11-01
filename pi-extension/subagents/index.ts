@@ -36,6 +36,7 @@ import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
 import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { registerReplicaDirectoryCommand } from "./replica-directory-settings.ts";
 import { snapshotSource } from "./source-state.ts";
 import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
 import { runReplicaBackground } from "./replica-background.ts";
