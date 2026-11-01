@@ -483,6 +483,8 @@ function installChildLifecycle(pi, initialContext) {
             rmSync(stopFile, { force: true });
     };
     const rememberStop = (payload) => {
+        if (stopPayload?.type === "error")
+            payload = stopPayload;
         stopPayload = payload;
         // The exit sidecar remains authoritative if this retry checkpoint cannot be saved.
         if (stopFile) {
@@ -632,7 +634,7 @@ function installChildLifecycle(pi, initialContext) {
             if (replication && resumeTurnStarted && !movePending) {
                 const payload = { type: "error", errorMessage: "Replica stopped without a final assistant response." };
                 rememberStop(payload);
-                void finishAfterDrain(ctx, payload);
+                return finishAfterDrain(ctx, stopPayload ?? payload);
             }
             return;
         }

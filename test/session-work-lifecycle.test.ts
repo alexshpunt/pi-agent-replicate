@@ -68,6 +68,19 @@ for (const stopReason of ["aborted", "error", "empty"]) {
     });
   });
 }
+it("retains the first failure when a drain turn has no assistant response", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
+    await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: "error", errorMessage: "original provider failure", content: [] }] });
+    await test.emit("agent_settled");
+    await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
+    await test.emit("before_agent_start", {});
+    await test.emit("agent_end", { messages: [] });
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 1);
+    assert.equal(JSON.parse(readFileSync(test.file + ".exit", "utf8")).errorMessage, "original provider failure");
+  });
+});
 for (const isError of [false, true]) {
   it(`only closes after a successful terminal deletion (isError=${isError})`, { timeout: 5_000 }, async () => {
     await fixture(async test => {
