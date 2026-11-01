@@ -560,6 +560,8 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
     : undefined;
   const clearStop = () => {
     idleSince = undefined;
+    // A terminal failure survives follow-up turns needed to drain owned work.
+    if (stopPayload?.type === "error") return;
     stopPayload = undefined;
     if (stopFile) rmSync(stopFile, { force: true });
   };
@@ -679,10 +681,9 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
       }
       persistWork();
     }
-    const outcome = classifyAutoExitOutcome(
-      latestAgentEndMessages,
-      interruptRequested,
-    );
+    const outcome = replication && stopPayload?.type === "error"
+      ? "error"
+      : classifyAutoExitOutcome(latestAgentEndMessages, interruptRequested);
     const assistant = newestAssistantEntry(latestAgentEndMessages);
     if (!outcome || !assistant) {
       if (replication && resumeTurnStarted && !movePending) {
@@ -728,7 +729,7 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
       outcome,
       assistantId: assistant.id,
       stopReason: assistant.stopReason,
-      errorMessage: assistant.errorMessage,
+      errorMessage: replication && typeof stopPayload?.errorMessage === "string" ? stopPayload.errorMessage : assistant.errorMessage,
       empty: assistant.empty,
       turnIndex: latestTurnIndex,
       autoExit: terminalAutoExit && !waitsForChildResult,
@@ -738,9 +739,11 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
 
     if (!terminalAutoExit || waitsForChildResult) return;
     const summary = assistant.text?.trim();
-    const payload = replication && (outcome !== "clean" || !summary)
-      ? { type: "error", errorMessage: assistant.errorMessage ?? (outcome === "intentional-abort" || outcome === "unexpected-abort" ? "Replica was interrupted." : "Replica returned no required summary.") }
-      : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
+    const payload = replication && stopPayload?.type === "error"
+      ? stopPayload
+      : replication && (outcome !== "clean" || !summary)
+        ? { type: "error", errorMessage: assistant.errorMessage ?? (outcome === "intentional-abort" || outcome === "unexpected-abort" ? "Replica was interrupted." : "Replica returned no required summary.") }
+        : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
     if (replication) rememberStop(payload);
     // Pi checks the shutdown flag after awaiting its settled handlers.
     return finishAfterDrain(ctx, payload);
