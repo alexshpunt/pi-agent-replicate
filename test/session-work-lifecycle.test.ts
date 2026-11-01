@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 import lifecycle from "../pi-extension/subagents/subagent-done.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
 
-async function fixture(run: (test: { emit: (name: string, value?: any) => Promise<void>; file: string; shutdowns: () => number; busy: (value: boolean) => void; messages: any[]; branch: any[] }) => Promise<void>) {
+async function fixture(run: (test: { emit: (name: string, value?: any) => Promise<void>; reload: () => Promise<void>; file: string; shutdowns: () => number; busy: (value: boolean) => void; messages: any[]; branch: any[] }) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), "replica-session-work-")), file = join(dir, "copy.jsonl");
   const prompt = join(dir, "prompt.txt"); writeFileSync(prompt, "inherited system prompt");
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "copy", cwd: dir }) + "\n");
@@ -21,7 +21,8 @@ async function fixture(run: (test: { emit: (name: string, value?: any) => Promis
   const ctx: any = { cwd: dir, isIdle: () => !busy, hasPendingMessages: () => false, shutdown: () => { shutdowns++; }, ui: { setWidget() {}, notify() {} }, sessionManager: { getSessionFile: () => file, getSessionId: () => "copy", getBranch: () => branch } };
   const pi: any = { events: {}, on(name: string, handler: Function) { const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list); return () => {}; }, appendEntry(customType: string, data: unknown) { branch.push({ type: "custom", customType, data }); }, sendMessage(value: unknown) { messages.push(value); }, registerTool() {}, registerShortcut() {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools() {} };
   const emit = async (name: string, value: any = {}) => { for (const handler of handlers.get(name) ?? []) await handler(value, ctx); };
-  try { lifecycle(pi, ctx); await emit("before_agent_start", {}); await run({ emit, file, shutdowns: () => shutdowns, busy: value => { busy = value; }, messages, branch }); }
+  const reload = async () => { await emit("session_shutdown", { reason: "reload" }); handlers.clear(); lifecycle(pi, ctx); };
+  try { lifecycle(pi, ctx); await emit("before_agent_start", {}); await run({ emit, reload, file, shutdowns: () => shutdowns, busy: value => { busy = value; }, messages, branch }); }
   finally { await emit("session_shutdown", { reason: "reload" }); for (const [key, value] of Object.entries(old)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } rmSync(dir, { recursive: true, force: true }); }
 }
 const answer = (text: string) => ({ messages: [{ id: text, role: "assistant", stopReason: "stop", content: [{ type: "text", text }] }] });
@@ -50,6 +51,60 @@ it("does not close a settled replica before its background terminal completion i
   });
 });
 
+for (const stopReason of ["aborted", "error", "empty"]) {
+  it(`retains a terminal ${stopReason} outcome when pending work starts another turn`, { timeout: 5_000 }, async () => {
+    await fixture(async test => {
+      await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
+      await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: stopReason === "empty" ? "stop" : stopReason, ...(stopReason === "error" ? { errorMessage: "provider failure" } : {}), content: [] }] });
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), 0);
+      await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
+      await test.emit("before_agent_start", {});
+      await test.emit("agent_end", answer("background work inspected"));
+      await test.emit("agent_settled");
+      assert.equal(test.shutdowns(), 1);
+      const result = JSON.parse(readFileSync(test.file + ".exit", "utf8"));
+      assert.equal(result.type, "error");
+      assert.equal(typeof result.errorMessage, "string");
+      assert.ok(result.errorMessage.length > 0);
+      if (stopReason === "error") assert.equal(result.errorMessage, "provider failure");
+    });
+  });
+}
+it("preserves the terminal failure and pending work through reload", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
+    await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: "error", errorMessage: "saved provider failure", content: [] }] });
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 0);
+    await test.reload();
+    await test.emit("before_agent_start", {});
+    await test.emit("agent_end", answer("still waiting"));
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 0, "the reloaded runtime must still own the terminal job");
+    await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
+    await test.emit("before_agent_start", {});
+    await test.emit("agent_end", answer("job inspected"));
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 1);
+    const result = JSON.parse(readFileSync(test.file + ".exit", "utf8"));
+    assert.equal(result.type, "error");
+    assert.equal(result.errorMessage, "saved provider failure");
+  });
+});
+it("retains the first failure when a drain turn has no assistant response", { timeout: 5_000 }, async () => {
+  await fixture(async test => {
+    await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
+    await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: "error", errorMessage: "original provider failure", content: [] }] });
+    await test.emit("agent_settled");
+    await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
+    await test.emit("before_agent_start", {});
+    await test.emit("agent_end", { messages: [] });
+    await test.emit("agent_settled");
+    assert.equal(test.shutdowns(), 1);
+    assert.equal(JSON.parse(readFileSync(test.file + ".exit", "utf8")).errorMessage, "original provider failure");
+  });
+});
 for (const isError of [false, true]) {
   it(`only closes after a successful terminal deletion (isError=${isError})`, { timeout: 5_000 }, async () => {
     await fixture(async test => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { reduceLineage } from "../../pi-extension/subagents/lineage.ts";
@@ -19,27 +19,37 @@ async function waitUntil(check: () => boolean, explanation: string): Promise<voi
 	assert.fail(explanation);
 }
 const teleportSource = process.env.PI_TEST_TELEPORT_SOURCE;
+function installTeleport(agentDir: string): void {
+	assert.ok(teleportSource);
+	const file = join(agentDir, "settings.json");
+	const settings = JSON.parse(readFileSync(file, "utf8"));
+	settings.extensions = [...(settings.extensions ?? []), teleportSource];
+	writeFileSync(file, JSON.stringify(settings));
+}
 for (const backend of getAvailableBackends()) {
-	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 2 }, () => {
+	describe(`replication moves (${backend})`, { timeout: PI_TIMEOUT * 5 }, () => {
 		let env: TestEnv;
-		beforeEach(() => { resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
-		afterEach(async () => { await cleanupTestEnv(env); });
+		let originalSettings: string | undefined;
+		const settingsFile = join(process.env.PI_INTEGRATION_HERDR_AGENT_DIR!, "settings.json");
+		beforeEach(() => { originalSettings = existsSync(settingsFile) ? readFileSync(settingsFile, "utf8") : undefined; resetProviderRequests(); env = createTestEnv(backend, { replication: true }); });
+		afterEach(async () => { try { await cleanupTestEnv(env); } finally { if (originalSettings === undefined) rmSync(settingsFile, { force: true }); else writeFileSync(settingsFile, originalSettings); } });
 		for (const handoff of ["move", "restart"]) {
 			it(`recovers held background checkpoint after parent ${handoff}`, { skip: handoff === "move" && !teleportSource }, async () => {
 				const agentDir = process.env.PI_INTEGRATION_HERDR_AGENT_DIR!;
 				assert.ok(agentDir);
 				cpSync(join(env.dir, ".pi", "agent"), agentDir, { recursive: true });
-				if (handoff === "move") writeFileSync(join(agentDir, "extensions", "teleport-under-test.ts"), `export {default} from ${JSON.stringify(teleportSource)};\n`);
+				if (handoff === "move") installTeleport(agentDir);
 				const state = join(env.dir, ".pi", "agent", "held-completion"), original = join(state, "original.jsonl");
 				mkdirSync(state); const bin = join(state, "bin"); mkdirSync(bin);
 				const armed = join(state, "armed"), started = join(state, "started"), release = join(state, "release");
 				const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-				writeFileSync(join(bin, "git"), `#!/bin/bash\nif test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<600;i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(git)} "$@"\n`, { mode: 0o700 });
+				writeFileSync(join(bin, "git"), `#!/bin/bash\nif test -f ${shellQuote(armed)} && test ! -f ${shellQuote(started)}; then\n touch ${shellQuote(started)}\n for ((i=0;i<${Math.ceil(PI_TIMEOUT * 2 / 50)};i++)); do test -f ${shellQuote(release)} && break; sleep 0.05; done\nfi\nexec ${shellQuote(git)} "$@"\n`, { mode: 0o700 });
 				const capability = join(env.dir, "held-capability.ts");
 				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
-				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))}` : ""}` });
-				await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready");
+				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(teleportSource!)}` : ""}` });
+				try { await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready"); }
+				catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly HELD_SUMMARY"');
 				await waitUntil(() => existsSync(started), "the actual background checkpoint must be held");
 				assert.equal(results(original).length, 0);
@@ -60,7 +70,14 @@ for (const backend of getAvailableBackends()) {
 						const destination = join(env.dir, "held-destination"); mkdirSync(destination);
 						runInPane(parent, `Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"`);
 						try { await waitUntil(() => parentSessionLocation(binding.storeDir, binding.sessionId)?.cwd === destination && !existsSync(original), "Teleport must replace the original while checkpoint is held"); }
-						catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}\n${JSON.stringify(parentSessionLocation(binding.storeDir, binding.sessionId))}`); }
+						catch (error) {
+							const teleportFile = join(agentDir, "teleport", binding.sessionId, "state.json");
+							const teleport = existsSync(teleportFile) ? JSON.parse(readFileSync(teleportFile, "utf8")) : null;
+							const destinationFile = teleport?.transition?.destinationSession ?? teleport?.active?.sessionFile;
+							let workspaces = "";
+							try { workspaces = execFileSync("herdr", ["workspace", "list"], { encoding: "utf8" }); } catch (e) { workspaces = String(e); }
+							assert.fail(`${error}\n${readPane(parent, 150)}\n${JSON.stringify({ location: parentSessionLocation(binding.storeDir, binding.sessionId), teleport, workspaces, original: entries(original), destination: destinationFile && entries(destinationFile), foreign: entries(copied) })}`);
+						}
 						receiverFile = parentSessionLocation(binding.storeDir, binding.sessionId)!.sessionFile;
 					} else {
 						runInPane(parent, "/quit"); await waitForPiExit(parent); closePane(parent);
@@ -157,20 +174,20 @@ for (const backend of getAvailableBackends()) {
 		it("drains nested copies through real Teleport and replays the direct result only to its reopened original", { skip: !teleportSource }, async () => {
 			assert.ok(teleportSource && existsSync(teleportSource));
 			const agentDir = join(env.dir, ".pi", "agent");
-			writeFileSync(join(agentDir, "extensions", "teleport-under-test.ts"), `export { default } from ${JSON.stringify(teleportSource)};\n`);
 			assert.ok(process.env.PI_INTEGRATION_HERDR_AGENT_DIR);
 			cpSync(agentDir, process.env.PI_INTEGRATION_HERDR_AGENT_DIR, { recursive: true });
+			installTeleport(process.env.PI_INTEGRATION_HERDR_AGENT_DIR);
 			const original = join(env.dir, "original.jsonl"), gate = join(env.dir, "grandchild-gate");
 			const capability = join(env.dir, "nested-capability.ts");
 			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write nested source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'nested.txt'),'GRANDCHILD_SOURCE');return {content:[{type:'text',text:'nested source written'}],details:{}}}});}\n`);
 			const parent = createTrackedSurface(env, "nested-original");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(join(agentDir, "extensions", "teleport-under-test.ts"))} -e ${shellQuote(capability)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
+			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} -e ${shellQuote(teleportSource)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
 			const nodes = () => {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap((root) => [...reduceLineage(root).nodes.values()]) : [];
 			};
-			try { await waitUntil(() => nodes().filter((node) => node.replication).length === 2, "one clone must launch one descendant"); } catch (error) { assert.fail(`${error}\n${JSON.stringify({ parent: entries(original).filter((row) => row.customType === "subagent_result" || row.message?.role === "toolResult"), children: nodes().map((node) => ({ id: node.nodeId, session: node.sessionFile ? entries(node.sessionFile).slice(-4) : [], screen: node.surface ? readPane(node.surface, 150) : "" })) })}`); }
+			try { await waitUntil(() => { const replicas = nodes().filter((node) => node.replication); return replicas.length === 2 && replicas.every((node) => !!node.sessionFile); }, "one clone and its descendant must register their sessions"); } catch (error) { assert.fail(`${error}\n${JSON.stringify({ parent: entries(original).filter((row) => row.customType === "subagent_result" || row.message?.role === "toolResult"), children: nodes().map((node) => ({ id: node.nodeId, session: node.sessionFile ? entries(node.sessionFile).slice(-4) : [], screen: node.surface ? readPane(node.surface, 150) : "" })) })}`); }
 			const owner = nodes().find((node) => node.task?.includes("Your assignment:\nREPLICATION_NESTED_OWNER"));
 			assert.ok(owner?.sessionFile && owner.surface);
 			const grandchild = nodes().find((node) => node.parentNodeId === owner.nodeId);

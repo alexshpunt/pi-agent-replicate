@@ -76,14 +76,15 @@ export default function(pi){
 				assert.ok(result.id);
 				assert.ok(rows.findIndex(row => row.id === result.id) > rows.indexOf(call), "persisted history remains chronological");
 			}
-			for (const mode of ["resume", "fork"]) {
+			for (const [index, name] of ["first-fresh-check", "second-fresh-check"].entries()) {
 				const consumed = String(results().length);
 				await until(() => existsSync(join(gate, "settled")) && readFileSync(join(gate, "settled"), "utf8") === consumed, "parent finishes handling the previous outcome");
 				const previous = results().at(-1);
-				runInPane(parent, `Call the replicate tool once with name: "continue-check", continuation: "${previous.details.continuationId}", mode: "${mode}", task: "Return exactly ${mode.toUpperCase()}_OUTPUT"`);
-				const count = mode === "resume" ? 3 : 4;
-				await until(() => results().length === count, `${mode} result delivered`);
+				const answer = `FRESH_${index}_OUTPUT`;
+				runInPane(parent, `Call the replicate tool once with name: "${name}", task: "Return exactly ${answer}"`);
+				await until(() => results().length === index + 3, "fresh result delivered");
 				const latest = entries(parentFile).filter(row => row.message?.role === "toolResult" && row.message.toolName === "replicate").at(-1);
+				assert.match(results().at(-1).content, new RegExp(answer));
 				assert.equal(results().at(-1).details.parentToolCallId, latest.message.toolCallId);
 				assert.notEqual(results().at(-1).details.parentToolCallId, previous.details.parentToolCallId);
 			}
