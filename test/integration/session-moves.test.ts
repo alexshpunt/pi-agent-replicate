@@ -180,7 +180,7 @@ for (const backend of getAvailableBackends()) {
 			const binding = readSessionBinding(original)!;
 			const root = sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
 			const location = childSessionLocation(root, node.nodeId)!;
-			assert.equal(location.cwd, destination);
+			assert.equal(location.cwd, destination, JSON.stringify({ result: results(original)[0], child: entries(node.sessionFile!) }));
 			assert.notEqual(location.sessionFile, node.sessionFile);
 			assert.match(results(original)[0].content, /AUTONOMOUS_MOVED_ANSWER/);
 			assert.equal(results(original)[0].details.sessionFile, location.sessionFile);
