@@ -325,7 +325,21 @@ export default function subagentLifecycle(pi: ExtensionAPI, initialContext?: Ext
     installChildLifecycle(pi, ctx);
   };
   if (initialContext) start(initialContext);
-  else pi.on("session_start", (_event, ctx) => start(ctx));
+  else {
+    // This explicitly loaded extension is last in the replica argv. Keep this
+    // hook on its own facade even if the main extension owns the lifecycle.
+    pi.on("before_agent_start", (_event, ctx) => {
+      const file = ctx.sessionManager.getSessionFile();
+      const binding = file ? readSessionBinding(file) : undefined;
+      if (!binding?.child || binding.sessionId !== ctx.sessionManager.getSessionId()) return;
+      const environment = binding.child.environment;
+      if (environment.PI_SUBAGENT_REPLICATION !== "1") return;
+      const promptFile = environment.PI_SUBAGENT_REPLICATION_PROMPT_FILE;
+      if (!promptFile) throw new Error("Replica system prompt is missing.");
+      return { systemPrompt: readFileSync(promptFile, "utf8") };
+    });
+    pi.on("session_start", (_event, ctx) => start(ctx));
+  }
 }
 
 function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContext): void {
