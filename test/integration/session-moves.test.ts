@@ -129,7 +129,7 @@ for (const backend of getAvailableBackends()) {
 			await waitUntil(() => ownedNodes(original).length === 2, "the owner must launch its grandchild");
 			const owner = ownedNodes(original).find((node) => node.name?.startsWith("moving-owner"));
 			assert.ok(owner?.sessionFile && owner.surface);
-			await waitForScreen(owner.surface, /1 active/i);
+			await waitUntil(() => ownedNodes(original).some((node) => node.nodeId !== owner.nodeId && Boolean(node.sessionFile)), "grandchild must have a session before the owner moves");
 			const destinationDir = join(env.dir, "moved-child");
 			mkdirSync(destinationDir);
 			let moved = join(destinationDir, "owner.jsonl");
