@@ -1,7 +1,7 @@
 {
   "name": "pi-agent-replicate",
   "version": "1.3.0",
-  "description": "LPT-owned Herdr subagents for reliable Pi lifecycle, result, and control foundations",
+  "description": "One Pi agent makes copies of itself to work on independent tasks in parallel",
   "keywords": [
     "pi-package",
     "pi",
@@ -57,7 +57,7 @@
     "extensions": [
       "./pi-extension/subagents/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/alexshpunt/pi-agent-replicate/main/docs/assets/pi-herdr-agents-gallery.png"
+    "image": "https://raw.githubusercontent.com/alexshpunt/pi-agent-replicate/main/assets/banner.png"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.4",
