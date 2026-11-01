@@ -22,7 +22,7 @@ Copies work in separate Git worktrees by default. For projects that need the sam
 
 ## Install
 
-After the first npm release:
+Install from npm:
 
 ```bash
 pi install npm:pi-agent-replicate
