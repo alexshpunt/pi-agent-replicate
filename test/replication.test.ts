@@ -9,6 +9,25 @@ import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts
 import { materializeReplicationHistory, registerReplicateTool, replicationName } from "../pi-extension/subagents/replication.ts";
 import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
 import subagentsExtension from "../pi-extension/subagents/index.ts";
+import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
+
+it("restores the exact inherited prompt after other extension hooks", () => {
+	const dir = mkdtempSync(join(tmpdir(), "replica-prompt-"));
+	try {
+		const session = join(dir, "child.jsonl"), prompt = join(dir, "prompt.txt");
+		writeFileSync(session, JSON.stringify({ type: "session", id: "clone", version: 3, cwd: dir }) + "\n");
+		writeFileSync(prompt, "PARENT SYSTEM PROMPT\nCUSTOM CAPABILITY");
+		seedSessionBinding(session, { version: 1, storeDir: join(dir, "store"), child: { lineage: { rootDir: join(dir, "lineage"), rootId: "root", nodeId: "clone", launchKind: "fork" }, environment: { PI_SUBAGENT_REPLICATION: "1", PI_SUBAGENT_REPLICATION_PROMPT_FILE: prompt } } });
+		const handlers = new Map<string, Function[]>();
+		const pi = { on: (name: string, fn: Function) => { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } };
+		subagentDoneExtension(pi as any);
+		const hook = handlers.get("before_agent_start")?.at(-1);
+		assert.ok(hook);
+		const context = { sessionManager: { getSessionFile: () => session, getSessionId: () => "clone" } };
+		assert.deepEqual(hook({ systemPrompt: "PARENT SYSTEM PROMPT\nCUSTOM CAPABILITY\nCUSTOM CAPABILITY" }, context), { systemPrompt: "PARENT SYSTEM PROMPT\nCUSTOM CAPABILITY" });
+		assert.equal(hook({}, { sessionManager: { getSessionFile: () => session, getSessionId: () => "foreign" } }), undefined);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 it("reads the current pane name without falling back to another pane", () => {
 	assert.equal(getHerdrCurrentPaneTitle((args) => {
