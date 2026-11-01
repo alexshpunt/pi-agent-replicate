@@ -8,7 +8,7 @@ import { readSessionBinding } from "../../pi-extension/subagents/session-binding
 import {
   PI_TIMEOUT, cleanupTestEnv, createTestEnv, createTrackedSurface,
   getAvailableBackends, readPane, restoreBackend, runInPane, setBackend,
-  sleep, startPi, waitForPaneReady, type TestEnv,
+  shellQuote, sleep, startPi, waitForPaneReady, type TestEnv,
 } from "./harness.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -82,7 +82,12 @@ for (const backend of backends) {
     let previous: string | undefined;
     let env: TestEnv;
     beforeEach(() => { previous = setBackend(backend); env = createTestEnv(backend); });
-    afterEach(async () => { await cleanupTestEnv(env); restoreBackend(previous); });
+    afterEach(async () => {
+      // Release a held compaction even when an assertion fails before cleanup.
+      try { writeFileSync(join(env.dir, ".pi", "agent", "integration-compaction-release"), "release\n"); } catch { /* Setup may not have completed. */ }
+      await cleanupTestEnv(env);
+      restoreBackend(previous);
+    });
 
     it("keeps a persistent child active until manual compaction finishes without delivering a result", async () => {
       const id = `tree-compact-${Date.now()}`;
@@ -116,11 +121,19 @@ export default function(pi) {
       startPi(parent, env.dir, "Call consumer_tree_open_probe exactly once, then wait.", {
         extensionSource: extension,
         environment: { JITI_FS_CACHE: "0", PI_SUBAGENT_QUIET_THRESHOLD_MS: "200" },
-        extraArgs: "--tools consumer_tree_open_probe",
+        // Activity sidecars are relative to the parent session directory.
+        extraArgs: `--session ${shellQuote(join(env.dir, "parent.jsonl"))} --tools consumer_tree_open_probe`,
       });
       const { childId } = JSON.parse(await waitForFile(launched, parent)) as { childId: string };
-      const active = await waitForActivity(env.dir, childId, (value) =>
-        (value.latestEvent === "agent_end" || value.latestEvent === "agent_settled") && value.phase === "waiting");
+      let active: Awaited<ReturnType<typeof waitForActivity>>;
+      try {
+        active = await waitForActivity(env.dir, childId, (value) =>
+          (value.latestEvent === "agent_end" || value.latestEvent === "agent_settled") && value.phase === "waiting");
+      } catch (error) {
+        const childResult = existsSync(result) ? readFileSync(result, "utf8") : undefined;
+        const childPane = panes(env.workspaceId).find((pane) => pane.label === label)?.pane_id;
+        throw new Error(`${String(error)}\nchild=${childId} result=${childResult}\nparent:\n${readPane(parent, 100)}\nchild:\n${childPane ? readPane(childPane, 100) : "(no child pane)"}`);
+      }
       assert.equal(active.activity.compactionActive, false);
       const childPane = panes(env.workspaceId).find((pane) => pane.label === label)?.pane_id;
       assert.ok(childPane, "persistent child must retain its original pane");
