@@ -47,7 +47,7 @@ for (const backend of getAvailableBackends()) {
 				const capability = join(env.dir, "held-capability.ts");
 				writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)};import {writeFileSync} from 'node:fs';import {join} from 'node:path';export default function(pi){pi.on('session_start',()=>{if(!process.env.PI_SUBAGENT_ID)process.env.PATH=${JSON.stringify(bin)}+':'+process.env.PATH;});pi.registerTool({name:'replication_probe',label:'Probe',description:'Save source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'held.txt'),'HELD_SOURCE');writeFileSync(${JSON.stringify(armed)},'go');return{content:[{type:'text',text:'saved source'}],details:{}}}});}\n`);
 				const parent = createTrackedSurface(env, "held-original"); await waitForPaneReady(parent);
-				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)}` });
+				startPi(parent, env.dir, "Return exactly HELD_READY", { agentDir, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} ${handoff === "move" ? `-e ${shellQuote(teleportSource!)}` : ""}` });
 				try { await waitUntil(() => entries(original).some(row => row.message?.role === "assistant"), "parent ready"); }
 				catch (error) { assert.fail(`${error}\n${readPane(parent, 150)}`); }
 				runInPane(parent, 'Call the replicate tool once with task: "Use replication_probe then Return exactly HELD_SUMMARY"');
@@ -182,7 +182,7 @@ for (const backend of getAvailableBackends()) {
 			writeFileSync(capability, `import {Type} from ${JSON.stringify(new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname)}; import {writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(pi){pi.registerTool({name:'replication_probe',label:'Probe',description:'Write nested source',parameters:Type.Object({}),async execute(){writeFileSync(join(process.cwd(),'nested.txt'),'GRANDCHILD_SOURCE');return {content:[{type:'text',text:'nested source written'}],details:{}}}});}\n`);
 			const parent = createTrackedSurface(env, "nested-original");
 			await waitForPaneReady(parent);
-			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
+			startPi(parent, env.dir, `Call the replicate tool once with task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`, { extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(capability)} -e ${shellQuote(teleportSource)}`, agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR });
 			const nodes = () => {
 				const binding = readSessionBinding(original);
 				return binding ? sessionLineageRoots(binding.storeDir, binding.sessionId).flatMap((root) => [...reduceLineage(root).nodes.values()]) : [];
