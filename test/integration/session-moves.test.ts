@@ -175,7 +175,16 @@ for (const backend of getAvailableBackends()) {
 				`task: ${JSON.stringify(`Call the teleport tool with EXACT parameters: action: "jump" target: "${destination}"\nAfter the move, Return exactly AUTONOMOUS_MOVED_ANSWER`)}`,
 			].join("\n"), { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR, extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(teleportWrapper)}` });
 			try { await waitUntil(() => results(original).length === 1, "moved autonomous child must finish", 40_000); }
-			catch (error) { assert.fail(`${error}\n${readPane(parent, 250)}\n${JSON.stringify(ownedNodes(original))}`); }
+			catch (error) {
+				const binding = readSessionBinding(original);
+				const node = ownedNodes(original)[0];
+				const root = binding && sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
+				const location = root && node ? childSessionLocation(root, node.nodeId) : undefined;
+				const child = location?.sessionFile && entries(location.sessionFile).slice(-15);
+				let screen = "";
+				try { if (location?.paneId) screen = readPane(location.paneId, 150); } catch (screenError) { screen = String(screenError); }
+				assert.fail(`${error}\n${readPane(parent, 250)}\n${JSON.stringify({ node, location, child, screen })}`);
+			}
 			const node = ownedNodes(original)[0];
 			const binding = readSessionBinding(original)!;
 			const root = sessionLineageRoots(binding.storeDir, binding.sessionId)[0];
