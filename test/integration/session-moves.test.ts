@@ -197,15 +197,17 @@ for (const backend of getAvailableBackends()) {
 				const gate = join(env.dir, "restart-gate");
 				const started = join(env.dir, "restart-started");
 				const queued = join(env.dir, "queued-result");
+				const probe = join(env.dir, "restart-probe.ts");
+				const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+				writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync,writeFileSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold child until released",parameters:Type.Object({}),async execute(){writeFileSync(${JSON.stringify(started)},"started");while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 				const parent = createTrackedSurface(env, "restart-parent");
 				await waitForPaneReady(parent);
 				startPi(parent, env.dir, [
-					"Call the subagent tool with these EXACT parameters:",
-					'name: "restart-child"', 'agent: "test-echo"',
-					`task: ${JSON.stringify(gatedTask(started, gate, "RESTART_ANSWER"))}`,
-					"Do not do anything else. Just call the subagent tool once.",
+					"Call the replicate tool once with these parameters:",
+					'name: "restart-child"',
+					'task: "Use replication_probe then Return exactly RESTART_ANSWER"',
 				].join("\n"), {
-					extraArgs: `--session ${shellQuote(original)}`,
+					extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}`,
 					...(boundary === "queued-parent" ? { environment: { PI_INTEG_QUEUE_RESULT_MARKER: queued } } : {}),
 				});
 				await waitForFile(started);
@@ -217,7 +219,8 @@ for (const backend of getAvailableBackends()) {
 					// Hold only the delivery sink to exercise queued-but-unpersisted receipt.
 					writeFileSync(gate, "go");
 					await waitForFile(queued);
-					await waitUntil(() => Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminalDelivered), "child must publish its result while parent is still streaming");
+					await waitUntil(() => Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminal), "child must save its result while parent is still streaming");
+					assert.equal(Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminalDelivered), false, "an unsaved queued result is not acknowledged");
 					assert.equal(results(original).length, 0, "queued is not a persisted acknowledgement");
 				} else if (boundary === "saved-child") {
 					runInPane(parent, "/quit");
@@ -230,16 +233,17 @@ for (const backend of getAvailableBackends()) {
 				}
 				await restartIsolatedHerdr(env);
 				writeFileSync(gate, "go");
+				const requestsBeforeReopen = getProviderRequests().length;
 				const receiver = createTrackedSurface(env, "restart-receiver");
 				await waitForPaneReady(receiver);
 				startPi(receiver, env.dir, "", { extraArgs: `--session ${shellQuote(original)}` });
 				await waitUntil(() => results(original).length === 1, `saved answer must reach reopened parent at ${boundary}: ${readPane(receiver, 250)}`, 40_000);
 				if (boundary !== "active-child") assert.match(results(original)[0].content, /RESTART_ANSWER/);
 				else assert.match(results(original)[0].content, /completed|failed|error|crashed/i, "active loss must recover or report an honest failure");
-				assert.ok(existsSync(results(original)[0].details.resultPath));
+				assert.ok(existsSync(results(original)[0].details.sessionFile));
 				const childLocation = childSessionLocation(root, node.nodeId);
 				if (childLocation?.paneId) env.surfaces.push(childLocation.paneId);
-				await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("Subagent restart-child")), "replay must wake the reopened parent without a user prompt");
+				await waitUntil(() => getProviderRequests().slice(requestsBeforeReopen).some((request) => request.userText.includes(results(original)[0].details.resultContent)), "replay must wake the reopened parent without a user prompt");
 				runInPane(receiver, "/quit");
 				await waitForPiExit(receiver);
 				const reopened = createTrackedSurface(env, "restart-second-receiver");
