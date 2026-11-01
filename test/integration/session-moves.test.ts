@@ -251,7 +251,11 @@ for (const backend of getAvailableBackends()) {
 				startPi(receiver, env.dir, "", { extraArgs: `--session ${shellQuote(original)}` });
 				await waitUntil(() => results(original).length === 1, `saved answer must reach reopened parent at ${boundary}: ${readPane(receiver, 250)}`, 40_000);
 				if (boundary !== "active-child") assert.match(results(original)[0].content, /RESTART_ANSWER/);
-				else assert.match(results(original)[0].content, /completed|failed|error|crashed/i, "active loss must recover or report an honest failure");
+				else {
+					assert.equal(typeof results(original)[0].details.exitCode, "number");
+					assert.notEqual(results(original)[0].details.exitCode, 0, "a lost active replica must report failure");
+					assert.equal(results(original)[0].details.integration.status, "not-attempted");
+				}
 				assert.ok(existsSync(results(original)[0].details.sessionFile));
 				const childLocation = childSessionLocation(root, node.nodeId);
 				if (childLocation?.paneId) env.surfaces.push(childLocation.paneId);
