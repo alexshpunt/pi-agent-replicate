@@ -54,7 +54,7 @@ for (const stopReason of ["aborted", "error", "empty"]) {
   it(`retains a terminal ${stopReason} outcome when pending work starts another turn`, { timeout: 5_000 }, async () => {
     await fixture(async test => {
       await test.emit("tool_execution_end", { toolCallId: "background", toolName: "bash", result: { details: { source: "shell:job", status: "running" } }, isError: false });
-      await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: stopReason === "empty" ? "stop" : stopReason, content: [] }] });
+      await test.emit("agent_end", { messages: [{ id: "failure", role: "assistant", stopReason: stopReason === "empty" ? "stop" : stopReason, ...(stopReason === "error" ? { errorMessage: "provider failure" } : {}), content: [] }] });
       await test.emit("agent_settled");
       assert.equal(test.shutdowns(), 0);
       await test.emit("message_start", { message: { role: "custom", customType: "terminal-completion", details: { sessions: [{ source: "shell:job", status: "completed" }] } } });
@@ -62,7 +62,9 @@ for (const stopReason of ["aborted", "error", "empty"]) {
       await test.emit("agent_end", answer("background work inspected"));
       await test.emit("agent_settled");
       assert.equal(test.shutdowns(), 1);
-      assert.equal(JSON.parse(readFileSync(test.file + ".exit", "utf8")).type, "error");
+      const result = JSON.parse(readFileSync(test.file + ".exit", "utf8"));
+      assert.equal(result.type, "error");
+      assert.equal(result.errorMessage, stopReason === "error" ? "provider failure" : stopReason === "aborted" ? "Replica was interrupted." : "Replica returned no required summary.");
     });
   });
 }
