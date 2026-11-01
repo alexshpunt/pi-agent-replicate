@@ -260,8 +260,21 @@ export default function subagentLifecycle(pi, initialContext) {
     };
     if (initialContext)
         start(initialContext);
-    else
+    else {
+        // This explicitly loaded extension is last in the replica argv. Keep this
+        // hook on its own facade even if the main extension owns the lifecycle.
+        pi.on("before_agent_start", (_event, ctx) => {
+            const file = ctx.sessionManager.getSessionFile();
+            const binding = file ? readSessionBinding(file) : undefined;
+            if (!binding?.child || binding.sessionId !== ctx.sessionManager.getSessionId()) return;
+            const environment = binding.child.environment;
+            if (environment.PI_SUBAGENT_REPLICATION !== "1") return;
+            const promptFile = environment.PI_SUBAGENT_REPLICATION_PROMPT_FILE;
+            if (!promptFile) throw new Error("Replica system prompt is missing.");
+            return { systemPrompt: readFileSync(promptFile, "utf8") };
+        });
         pi.on("session_start", (_event, ctx) => start(ctx));
+    }
 }
 function installChildLifecycle(pi, initialContext) {
     if (hasChildLifecycle(pi))
@@ -475,11 +488,16 @@ function installChildLifecycle(pi, initialContext) {
         : undefined;
     const clearStop = () => {
         idleSince = undefined;
+        // A terminal failure survives follow-up turns needed to drain owned work.
+        if (stopPayload?.type === "error")
+            return;
         stopPayload = undefined;
         if (stopFile)
             rmSync(stopFile, { force: true });
     };
     const rememberStop = (payload) => {
+        if (stopPayload?.type === "error")
+            payload = stopPayload;
         stopPayload = payload;
         // The exit sidecar remains authoritative if this retry checkpoint cannot be saved.
         if (stopFile) {
@@ -629,7 +647,7 @@ function installChildLifecycle(pi, initialContext) {
             if (replication && resumeTurnStarted && !movePending) {
                 const payload = { type: "error", errorMessage: "Replica stopped without a final assistant response." };
                 rememberStop(payload);
-                void finishAfterDrain(ctx, payload);
+                return finishAfterDrain(ctx, stopPayload ?? payload);
             }
             return;
         }
@@ -669,9 +687,11 @@ function installChildLifecycle(pi, initialContext) {
         if (!terminalAutoExit || waitsForChildResult)
             return;
         const summary = assistant.text?.trim();
-        const payload = replication && (outcome !== "clean" || !summary)
-            ? { type: "error", errorMessage: assistant.errorMessage ?? (outcome === "intentional-abort" || outcome === "unexpected-abort" ? "Replica was interrupted." : "Replica returned no required summary.") }
-            : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
+        const payload = replication && stopPayload?.type === "error"
+            ? stopPayload
+            : replication && (outcome !== "clean" || !summary)
+                ? { type: "error", errorMessage: assistant.errorMessage ?? (outcome === "intentional-abort" || outcome === "unexpected-abort" ? "Replica was interrupted." : "Replica returned no required summary.") }
+                : { type: "done", ...(replication ? { summary: assistant.text } : {}) };
         if (replication)
             rememberStop(payload);
         // Pi checks the shutdown flag after awaiting its settled handlers.
