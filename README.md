@@ -16,7 +16,7 @@ Start Pi inside Herdr, then restart Pi or run `/reload`.
 
 ## Agent-facing tool
 
-The extension registers exactly one tool and no user commands:
+The extension registers exactly one model-facing tool:
 
 ```typescript
 replicate({ name: "check-auth-risks", task: "Check authentication risks while I implement the settings change. Return concrete findings with file references." });
@@ -32,13 +32,19 @@ The caller must choose a task-specific `name` in lowercase kebab-case, such as `
 
 Git branches use `replica/<origin>/<name>`, for example `replica/settings/check-auth-risks`. The origin is lowercased and made safe for a path; Cyrillic is transliterated (`Настройки` becomes `nastroiki`). Herdr uses the branch to name the checkout directory, such as `replica-nastroiki-check-auth-risks`. Repeated or simultaneous launches reserve separate branches with `-2`, `-3`, and so on, without changing the displayed session title. These suffixes also avoid different origin/task pairs that would produce the same checkout directory. Existing branches and worktrees are not renamed.
 
+## Project directory mode
+
+Run `/replica-directory` to choose a mode, or use `/replica-directory shared` or `/replica-directory worktree`. The choice is saved in `.pi/replicate.json` in the current project directory and applies to new copies. The default is `worktree`.
+
+In `shared` mode, copies use their parent's current directory, including ignored files and dependencies. They do not create a Git worktree or branch, and there is no snapshot or automatic join. Changes are visible immediately and remain even if the copy fails. Coordinate assignments: simultaneous edits to the same files can overwrite each other, and there is no automatic rollback or conflict isolation. This mode can be useful when copies need the same Unity project directory. Changing the mode does not move already-running copies.
+
 ## Replication runtime
 
 The following details describe the implementation, not instructions added to the agent's prompt.
 
 Each call copies the current active conversation, including the current user turn. It inherits the model, thinking level, full system prompt and active tools. Explicit CLI extensions follow the copy too. The bounded assignment and summary requirement are sent as a normal task message, without changing the system prompt.
 
-A fresh call requires `name` and `task`. There are no role, model, cwd, worktree or batch choices. Each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
+A fresh call requires `name` and `task`. There are no model-facing role, model, cwd, worktree or batch choices. In the default worktree mode, each copy gets tracked working files and nonignored untracked files from the moment of launch. The snapshot does not change the parent's HEAD or staging. Ignored files, dependencies and builds are not copied. Worktrees isolate source files, not shared processes, ports or databases.
 
 There are no model-facing continuation, resume or fork choices. Saved sessions and source checkpoints remain recovery evidence; the tool always creates a fresh copy.
 
@@ -144,11 +150,13 @@ No child receives a model-facing completion or help tool.
 
 ## Managed worktrees
 
-Replication always creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially through durable ownership gates. Checkpointing, Git joins and owned cleanup run in background host processes, not Pi's input thread. The host revalidates the original session before applying files and delivering its result. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
+In the default worktree mode, replication creates a snapshot worktree. The immediate parent's host saves the completed child's source and session, then attempts a three-way join against the original snapshot. Sibling joins run serially through durable ownership gates. Checkpointing, Git joins and owned cleanup run in background host processes, not Pi's input thread. The host revalidates the original session before applying files and delivering its result. Parent HEAD and staging stay unchanged. A clean Git join means no detected text conflict, not that the combined program is correct.
 
 Task completion and integration are separate outcomes: `applied`, `conflict`, `blocked`, or `not-attempted`. Conflicts do not apply any of the child's files to the parent. Failed or empty-summary children never auto-join partial work. Their worktrees, sessions and checkpoints stay available for recovery. A new replica starts from the current parent's context and files.
 
 Successful worktrees are removed only after durable integration and source/session checkpointing, with ownership, process-exit and unchanged-source checks. Unknown ownership or later edits keep the worktree. Saved sessions and GC-protected source refs remain recoverable. If the parent is closed, successful integration waits for its exact session to reopen; no replacement parent is opened automatically.
+
+In shared mode, no source checkpoint or join is performed. The shared files remain as edited regardless of the result.
 
 The package-root API and retained internal role launcher have a separate opt-in worktree contract:
 
