@@ -60,7 +60,7 @@ function installTeleport(env: TestEnv): string {
 for (const backend of getAvailableBackends()) {
 	describe(`session moves (${backend})`, { timeout: PI_TIMEOUT * 6 }, () => {
 		let env: TestEnv;
-		beforeEach(() => { env = createTestEnv(backend); });
+		beforeEach(() => { env = createTestEnv(backend, { replication: true }); });
 		afterEach(async () => { await cleanupTestEnv(env); });
 
 		it("delivers once after the parent file and process move and the old file disappears", async () => {
@@ -73,10 +73,9 @@ for (const backend of getAvailableBackends()) {
 			const parent = createTrackedSurface(env, "mobile-parent");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "mobile-child"', 'agent: "test-echo"',
+				"Call the replicate tool once with these parameters:",
+				'name: "mobile-child"',
 				`task: ${JSON.stringify(gatedTask(started, gate, "MOBILE_ANSWER"))}`,
-				"Do not do anything else. Just call the subagent tool once.",
 			].join("\n"), { extraArgs: `--session ${shellQuote(original)}` });
 			await waitForFile(started);
 			runInPane(parent, "/quit");
@@ -92,8 +91,8 @@ for (const backend of getAvailableBackends()) {
 			await waitUntil(() => results(moved).length === 1, `No result reached the moved parent: ${readPane(receiver, 250)}`, 20_000);
 			assert.match(results(moved)[0].content, /MOBILE_ANSWER/);
 			assert.equal(typeof results(moved)[0].details.deliveryId, "string");
-			assert.ok(existsSync(results(moved)[0].details.resultPath));
-			await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("Subagent mobile-child completed.")), "delivery must wake the parent agent");
+			assert.ok(existsSync(results(moved)[0].details.sessionFile));
+			await waitUntil(() => getProviderRequests().some((request) => request.userText.includes("MOBILE_ANSWER")), "delivery must wake the parent agent");
 			runInPane(receiver, "/quit");
 			await waitForPiExit(receiver);
 			const reopened = createTrackedSurface(env, "reopened-parent");
