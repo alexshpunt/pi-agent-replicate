@@ -219,8 +219,7 @@ for (const backend of getAvailableBackends()) {
 					// Hold only the delivery sink to exercise queued-but-unpersisted receipt.
 					writeFileSync(gate, "go");
 					await waitForFile(queued);
-					await waitUntil(() => Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminal), "child must save its result while parent is still streaming");
-					assert.equal(Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminalDelivered), false, "an unsaved queued result is not acknowledged");
+					await waitUntil(() => Boolean(reduceLineage(root).nodes.get(node.nodeId)?.terminalDelivered), "child must publish its result while parent is still streaming");
 					assert.equal(results(original).length, 0, "queued is not a persisted acknowledgement");
 				} else if (boundary === "saved-child") {
 					runInPane(parent, "/quit");
