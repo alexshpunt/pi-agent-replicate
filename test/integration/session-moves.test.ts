@@ -112,26 +112,24 @@ for (const backend of getAvailableBackends()) {
 			const original = join(env.dir, "root.jsonl");
 			const gate = join(env.dir, "grandchild-gate");
 
-			if (teleportSource) {
-				installTeleport(env);
-				const role = join(env.dir, ".pi", "agents", "test-descendant-owner.md");
-				writeFileSync(role, readFileSync(role, "utf8").replace(/^tools:.*$/m, "tools: subagent, subagent_done, teleport"));
-			}
+			const teleportWrapper = teleportSource ? installTeleport(env) : undefined;
+			const probe = join(env.dir, "nested-probe.ts");
+			const typebox = new URL("../../node_modules/@sinclair/typebox/build/esm/index.mjs", import.meta.url).pathname;
+			writeFileSync(probe, `import {Type} from ${JSON.stringify(typebox)}; import {existsSync} from "node:fs"; export default function(pi){pi.registerTool({name:"replication_probe",label:"Probe",description:"Hold grandchild until released",parameters:Type.Object({}),async execute(){while(!existsSync(${JSON.stringify(gate)}))await new Promise(r=>setTimeout(r,25));return {content:[],details:{}}}})}\n`);
 			const parent = createTrackedSurface(env, "nested-root");
 			await waitForPaneReady(parent);
 			startPi(parent, env.dir, [
-				"Call the subagent tool with these EXACT parameters:",
-				'name: "moving-owner"', 'agent: "test-descendant-owner"',
-				`task: "INTEGRATION_DESCENDANT_GATE: ${gate} Launch the descendant and stay open."`,
-				"Call the tool once and wait for its asynchronous result.",
+				"Call the replicate tool once with these parameters:",
+				'name: "moving-owner"',
+				`task: "REPLICATION_NESTED_OWNER INTEGRATION_DESCENDANT_GATE: ${gate}"`,
 			].join("\n"), {
-				extraArgs: `--session ${shellQuote(original)}`,
+				extraArgs: `--session ${shellQuote(original)} -e ${shellQuote(probe)}${teleportWrapper ? ` -e ${shellQuote(teleportWrapper)}` : ""}`,
 				...(teleportSource ? { agentDir: process.env.PI_INTEGRATION_HERDR_AGENT_DIR } : {}),
 			});
 			await waitUntil(() => ownedNodes(original).length === 2, "the owner must launch its grandchild");
-			const owner = ownedNodes(original).find((node) => node.name === "moving-owner");
+			const owner = ownedNodes(original).find((node) => node.name?.startsWith("moving-owner"));
 			assert.ok(owner?.sessionFile && owner.surface);
-			await waitForScreen(owner.surface, /Nested-[^\s]+[\s\S]*active/i);
+			await waitForScreen(owner.surface, /1 active/i);
 			const destinationDir = join(env.dir, "moved-child");
 			mkdirSync(destinationDir);
 			let moved = join(destinationDir, "owner.jsonl");
@@ -158,8 +156,8 @@ for (const backend of getAvailableBackends()) {
 			writeFileSync(gate, "go");
 			await waitUntil(() => results(moved).length === 1, "grandchild must reach its moved immediate parent", 30_000);
 			await waitUntil(() => results(original).length === 1, `owner must drain and reach root: ${readPane(parent, 250)}`, 30_000);
-			assert.match(results(moved)[0].content, /GRANDCHILD_DONE/);
-			assert.match(results(original)[0].content, /OWNER_FINAL/);
+			assert.match(results(moved)[0].content, /REPLICATION_GRANDCHILD/);
+			assert.match(results(original)[0].content, /REPLICATION_NESTED_SUMMARY/);
 			assert.equal(results(original)[0].details.childId, owner.nodeId);
 			runInPane(parent, "/quit");
 			await waitForPiExit(parent);
