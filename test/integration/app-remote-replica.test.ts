@@ -47,9 +47,7 @@ for (const transport of ["controller", "ssh"] as const) test(`native remote repl
       return args.includes("-N") && args.at(-2) === host && forward?.startsWith("/tmp/pi-teleport-") && forward.includes("/return.sock:/tmp/pi-teleport-") && forward.endsWith("/controller.sock") && readlinkSync(`/proc/${pid}/cwd`) === cwd;
     } catch { return false; }
   });
-  const capture = async (name: string, terminal: string) => {
-    const evidence = process.env.PI_INTEGRATION_APP_EVIDENCE; if (!evidence) return;
-    const target = join(evidence, transport); mkdirSync(target, { recursive: true });
+  const focus = async (terminal: string) => {
     runApp(connection, ["do", "agent.focus", JSON.stringify({ terminal })]);
     let stable = 0;
     await until(() => {
@@ -60,6 +58,11 @@ for (const transport of ["controller", "ssh"] as const) test(`native remote repl
       stable = space?.active && tab?.active && status.space === space.id && status.tab === tab.id && status.focused_pane === pane?.pane ? stable + 1 : 0;
       return stable >= 2 ? true : undefined;
     }, "The actual route fixture pane did not become visible.");
+  };
+  const capture = async (name: string, terminal: string) => {
+    const evidence = process.env.PI_INTEGRATION_APP_EVIDENCE; if (!evidence) return;
+    const target = join(evidence, transport); mkdirSync(target, { recursive: true });
+    await focus(terminal);
     execFileSync(connection.appCli!, ["shot", join(target, name + ".png")], { env: coreEnvironment(connection), timeout: 15_000 });
   };
   try {
@@ -95,6 +98,7 @@ for (const transport of ["controller", "ssh"] as const) test(`native remote repl
     assert.equal(native.cwd, child.cwd); assert.equal(native.exe, child.executable); assert.equal(native.tracked, "APP_REMOTE_DIRTY\n"); assert.equal(native.context, "APP_REMOTE_UNTRACKED\n");
     const launch = await until(() => remoteEntries(remoteParent.sessionFile).find((row: any) => row.message?.role === "toolResult" && row.message.toolName === "replicate")?.message, "The remote parent did not receive its launch receipt.");
     assert.notEqual(launch.isError, true); assert.equal(launch.details.id, child.childId);
+    await focus(`${machine}/${remoteParent.current.pane_id}`);
     runCore(connection, ["send", `${machine}/${remoteParent.current.pane_id}`, "APP_REMOTE_INDEPENDENT"]);
     await until(() => remoteEntries(remoteParent.sessionFile).some((row: any) => row.message?.role === "assistant" && JSON.stringify(row.message.content).includes("APP_REMOTE_INDEPENDENT_DONE")) ? true : undefined, "The remote parent was blocked by its replica.");
     assert.equal(remoteEntries(remoteParent.sessionFile).filter((row: any) => row.customType === "subagent_result").length, 0);
