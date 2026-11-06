@@ -194,6 +194,7 @@ export function appExec(args          )         {
   }
   if (kind === "pane" && action === "process-info") return result({ process_info: processInfo(option("--pane")) });
   if (kind === "pane" && action === "read") return appCore(["read", args[2], "--lines", option("--lines")], true);
+  if (kind === "pane" && action === "send-keys" && args.length === 4 && args[3] === "Escape") { appCore(["keys", args[2], "esc"]); return result({ type: "ok" }); }
   if (kind === "pane" && action === "run") { appCore(["send", args[2], args[3]]); return result({ type: "ok" }); }
   if (kind === "pane" && action === "rename") return result({ type: "ok" }); // App names the owning tab.
   if (kind === "pane" && action === "list") {
@@ -211,7 +212,11 @@ export function appExec(args          )         {
     mkdirSync(parent, { recursive: true });
     const path = join(parent, hash(branch));
     if (existsSync(path)) throw new Error("The App replica checkout path is occupied.");
-    git(cwd, ["worktree", "add", "--", path, branch]);
+    git(cwd, ["check-ref-format", "--branch", branch]);
+    let branchExists = false;
+    try { git(cwd, ["show-ref", "--verify", "--quiet", "refs/heads/" + branch]); branchExists = true; }
+    catch (error) { if (error.status !== 1) throw error; }
+    git(cwd, branchExists ? ["worktree", "add", "--", path, branch] : ["worktree", "add", "-b", branch, "--", path, option("--base")]);
     try {
       const created = creation(createItem("space.new", { folder: path, name: option("--label"), tab: option("--label"), machine: context().appMachine || "" }));
       return result({ ...created, type: "worktree_created", worktree: { path, branch } });

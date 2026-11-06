@@ -3,7 +3,7 @@
  * the window, core connection, home and every checkout belong to this run.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -89,6 +89,17 @@ async function stopGroup(own: Identity): Promise<void> {
   }
   throw new Error("The private process group is still live.");
 }
+function liveCheckoutUsers(): number[] {
+  return readdirSync("/proc").filter(name => /^\d+$/.test(name)).flatMap(name => {
+    try {
+      const cwd = readlinkSync(`/proc/${name}/cwd`).replace(/ \(deleted\)$/, "");
+      return cwd === root || cwd.startsWith(root + "/") ? [Number(name)] : [];
+    } catch (error) {
+      if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code!)) return [];
+      throw error;
+    }
+  });
+}
 function shutdown(): Promise<void> {
   return shutdownPromise ??= (async () => {
     try {
@@ -111,6 +122,7 @@ function shutdown(): Promise<void> {
       cli("hc", ["server", "stop"]);
       if (core) await until(() => identity(core!.pid)?.birth !== core!.birth);
       for (const own of terminalsOwned.values()) await until(() => identity(own.pid)?.birth !== own.birth);
+      await until(() => liveCheckoutUsers().length === 0);
       if (process.env.PI_INTEGRATION_APP_EVIDENCE) {
         mkdirSync(process.env.PI_INTEGRATION_APP_EVIDENCE, { recursive: true });
         for (const name of ["app.log", "runtime.json"]) if (existsSync(join(root, name))) {
@@ -137,6 +149,7 @@ try {
   console.log("Private core status: " + JSON.stringify(status));
   const pid = status.pid ?? status.server?.pid;
   if (Number.isSafeInteger(pid)) core = identity(pid);
+  if (!core) throw new Error("The private core process identity could not be verified.");
   app = tracked(binary, []);
   await until(() => {
     if (app!.exitCode !== null) throw new Error("The private App window exited.");
