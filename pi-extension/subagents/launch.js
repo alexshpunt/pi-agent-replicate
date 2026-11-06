@@ -1,3 +1,4 @@
+import { inHerdrApp } from "./herdr-app.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, } from "node:fs";
@@ -363,8 +364,10 @@ function prepareTaskArtifacts(resolved, session) {
 }
 function buildPiCommand(resolved, artifacts) {
     const { request } = resolved;
+    const entry = process.argv[1];
+    if (inHerdrApp() && (!entry || !existsSync(entry))) throw new Error("The current Pi entrypoint cannot be pinned for an App replica.");
     const parts = [
-        "pi",
+        ...(inHerdrApp() ? [shellQuote(process.execPath), shellQuote(entry)] : ["pi"]),
         "--session",
         shellQuote(artifacts.sessionFile),
         ...(!request.replication ? ["-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts"))] : []),

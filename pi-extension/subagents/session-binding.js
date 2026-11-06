@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { getPaneProcessInfo } from "./terminal.js";
+import { currentAppPane, inHerdrApp } from "./herdr-app.js";
 export const SESSION_BINDING_TYPE = "subagent-session-binding";
 /** Bind the freshly opened context and restore only session-owned child settings. */
 export function bindSessionRuntime(pi, ctx) {
@@ -11,6 +12,11 @@ export function bindSessionRuntime(pi, ctx) {
     const sessionId = manager?.getSessionId?.();
     if (!sessionFile || !sessionId)
         return undefined;
+    const pane = inHerdrApp() ? currentAppPane() : {
+        pane_id: process.env.HERDR_PANE_ID,
+        tab_id: process.env.HERDR_TAB_ID,
+        workspace_id: process.env.HERDR_WORKSPACE_ID,
+    };
     let binding = readSessionBinding(sessionFile);
     if (!binding) {
         binding = { version: 1, sessionId, storeDir: sessionBindingStore() };
@@ -23,12 +29,12 @@ export function bindSessionRuntime(pi, ctx) {
         }
         process.env.PI_SUBAGENT_SESSION = sessionFile;
         process.env.PI_SUBAGENT_LAUNCHER_PID = String(process.ppid);
-        process.env.PI_SUBAGENT_SURFACE = process.env.HERDR_PANE_ID;
+        process.env.PI_SUBAGENT_SURFACE = pane.pane_id;
     }
     let shellPid;
     try {
-        if (process.env.HERDR_PANE_ID)
-            shellPid = getPaneProcessInfo(process.env.HERDR_PANE_ID).shellPid;
+        if (pane.pane_id)
+            shellPid = getPaneProcessInfo(pane.pane_id).shellPid;
     }
     catch { /* No verified pane means no destructive cleanup. */ }
     publishSessionLocation(binding, {
@@ -36,9 +42,9 @@ export function bindSessionRuntime(pi, ctx) {
         serverPid: shellPid ? parentPid(shellPid) : undefined,
         serverStart: shellPid && parentPid(shellPid) ? startTime(parentPid(shellPid)) : undefined,
         sessionFile, cwd: ctx.cwd,
-        paneId: process.env.HERDR_PANE_ID,
-        tabId: process.env.HERDR_TAB_ID,
-        workspaceId: process.env.HERDR_WORKSPACE_ID,
+        paneId: pane.pane_id,
+        tabId: pane.tab_id,
+        workspaceId: pane.workspace_id,
     });
     return binding;
 }

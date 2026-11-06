@@ -1,6 +1,6 @@
 import { execFile, execSync, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { currentAppPane, inHerdrApp } from "./herdr-app.ts";
+import { appExec, appExecAsync, AppWorktreeCreateError, closeAppPane, currentAppPane, inHerdrApp } from "./herdr-app.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -160,7 +160,8 @@ function extractHerdrWorktree(output: string): HerdrWorktreeSurface {
 	};
 }
 
-function herdrExec(args: string[]): string {
+export function herdrExec(args: string[]): string {
+	if (inHerdrApp()) return appExec(args);
 	return execFileSync("herdr", args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
@@ -168,6 +169,7 @@ function herdrExec(args: string[]): string {
 }
 
 async function herdrExecAsync(args: string[]): Promise<string> {
+	if (inHerdrApp()) return appExecAsync(args);
 	const { stdout } = await execFileAsync("herdr", args, { encoding: "utf8" });
 	return stdout;
 }
@@ -397,7 +399,12 @@ export function createHerdrWorktree(
 	branch: string,
 	base: string,
 ): HerdrWorktreeSurface {
-	const output = herdrExec(buildWorktreeCreateArgs(name, cwd, branch, base));
+	let output: string;
+	try { output = herdrExec(buildWorktreeCreateArgs(name, cwd, branch, base)); }
+	catch (error) {
+		if (error instanceof AppWorktreeCreateError) throw new HerdrWorktreeCreateError(error.message, error.recoveredWorktree);
+		throw error;
+	}
 	try {
 		return extractHerdrWorktree(output);
 	} catch (parseError) {
@@ -878,6 +885,7 @@ function lookupHerdrSurfaceTab(surface: string): string | undefined {
 
 /** Close the dedicated tab for a surface; an already missing target is success. */
 export function closeHerdrSurface(surface: string): void {
+	if (inHerdrApp()) { closeAppPane(surface); return; }
 	const rememberedTab = getHerdrSurfaceTabId(surface);
 	const tabId = rememberedTab ?? lookupHerdrSurfaceTab(surface);
 	if (!tabId) return;

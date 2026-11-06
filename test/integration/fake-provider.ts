@@ -44,6 +44,13 @@ export interface ProviderRequest {
 
 const providerRequests: ProviderRequest[] = [];
 
+let responsePlan: ((request: ChatRequest) => ResponsePlan | Promise<ResponsePlan>) | undefined;
+
+/** Override only the deterministic fixture's response policy. */
+export function setProviderResponsePlan(plan: typeof responsePlan): void {
+	responsePlan = plan;
+}
+
 export function getProviderRequests(): readonly ProviderRequest[] {
 	return providerRequests;
 }
@@ -204,6 +211,7 @@ async function waitForIntegrationGate(source: string): Promise<void> {
 
 
 async function planResponse(request: ChatRequest): Promise<ResponsePlan> {
+	if (responsePlan) return responsePlan(request);
 	const names = toolNames(request);
 	const source = requestText(request);
 	const user = lastUserText(request);

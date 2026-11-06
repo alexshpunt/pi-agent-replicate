@@ -2,7 +2,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { writeBindingFile, readSessionBinding, childSessionLocation, sessionLocationAlive, sessionOwnsPane, launchOwnsPane } from "./session-binding.js";
-import { closeHerdrSurface, getHerdrPaneProcessInfo, listHerdrWorktrees } from "./herdr.js";
+import { closeHerdrSurface, getHerdrPaneProcessInfo, herdrExec, listHerdrWorktrees } from "./herdr.js";
 import { applySourceJoin, planSourceJoin, snapshotSource } from "./source-state.js";
 import { processIncarnationAlive, withLineageMutationGate } from "./lineage.js";
 /** Resolve an attempt only inside the session's durable binding store. */
@@ -286,7 +286,7 @@ export function cleanupReplicaWork(file, parentCwd) {
             (!!record.launchError || (record.completion != null && record.completion.exitCode !== 0));
         if (!record.worktreeLocation && !failedLaunch)
             return false;
-        const response = JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", observed.workspaceId], { encoding: "utf8" }));
+        const response = JSON.parse(herdrExec(["pane", "list", "--workspace", observed.workspaceId]));
         const panes = response?.result?.panes;
         if (!Array.isArray(panes) || panes.length !== 1 || panes[0].pane_id !== worktree.paneId)
             return false;
@@ -300,7 +300,7 @@ export function cleanupReplicaWork(file, parentCwd) {
             closeHerdrSurface(worktree.paneId);
             return true;
         }
-        execFileSync("herdr", ["worktree", "remove", "--workspace", observed.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
+        herdrExec(["worktree", "remove", "--workspace", observed.workspaceId, "--force", "--trust-repository"]);
     }
     else {
         if (!removeWorktree)

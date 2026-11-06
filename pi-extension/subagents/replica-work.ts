@@ -2,7 +2,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { writeBindingFile, readSessionBinding, childSessionLocation, sessionLocationAlive, sessionOwnsPane, launchOwnsPane, type SessionLocation, type LaunchPaneOwnership } from "./session-binding.ts";
-import { closeHerdrSurface, getHerdrPaneProcessInfo, listHerdrWorktrees } from "./herdr.ts";
+import { closeHerdrSurface, getHerdrPaneProcessInfo, herdrExec, listHerdrWorktrees } from "./herdr.ts";
 import { applySourceJoin, planSourceJoin, snapshotSource, type SourceJoinReady, type SourceSnapshot } from "./source-state.ts";
 import type { WorktreeLaunch } from "./launch.ts";
 import { processIncarnationAlive, withLineageMutationGate, type ProcessIncarnation } from "./lineage.ts";
@@ -307,7 +307,7 @@ export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 		const failedLaunch = !record.worktreeLocation && !!record.launchPane &&
 			(!!record.launchError || (record.completion != null && record.completion.exitCode !== 0));
 		if (!record.worktreeLocation && !failedLaunch) return false;
-		const response = JSON.parse(execFileSync("herdr", ["pane", "list", "--workspace", observed.workspaceId], { encoding: "utf8" }));
+		const response = JSON.parse(herdrExec(["pane", "list", "--workspace", observed.workspaceId]));
 		const panes = response?.result?.panes;
 		if (!Array.isArray(panes) || panes.length !== 1 || panes[0].pane_id !== worktree.paneId) return false;
 		const info = getHerdrPaneProcessInfo(worktree.paneId);
@@ -319,7 +319,7 @@ export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
 			closeHerdrSurface(worktree.paneId);
 			return true;
 		}
-		execFileSync("herdr", ["worktree", "remove", "--workspace", observed.workspaceId, "--force", "--trust-repository"], { encoding: "utf8" });
+		herdrExec(["worktree", "remove", "--workspace", observed.workspaceId, "--force", "--trust-repository"]);
 	} else {
 		if (!removeWorktree) return true;
 		// A restarted Herdr may no longer have its workspace. Keep any surviving cwd users.

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import type { LineageRegistration } from "./lineage.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getPaneProcessInfo } from "./terminal.ts";
+import { currentAppPane, inHerdrApp } from "./herdr-app.ts";
 
 export const SESSION_BINDING_TYPE = "subagent-session-binding";
 
@@ -14,6 +15,11 @@ export function bindSessionRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Ses
 	const sessionFile = manager?.getSessionFile?.();
 	const sessionId = manager?.getSessionId?.();
 	if (!sessionFile || !sessionId) return undefined;
+	const pane = inHerdrApp() ? currentAppPane() : {
+		pane_id: process.env.HERDR_PANE_ID,
+		tab_id: process.env.HERDR_TAB_ID,
+		workspace_id: process.env.HERDR_WORKSPACE_ID,
+	};
 	let binding = readSessionBinding(sessionFile);
 	if (!binding) {
 		binding = { version: 1, sessionId, storeDir: sessionBindingStore() };
@@ -25,18 +31,18 @@ export function bindSessionRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Ses
 		}
 		process.env.PI_SUBAGENT_SESSION = sessionFile;
 		process.env.PI_SUBAGENT_LAUNCHER_PID = String(process.ppid);
-		process.env.PI_SUBAGENT_SURFACE = process.env.HERDR_PANE_ID;
+		process.env.PI_SUBAGENT_SURFACE = pane.pane_id;
 	}
 	let shellPid: number | undefined;
-	try { if (process.env.HERDR_PANE_ID) shellPid = getPaneProcessInfo(process.env.HERDR_PANE_ID).shellPid; } catch { /* No verified pane means no destructive cleanup. */ }
+	try { if (pane.pane_id) shellPid = getPaneProcessInfo(pane.pane_id).shellPid; } catch { /* No verified pane means no destructive cleanup. */ }
 	publishSessionLocation(binding, {
 		shellPid, shellStart: shellPid ? startTime(shellPid) : undefined,
 		serverPid: shellPid ? parentPid(shellPid) : undefined,
 		serverStart: shellPid && parentPid(shellPid) ? startTime(parentPid(shellPid)!) : undefined,
 		sessionFile, cwd: ctx.cwd,
-		paneId: process.env.HERDR_PANE_ID,
-		tabId: process.env.HERDR_TAB_ID,
-		workspaceId: process.env.HERDR_WORKSPACE_ID,
+		paneId: pane.pane_id,
+		tabId: pane.tab_id,
+		workspaceId: pane.workspace_id,
 	});
 	return binding;
 }

@@ -26,12 +26,16 @@ Object.assign(env, {
   HERDR_APP_HOME: join("/tmp", "ra-" + root.split("-").at(-1), "app"), HERDR_APP_NO_SOUND: "1", WAYLAND_DISPLAY: "",
   HC_SESSION: "replicate-" + root.split("-").at(-1), PI_HERDR_APP_CLI: binary,
   PI_CODING_AGENT_DIR: join(root, "agent"), PI_INTEGRATION_HERDR_RUN_DIR: root,
+  // A legacy-only code path must fail inside this run, never reach a user server.
+  HERDR_SOCKET_PATH: join("/tmp", "ra-" + root.split("-").at(-1), "legacy-denied.sock"),
+  HERDR_CONFIG_PATH: join(root, "legacy-config"),
 });
 for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "HERDR_APP_HOME", "PI_CODING_AGENT_DIR"]) mkdirSync(env[key]!, { recursive: true, mode: 0o700 });
 const log = openSync(join(root, "app.log"), "w");
 type Identity = { pid: number; birth: string; group: number };
 const groups: Identity[] = [];
 let core: Identity | undefined;
+const terminalsOwned = new Map<number, Identity>();
 let child: ChildProcess | undefined;
 let app: ChildProcess | undefined;
 let exitCode = 1;
@@ -90,12 +94,19 @@ function shutdown(): Promise<void> {
       // End programs before stopping the core: kept terminals must not be parked
       // with a surviving process when their checkout is removed.
       const terminals = cli("hc", ["ls", "--all"]);
-      for (const terminal of Array.isArray(terminals) ? terminals : terminals.terminals ?? []) {
+      const list = Array.isArray(terminals) ? terminals : terminals.terminals;
+      if (!Array.isArray(list)) throw new Error("The private terminal inventory is invalid.");
+      for (const terminal of list) {
+        if (Number.isSafeInteger(terminal.pid)) {
+          const own = identity(terminal.pid);
+          if (own) terminalsOwned.set(own.pid, own);
+        }
         if (terminal.state === "live") cli("hc", ["kill", terminal.address]);
         cli("hc", ["rm", terminal.address]);
       }
       cli("hc", ["server", "stop"]);
       if (core) await until(() => identity(core!.pid)?.birth !== core!.birth);
+      for (const own of terminalsOwned.values()) await until(() => identity(own.pid)?.birth !== own.birth);
       if (process.env.PI_INTEGRATION_APP_EVIDENCE) {
         mkdirSync(process.env.PI_INTEGRATION_APP_EVIDENCE, { recursive: true });
         for (const name of ["app.log", "runtime.json"]) if (existsSync(join(root, name))) {
@@ -131,6 +142,10 @@ try {
   const source = cli(binary, ["do", "space.new", JSON.stringify({ name: "integration-root", folder: env.HOME, tab: "source" })]);
   if (!source.terminal || !source.space || !source.tab) throw new Error("The private source surface is incomplete.");
   env.HC_TERMINAL_ID = source.terminal;
+  const sourceTerminal = cli("hc", ["get", source.terminal]);
+  const sourceIdentity = identity(sourceTerminal.pid);
+  if (!sourceIdentity) throw new Error("The private source terminal has no live process identity.");
+  terminalsOwned.set(sourceIdentity.pid, sourceIdentity);
   writeFileSync(join(root, "runtime.json"), JSON.stringify({ app: binary, core: status, source, files }));
   child = spawn(process.execPath, ["--experimental-strip-types", "--test", "--test-concurrency=1", ...files], { env, detached: true, stdio: "inherit" });
   if (!child.pid) throw new Error("The integration child did not start.");
