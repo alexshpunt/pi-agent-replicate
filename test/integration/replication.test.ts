@@ -316,7 +316,7 @@ export default function(pi){
 		}
 		it("keeps explicit task names and origins across reload in sessions and results", async () => {
 			const parentFile = join(env.dir, "named-original.jsonl"), capability = join(env.dir, "naming-capability.ts"), settled = join(env.dir, ".pi", "agent", "naming-settled");
-			writeFileSync(capability, `import {appendFileSync,existsSync,readFileSync,writeFileSync} from 'node:fs'; export default function(pi){if(process.env.PI_SUBAGENT_REPLICATION!=='1'){pi.on('session_start',()=>{appendFileSync(${JSON.stringify(settled + '.starts')},'start\\n');pi.setSessionName(existsSync(${JSON.stringify(settled + '.name')})?readFileSync(${JSON.stringify(settled + '.name')},'utf8'):'Настройки-a');});pi.on('agent_settled',(_event,ctx)=>writeFileSync(${JSON.stringify(settled)},String(ctx.sessionManager.getEntries().filter(row=>row.type==='custom_message'&&row.customType==='subagent_result').length)));}}\n`);
+			writeFileSync(capability, `import {appendFileSync,existsSync,readFileSync,writeFileSync} from 'node:fs'; export default function(pi){if(process.env.PI_SUBAGENT_REPLICATION!=='1'){pi.on('session_start',()=>{appendFileSync(${JSON.stringify(settled + '.starts')},'start\\n');pi.setSessionName(existsSync(${JSON.stringify(settled + '.name')})?readFileSync(${JSON.stringify(settled + '.name')},'utf8'):'Настройки-a');});pi.registerCommand('naming-reload',{description:'Reload the naming fixture',async handler(_args,ctx){await ctx.reload();appendFileSync(${JSON.stringify(settled + '.reloads')},'ready\\n');}});pi.on('agent_settled',(_event,ctx)=>writeFileSync(${JSON.stringify(settled)},String(ctx.sessionManager.getEntries().filter(row=>row.type==='custom_message'&&row.customType==='subagent_result').length)));}}\n`);
 			const parent = createTrackedSurface(env, "pane-name-is-not-the-session-name");
 			await waitForPaneReady(parent);
 			const ide = process.env.PI_INTEGRATION_IDE_ENTRY;
@@ -340,8 +340,9 @@ export default function(pi){
 					await waitUntil(() => existsSync(settled) && readFileSync(settled, "utf8") === String(number - 1), "parent must finish handling the previous result before reload");
 					if (number === 3) writeFileSync(settled + ".name", "Настройки");
 					const previousStarts = starts();
-					runInPane(parent, "/reload");
-					await waitUntil(() => starts() === previousStarts + 1, "the new parent runtime must start before launching the next copy");
+					// session_start runs before the reload UI restores editor focus.
+					runInPane(parent, "/naming-reload");
+					await waitUntil(() => starts() === previousStarts + 1 && existsSync(settled + ".reloads") && readFileSync(settled + ".reloads", "utf8").trim().split("\n").length === number - 1, "the reload must finish before launching the next copy");
 				}
 				const taskName = number === 3 ? "a-check-source" : "check-source";
 				runInPane(parent, `Call the replicate tool once with name: "${taskName}", task: "Return exactly EMPTY_COMPLETION"`);
