@@ -136,7 +136,9 @@ export function closeAppPane(id        )       {
   const inventory = spaces(), space = inventory.find(space => space.tabs.some(tab => tab.terminals.some(pane => pane.terminal === id)));
   const tab = space?.tabs.find(tab => tab.terminals.some(pane => pane.terminal === id));
   if (tab && tab.terminals.length !== 1) throw new Error("The owned tab contains another terminal.");
-  const terminal = terminalList().find(terminal => terminal.address === id);
+  const listed = terminalList().find(terminal => terminal.address === id);
+  const terminal = listed ? appCore(["get", id]) : undefined;
+  if (terminal && terminal.address !== id) throw new Error("The core returned another terminal.");
   if (tab) {
     if (terminal?.labels?.["herdr.space"] !== space .id || terminal.labels?.["herdr.tab"] !== tab.id) throw new Error("The terminal's App ownership changed.");
     const reply = operation("terminal.park", { terminal: uiId(id) });

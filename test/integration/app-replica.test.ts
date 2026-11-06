@@ -84,7 +84,8 @@ export default async function(pi){await replica(pi); pi.on('session_start',(_eve
     mkdirSync(evidence, { recursive: true });
     const binary = process.env.PI_INTEGRATION_APP_BIN!;
     execFileSync(binary, ["do", "agent.focus", JSON.stringify({ terminal: parent })], { encoding: "utf8", timeout: 15_000 });
-    execFileSync(binary, ["do", "overlay.close", "{}"], { encoding: "utf8", timeout: 15_000 });
+    const status = JSON.parse(execFileSync(binary, ["status"], { encoding: "utf8", timeout: 15_000 }));
+    assert.ok(!status.overlays.includes("frame-welcome"));
     execFileSync(binary, ["shot", join(evidence, name + ".png")], { timeout: 15_000 });
   };
   try {
@@ -129,7 +130,7 @@ export default async function(pi){await replica(pi); pi.on('session_start',(_eve
     assert.equal(result.details.integration.status, "applied");
     assert.ok(result.content.includes("APP_NATIVE_CHILD_SUMMARY"));
     assert.equal(readFileSync(join(repo, "app-result.txt"), "utf8"), "APP_NATIVE_JOINED\n");
-    await until(() => !existsSync(`/proc/${child.pid}`) && !existsSync(child.cwd), "The applied child process or worktree survived cleanup.");
+    await until(() => !existsSync(`/proc/${child.pid}`) && !existsSync(child.cwd), "The applied child process or worktree survived cleanup.", 15_000);
     const inventory = appCore(["ls", "--all"]);
     assert.ok(!(Array.isArray(inventory) ? inventory : inventory.terminals).some((terminal: { address: string }) => terminal.address === child.pane));
     assert.equal(git("rev-parse", "HEAD"), head);
@@ -154,6 +155,17 @@ export default async function(pi){await replica(pi); pi.on('session_start',(_eve
       cpSync(join(repo, ".git"), join(evidence, "source.git"), { recursive: true });
       const observe = (read: () => unknown) => { try { return read(); } catch (error) { return { error: String(error) }; } };
       const mirror = await import("../../pi-extension/subagents/herdr.js");
+      const binding = await import("../../pi-extension/subagents/session-binding.js");
+      const childRuntime = rows(witness).find(runtime => runtime.child);
+      if (childRuntime) {
+        const work = JSON.parse(readFileSync(join(agent, "subagent-sessions", "replicas", childRuntime.child + ".json"), "utf8"));
+        writeFileSync(join(evidence, "cleanup-guards.json"), JSON.stringify({
+          worktrees: observe(() => mirror.listHerdrWorktrees(repo)),
+          panes: observe(() => JSON.parse(mirror.herdrExec(["pane", "list", "--workspace", work.worktree.workspaceId]))),
+          ownerAlive: observe(() => binding.sessionLocationAlive(work.worktreeLocation)),
+          ownsPane: observe(() => binding.sessionOwnsPane(work.worktreeLocation, work.worktree.paneId, mirror.getHerdrPaneProcessInfo(work.worktree.paneId).shellPid)),
+        }));
+      }
       writeFileSync(join(evidence, "observations.json"), JSON.stringify(rows(witness).map(runtime => ({
         runtime, alive: existsSync(`/proc/${runtime.pid}`),
         core: observe(() => appCore(["get", runtime.pane])),

@@ -31,6 +31,8 @@ Object.assign(env, {
   HERDR_CONFIG_PATH: join(root, "legacy-config"),
 });
 for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "HERDR_APP_HOME", "PI_CODING_AGENT_DIR"]) mkdirSync(env[key]!, { recursive: true, mode: 0o700 });
+// Acknowledge onboarding only in this fresh home; never seed or edit UI layout.
+writeFileSync(join(env.HERDR_APP_HOME!, "shared.json"), JSON.stringify({ "frame.welcomed": "skipped" }));
 const log = openSync(join(root, "app.log"), "w");
 type Identity = { pid: number; birth: string; group: number };
 const groups: Identity[] = [];
@@ -96,7 +98,9 @@ function shutdown(): Promise<void> {
       const terminals = cli("hc", ["ls", "--all"]);
       const list = Array.isArray(terminals) ? terminals : terminals.terminals;
       if (!Array.isArray(list)) throw new Error("The private terminal inventory is invalid.");
-      for (const terminal of list) {
+      for (const listed of list) {
+        const terminal = cli("hc", ["get", listed.address]);
+        if (terminal.address !== listed.address) throw new Error("The private core returned another terminal.");
         if (Number.isSafeInteger(terminal.pid)) {
           const own = identity(terminal.pid);
           if (own) terminalsOwned.set(own.pid, own);
@@ -138,7 +142,6 @@ try {
     if (app!.exitCode !== null) throw new Error("The private App window exited.");
     try { cli(binary, ["status"]); return true; } catch { return false; }
   });
-  cli(binary, ["do", "overlay.close", JSON.stringify({ id: "welcome" })]);
   const source = cli(binary, ["do", "space.new", JSON.stringify({ name: "integration-root", folder: env.HOME, tab: "source" })]);
   if (!source.terminal || !source.space || !source.tab) throw new Error("The private source surface is incomplete.");
   env.HC_TERMINAL_ID = source.terminal;
