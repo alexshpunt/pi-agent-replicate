@@ -33,6 +33,14 @@ Pass an explicit file list. The native runner starts its own App window and core
 
 The native cases cover dirty snapshots, one-result delivery and reload, failed and conflicting work retention, shared directories, terminal ownership and Escape. Installed-package cases exercise both the model tool and the package-root API. Native Windows/macOS process ownership is unsupported; Linux results do not verify those platforms.
 
+### Two-host App route cases
+
+Run `test/integration/app-remote-replica.test.ts` as a separate explicit file through the same isolated runner. It moves a real Pi from the desktop to the laptop, launches a replica through either the inherited controller or explicit App SSH route, checks an independent parent turn and one applied result, then returns the parent to the desktop. It also checks native process identities, source HEAD/index preservation and owned-resource cleanup. The provider replaces inference only; Pi, App, Core, Git and SSH are real.
+
+This fixture requires existing Teleport checkouts with their SDK dependencies on both hosts, trusted `mesh-zinlaptop-wsl` and `zinpc-benchmark` SSH aliases, and a task-owned SSH wrapper that supplies the laptop's private Core session and XDG paths. Set `PI_INTEGRATION_TELEPORT_SOURCE`, `PI_TEST_LAPTOP_SOURCE`, `PI_TEST_LAPTOP_TOOLS`, `PI_INTEGRATION_LAPTOP_REPLICA_SOURCE`, `PI_TEST_LAPTOP_ROOT` and `PI_TEST_LAPTOP_SESSION`. The remote root must be new, outside persistent user state. Do not point the wrapper at the user's Core. `PI_INTEGRATION_APP_EVIDENCE` saves the selected parent while its replica runs, after delivery and after the return.
+
+The SSH override is temporary: after the replica settles, the fixture restores the parent's original controller route so Teleport can retire its lease. These cases settle the replica before moving its parent again. They do not establish portable cross-host lineage or concurrent parent moves.
+
 The project-only fixture type check uses `--skipLibCheck` with the locked SDK's existing declaration incompatibilities. Report dependency declaration errors separately from errors in project code.
 
 ## Manual TUI inspection
