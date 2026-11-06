@@ -23,7 +23,11 @@ Each copy starts with the current conversation, system prompt, model, thinking l
 pi install npm:pi-agent-replicate
 ```
 
-Start Pi inside Herdr, then restart Pi or run `/reload`.
+Start Pi inside Herdr or Herdr App, then restart Pi or run `/reload`.
+
+Native Herdr App support requires Linux, its `hc` core, and the public `herdr-app` CLI. Set `PI_HERDR_APP_CLI` to the App executable when it is not on `PATH`. Copies use the parent's Node and Pi entry point and inherit its App connection configuration.
+
+Native App process ownership is not implemented on Windows or macOS; availability checks refuse those platforms. The existing Herdr CLI backend is unchanged.
 
 ## How it works
 

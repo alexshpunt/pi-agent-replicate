@@ -5,49 +5,24 @@ description: Run the integration test suite and verify all sessions end-to-end. 
 
 # Run integration tests
 
-Run this workflow from inside herdr. This project supports no other terminal backend.
+Use the installed Herdr CLI or native Herdr App backend. The caller does not need an existing Herdr session: the isolated runner starts its own backend. Read [development instructions](../../../docs/development.md) for commands and native fixture prerequisites.
 
 ## Preflight
 
-```bash
-echo "HERDR_ENV=$HERDR_ENV"
-command -v herdr
-npm test
-npm pack --dry-run
-```
-
-Stop and ask the user to start pi inside herdr if `HERDR_ENV` is not `1` or the CLI is missing.
+Run `npm test` and `npm pack --dry-run`. Check that the selected backend executable exists. Native App cases require Linux, an App executable, an actual Pi Node entry point and an available display. Do not substitute a profile wrapper that overwrites the fixture's agent directory. An unavailable platform or backend is a verification gap; do not report it as passing.
 
 ## Integration suite
 
-From the repository root, run the deterministic required suite:
+Run lifecycle and terminal cases only through `test/integration/run-isolated.ts`, with an explicit test file list. Select native App with `PI_INTEGRATION_BACKEND=app` and the executable variables documented in development instructions. Do not set `HERDR_ENV=1` to imitate native App or point tests at the persistent user server.
 
-```bash
-npm run test:integration
-```
+The legacy runner owns a private headless server and socket. The native runner owns a separate App window, core, home and repositories, with the legacy user socket denied. Both runners confirm owned process termination before removing their paths, including on failure and signals.
 
-The harness loads the extension directly from the working tree, creates isolated test agents, and routes every parent and child Pi session to a local scripted provider. The shipped runner starts a separate headless Herdr server with a private socket, config, state directory, and worktree directory. Normal completion and `SIGINT`/`SIGTERM`/`SIGHUP` use one idempotent shutdown: it confirms the child and server process groups have exited, escalates to `SIGKILL` after bounded grace, and removes owned paths only afterward. It clears inherited subagent and Herdr identity variables, so a missing endpoint cannot fall back to the persistent user server. It still exercises real Pi and Herdr lifecycle behavior without provider credentials, network calls, or model-output assertions. Concurrent runs use separate endpoints, so they do not need a manually coordinated shared Herdr slot.
+Use the deterministic provider for lifecycle checks. It scripts inference while Pi, terminal processes and Git remain real. A live-provider smoke test is optional and requires the paid-model-runs workflow. Never replace real terminal or process behavior with fabricated backend responses.
 
-For a focused run, pass the test file after `--`:
+Wait for observable journal, pane, process, file or screen conditions. For App screenshots, wait for the actual selected space, tab and pane. `status.agent` can name an invisible fallback agent. Inspect the saved images before treating them as visual proof.
 
-```bash
-npm run test:integration -- test/integration/mux-surface.test.ts
-```
-
-Integration tests must own and tear down their Herdr workspaces, processes, temporary repositories, and worktrees, including on failure. Wait for observable journal, pane, process, file, or screen conditions. Do not use a fixed sleep to synchronize a transition; deliberate elapsed-time scenarios are the exception.
-
-Use this optional live-provider smoke test only when checking provider compatibility:
-
-```bash
-PI_TEST_MODEL="openai-codex/gpt-5.6-luna" PI_TEST_TIMEOUT=180000 npm run test:integration:live
-```
-
-Report passing, failing, and skipped tests. Do not claim full verification when Herdr-dependent tests were skipped. For package changes, inspect the dry-run contents for the package-root API and `pi-extension/subagents/`. Confirm that plans, journals, sessions, prototypes, generated evidence, local config, bundled roles, and orchestration skills are absent.
+Report passing, failing and skipped counts for each backend. Inspect the package preview for the root API and `pi-extension/subagents/`, including JavaScript mirrors. Plans, sessions, generated evidence, local configuration, bundled roles and orchestration skills must remain excluded.
 
 ## Postflight
 
-```bash
-git status --short
-```
-
-The runner owns its private server and state directory, and removes them after the child test process exits. Confirm the runner reports no failure and that no `herdr server` child from the runner remains. Do not scan or remove global `pi-integ-*` paths: a concurrent foreign root is not this run's resource. If a failed run leaves an artifact, identify ownership from the runner's private socket/state path before removing it. Do not remove unrelated user workspaces, processes, files, or worktrees.
+Check `git status --short` and the runner's teardown result. Remove only paths and processes identified by this run's private resource metadata. Do not scan and remove global `pi-integ-*` directories or unrelated workspaces. Retain a failed run's recovery evidence when ownership or process termination cannot be confirmed.
