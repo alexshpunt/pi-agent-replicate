@@ -10,6 +10,7 @@ import { createConnection } from "node:net";
 
 const execAsync = promisify(execFile);
 const modulePath = fileURLToPath(import.meta.url);
+const helperPath = fileURLToPath(new URL("./herdr-app.js", import.meta.url));
 type Route = { socket: string; token: string; operationId: string };
 type SshRoute = { target: string; session?: string; stateHome?: string; configHome?: string; runtimeDir?: string; appHome?: string; appCli?: string; coreSocketPath?: string };
 type Context = { appMachine?: string; appRoute?: Route; appSsh?: SshRoute };
@@ -59,7 +60,7 @@ function app(args: string[]): any {
   const ctx = context();
   let output: string;
   if (ctx.appRoute) {
-    try { output = execFileSync(process.execPath, ["--experimental-strip-types", modulePath, "--route"], { input: JSON.stringify({ route: ctx.appRoute, args }), encoding: "utf8", timeout: 45_000, maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }); }
+    try { output = execFileSync(process.execPath, [helperPath, "--route"], { input: JSON.stringify({ route: ctx.appRoute, args }), encoding: "utf8", timeout: 45_000, maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }); }
     catch { throw new Error("The App UI outcome is unconfirmed; the request was not replayed."); }
     const reply = JSON.parse(output);
     if (reply.ok !== true) throw new Error(reply.error || "The App UI outcome is unconfirmed.");
@@ -240,7 +241,7 @@ export function appExec(args: string[]): string {
 }
 /** Polling runs in a short-lived helper, not on the interactive Pi event loop. */
 export async function appExecAsync(args: string[]): Promise<string> {
-  const { stdout } = await execAsync(process.execPath, ["--experimental-strip-types", modulePath, "--exec", ...args], { env: process.env, encoding: "utf8", timeout: 65_000, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await execAsync(process.execPath, [helperPath, "--exec", ...args], { env: process.env, encoding: "utf8", timeout: 65_000, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
 }
 if (process.argv[1] === modulePath && process.argv[2] === "--exec") process.stdout.write(appExec(process.argv.slice(3)));

@@ -34,6 +34,8 @@ for (const outcome of ["applied", "conflict", "failed", "empty", "shared"] as co
   const root = join(runRoot, outcome), repo = join(root, "source-repo"), agent = join(root, "agent");
   mkdirSync(agent, { recursive: true });
   const evidence = process.env.PI_INTEGRATION_APP_EVIDENCE ? join(process.env.PI_INTEGRATION_APP_EVIDENCE, outcome) : undefined;
+  const appCli = join(root, "app-cli");
+  writeFileSync(appCli, "#!/bin/sh\nexec " + shellQuote(process.env.PI_INTEGRATION_APP_BIN!) + ' "$@"\n', { mode: 0o700 });
   const parentFile = join(root, "parent.jsonl"), witness = join(root, "starts.jsonl"), release = join(root, "release");
   const wrapper = join(root, "fixture.ts");
   const entry = process.env.PI_INTEGRATION_PI_ENTRY!;
@@ -56,10 +58,16 @@ for (const outcome of ["applied", "conflict", "failed", "empty", "shared"] as co
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false, supportsUsageInStreaming: false },
     models: [{ id: "test", name: "Deterministic fixture", reasoning: false, input: ["text"], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } }));
-  const extension = fileURLToPath(new URL("../../pi-extension/subagents/index.ts", import.meta.url));
+  let extension = fileURLToPath(new URL("../../pi-extension/subagents/index.ts", import.meta.url));
+  if (outcome === "applied") {
+    const packed = JSON.parse(execFileSync("npm", ["pack", "--json", "--pack-destination", root], { cwd: fileURLToPath(new URL("../..", import.meta.url)), encoding: "utf8" }))[0];
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "native-replica-consumer", private: true, type: "module", dependencies: { "pi-agent-replicate": "file:" + join(root, packed.filename) } }));
+    execFileSync("npm", ["install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund"], { cwd: root, encoding: "utf8" });
+    extension = join(root, "node_modules/pi-agent-replicate/pi-extension/subagents/index.ts");
+  }
   writeFileSync(wrapper, `import replica from ${JSON.stringify(extension)};
 import {appendFileSync} from 'node:fs';
-export default async function(pi){await replica(pi); pi.on('session_start',(_event,ctx)=>appendFileSync(${JSON.stringify(witness)},JSON.stringify({pid:process.pid,cwd:process.cwd(),argv:process.argv,pane:process.env.HC_TERMINAL_ID,child:process.env.PI_SUBAGENT_ID,id:ctx.sessionManager.getSessionId(),file:ctx.sessionManager.getSessionFile()})+'\\n'));}
+export default async function(pi){await replica(pi); pi.on('session_start',(_event,ctx)=>appendFileSync(${JSON.stringify(witness)},JSON.stringify({pid:process.pid,cwd:process.cwd(),argv:process.argv,pane:process.env.HC_TERMINAL_ID,child:process.env.PI_SUBAGENT_ID,appCli:process.env.PI_HERDR_APP_CLI,appContext:process.env.PI_TELEPORT_APP_CONTEXT,id:ctx.sessionManager.getSessionId(),file:ctx.sessionManager.getSessionFile()})+'\\n'));}
 `);
   const branches = git("branch", "--list"), trees = git("worktree", "list", "--porcelain");
   let childKilled = false;
@@ -114,7 +122,7 @@ export default async function(pi){await replica(pi); pi.on('session_start',(_eve
   try {
     parent = createSubagentPane("app-native-" + outcome);
     await waitForShellReady(parent);
-    runScriptInPane(parent, `cd ${shellQuote(repo)} && PI_CODING_AGENT_DIR=${shellQuote(agent)} PI_HERDR_APP_CLI=${shellQuote(process.env.PI_INTEGRATION_APP_BIN!)} ${shellQuote(process.execPath)} ${shellQuote(entry)} -ne -e ${shellQuote(wrapper)} --session ${shellQuote(parentFile)} --model pi-integration/test ${shellQuote(outcome === "shared" ? "APP_NATIVE_READY" : "APP_NATIVE_PARENT_START")}`, { scriptPath: join(root, "start-parent.sh") });
+    runScriptInPane(parent, `cd ${shellQuote(repo)} && PI_CODING_AGENT_DIR=${shellQuote(agent)} PI_HERDR_APP_CLI=${shellQuote(appCli)} ${shellQuote(process.execPath)} ${shellQuote(entry)} -ne -e ${shellQuote(wrapper)} --session ${shellQuote(parentFile)} --model pi-integration/test ${shellQuote(outcome === "shared" ? "APP_NATIVE_READY" : "APP_NATIVE_PARENT_START")}`, { scriptPath: join(root, "start-parent.sh") });
     if (outcome === "shared") {
       await until(() => rows(parentFile).some(row => content(row.message?.content).includes("APP_NATIVE_READY_ACK")), "The shared parent did not initialize.");
       runInPane(parent, "/replica-directory shared");
@@ -190,6 +198,8 @@ export default async function(pi){await replica(pi); pi.on('session_start',(_eve
     assert.deepEqual(readFileSync(join(repo, ".git", "index")), index);
     await until(() => rows(parentFile).some(row => content(row.message?.content).includes("APP_NATIVE_PARENT_COMPLETE")), "The native parent did not continue after delivery.");
     await capture("parent-after-result");
+    assert.equal(rows(witness).find(runtime => !runtime.child).appCli, appCli);
+    assert.equal(child.appCli, appCli);
     const starts = rows(witness).filter(row => !row.child).length;
     runInPane(parent, "/reload");
     await until(() => rows(witness).filter(row => !row.child).length > starts, "The native parent did not reload.");

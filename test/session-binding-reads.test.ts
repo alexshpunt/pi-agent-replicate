@@ -78,6 +78,21 @@ test("a concurrent replacement cannot mix one file's header with another file's 
 	finally { fs.readSync = read; syncBuiltinESMExports(); }
 	assert.equal(readSessionBinding(f.file), undefined);
 });
+for (const mutation of ["header", "binding"] as const) test(`same observed timestamps cannot hide a rewritten ${mutation}`, () => {
+  const f = fixture(), source = fs.readFileSync(f.file, "utf8");
+  assert.deepEqual(readSessionBinding(f.file), f.binding);
+  const observed = fs.statSync(f.file), fstat = fs.fstatSync;
+  fs.fstatSync = ((...args: Parameters<typeof fs.fstatSync>) => {
+    const actual = fstat(...args);
+    return Object.assign(actual, { mtimeMs: observed.mtimeMs, ctimeMs: observed.ctimeMs });
+  }) as typeof fs.fstatSync;
+  syncBuiltinESMExports();
+  try {
+    const renamed = f.root.replace("binding-reads", "binding-tests");
+    fs.writeFileSync(f.file, mutation === "header" ? source.replace('"id":"parent"', '"id":"forked"') : source.replace(f.root, renamed));
+    assert.deepEqual(readSessionBinding(f.file), mutation === "header" ? undefined : { ...f.binding, storeDir: renamed });
+  } finally { fs.fstatSync = fstat; syncBuiltinESMExports(); }
+});
 test("replacement, truncation and same-length header rewrites invalidate cached ownership", () => {
 	const f = fixture();
 	const source = fs.readFileSync(f.file, "utf8");

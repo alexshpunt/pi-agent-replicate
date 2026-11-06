@@ -522,7 +522,9 @@ function prepareChildSession(
 ): PreparedSession {
 	const sessionDir = resolved.request.replication?.recordFile
 		? join(resolved.request.replication.recordFile + ".artifacts", "sessions")
-		: getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
+		: inHerdrApp()
+      ? join(resolved.artifactDir, resolved.id, "sessions")
+      : getDefaultSessionDirFor(surface.targetCwd, surface.effectiveAgentDir);
 	mkdirSync(sessionDir, { recursive: true });
 	const timestamp = timestampForFile();
 	const uuid = [resolved.id, randomUUID(), randomUUID(), randomUUID()].join("-");
@@ -656,6 +658,11 @@ function buildPiCommand(
 	parts.push(shellQuote(artifacts.taskArg));
 
 	const env: string[] = [];
+	if (inHerdrApp()) {
+		for (const key of ["PI_HERDR_APP_CLI", "PI_TELEPORT_APP_CONTEXT"]) {
+			env.push(`${key}=${shellQuote(process.env[key] ?? "")}`);
+		}
+	}
 	if (!request.replication) env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
 	if (request.replication) {
 		env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile!)}`);

@@ -136,13 +136,15 @@ export function readSessionBinding(sessionFile) {
         // Keep identity and records on one opened file if the path is replaced.
         const stat = fstatSync(fd);
         const previous = bindingCursors.get(sessionFile);
-        if (previous && previous.dev === stat.dev && previous.ino === stat.ino && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs) {
-            return previous.binding && structuredClone(previous.binding);
-        }
         const header = readHeader(fd);
         if (!header) {
             bindingCursors.delete(sessionFile);
             return undefined;
+        }
+        // Filesystem timestamps can alias rapid rewrites. Ownership requires live bytes.
+        if (previous && previous.dev === stat.dev && previous.ino === stat.ino && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs && previous.ctimeMs === stat.ctimeMs &&
+            previous.sessionId === header.id && readBoundary(fd, stat.size).equals(previous.boundary) && bindingRecordUnchanged(fd, previous)) {
+            return previous.binding && structuredClone(previous.binding);
         }
         // A replaced, truncated or rewritten journal must not retain cached ownership.
         const append = previous && previous.dev === stat.dev && previous.ino === stat.ino && previous.sessionId === header.id && stat.size > previous.size && readBoundary(fd, previous.size).equals(previous.boundary) && bindingRecordUnchanged(fd, previous);
