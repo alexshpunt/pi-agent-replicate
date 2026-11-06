@@ -1,5 +1,6 @@
 import { execFile, execSync, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { currentAppPane, inHerdrApp } from "./herdr-app.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +39,10 @@ function hasCommand(command: string): boolean {
 }
 
 export function isHerdrAvailable(): boolean {
+	if (inHerdrApp()) {
+		if (process.platform !== "linux" || !hasCommand("hc")) return false;
+		try { currentAppPane(); return true; } catch { return false; }
+	}
 	return process.env.HERDR_ENV === "1" && hasCommand("herdr");
 }
 

@@ -22,6 +22,10 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+if (process.env.PI_INTEGRATION_BACKEND === "app") {
+  await import("./run-app-isolated.ts");
+  process.exit(process.exitCode ?? 0);
+}
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const tempParent = join(projectRoot, ".agents", "tmp");
 mkdirSync(tempParent, { recursive: true });
