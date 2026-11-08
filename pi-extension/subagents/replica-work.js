@@ -333,7 +333,7 @@ function cleanupAppReplicaWork(file, parentCwd, initial, context, cancellation) 
             if (afterMove.tree !== record.checkpoint.tree || afterMove.head !== record.checkpoint.head || afterMove.indexHash !== record.checkpoint.indexHash)
                 return false;
         }
-        execFileSync("git", ["worktree", "remove", "--force", removalPath], { cwd: parentCwd, encoding: "utf8" });
+        execFileSync("git", ["worktree", "remove", "--force", removalPath], { cwd: parentCwd, encoding: "utf8", stdio: "pipe" });
         if (existsSync(removalPath))
             throw new Error("Replica worktree cleanup could not be verified.");
     }
@@ -436,7 +436,7 @@ export function cleanupReplicaWork(file, parentCwd, cancellation) {
             if (cwd === worktree.path || cwd === `${worktree.path} (deleted)` || cwd.startsWith(worktree.path + "/"))
                 return false;
         }
-        execFileSync("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentCwd, encoding: "utf8" });
+        execFileSync("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentCwd, encoding: "utf8", stdio: "pipe" });
     }
     if (existsSync(worktree.path))
         throw new Error("Replica worktree cleanup could not be verified.");

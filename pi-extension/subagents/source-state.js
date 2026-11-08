@@ -16,7 +16,7 @@ function gitEnvironment(extra = {}) {
     return env;
 }
 function git(cwd, args, extra, input) {
-    return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, env: gitEnvironment(extra), input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, env: gitEnvironment(extra), input, encoding: "utf8", stdio: "pipe", maxBuffer: 64 * 1024 * 1024 });
 }
 function indexHash(cwd) {
     const path = git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();

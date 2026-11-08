@@ -48,11 +48,11 @@ export function prepareAppCheckoutRemoval(cwd, original, branch, saved, save) {
     if (sourceExists) {
         if (entries.length !== 1 || !samePath(entries[0].path, original))
             return undefined;
-        execFileSync("git", ["worktree", "move", original, saved.target], { cwd, encoding: "utf8", timeout: 60_000 });
+        execFileSync("git", ["worktree", "move", original, saved.target], { cwd, encoding: "utf8", stdio: "pipe", timeout: 60_000 });
     }
     else if (entries.length === 1 && samePath(entries[0].path, original)) {
         // The filesystem rename may have completed before Git wrote its metadata.
-        execFileSync("git", ["worktree", "repair", saved.target], { cwd, encoding: "utf8", timeout: 60_000 });
+        execFileSync("git", ["worktree", "repair", saved.target], { cwd, encoding: "utf8", stdio: "pipe", timeout: 60_000 });
     }
     entries = matches();
     const moved = existsSync(saved.target) && incarnation(saved.target);

@@ -32,7 +32,7 @@ export function createAppWorktree(context: AppContext, name: string, cwd: string
   createWorkspace?: (context: AppContext, path: string, name: string) => AppLocation;
   worktreeRoot?: string;
 } = {}): AppWorktree {
-  const git = (args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 60_000 }).replace(/\r?\n$/, "");
+  const git = (args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 60_000, stdio: "pipe" }).replace(/\r?\n$/, "");
   const repo = git(["rev-parse", "--show-toplevel"]);
   const expected = git(["rev-parse", "--verify", `${base}^{commit}`]);
   git(["check-ref-format", "--branch", branch]);

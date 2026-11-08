@@ -335,7 +335,7 @@ function cleanupAppReplicaWork(file: string, parentCwd: string, initial: Replica
 			const afterMove = snapshotSource(moved, join(file + ".artifacts", "cleanup-final"));
 			if (afterMove.tree !== record.checkpoint!.tree || afterMove.head !== record.checkpoint!.head || afterMove.indexHash !== record.checkpoint!.indexHash) return false;
 		}
-		execFileSync("git", ["worktree", "remove", "--force", removalPath], { cwd: parentCwd, encoding: "utf8" });
+		execFileSync("git", ["worktree", "remove", "--force", removalPath], { cwd: parentCwd, encoding: "utf8", stdio: "pipe" });
 		if (existsSync(removalPath)) throw new Error("Replica worktree cleanup could not be verified.");
 	}
 	writeBindingFile(file, { ...record, cleaned: true });
@@ -409,7 +409,7 @@ export function cleanupReplicaWork(file: string, parentCwd: string, cancellation
 			try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { continue; }
 			if (cwd === worktree.path || cwd === `${worktree.path} (deleted)` || cwd.startsWith(worktree.path + "/")) return false;
 		}
-		execFileSync("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentCwd, encoding: "utf8" });
+		execFileSync("git", ["worktree", "remove", "--force", worktree.path], { cwd: parentCwd, encoding: "utf8", stdio: "pipe" });
 	}
 	if (existsSync(worktree.path)) throw new Error("Replica worktree cleanup could not be verified.");
 	writeBindingFile(file, { ...record, cleaned: true });

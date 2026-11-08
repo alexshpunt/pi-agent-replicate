@@ -44,7 +44,7 @@ function gitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 	return env;
 }
 function git(cwd: string, args: string[], extra?: NodeJS.ProcessEnv, input?: string | Buffer): string {
-	return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, env: gitEnvironment(extra), input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+	return execFileSync("git", ["--literal-pathspecs", ...args], { cwd, env: gitEnvironment(extra), input, encoding: "utf8", stdio: "pipe", maxBuffer: 64 * 1024 * 1024 });
 }
 function indexHash(cwd: string): string {
 	const path = git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
