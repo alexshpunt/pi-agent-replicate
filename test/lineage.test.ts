@@ -280,6 +280,9 @@ test("restores cancellation intent and exact process identity after restart", ()
   appendLineageEvent(root.rootDir, "cancel-identity:cancel-me", "cancel_identity", "cancel-me", { surface: "pane-1", pids: [123, 456] });
   const restored = reduceLineage(root.rootDir).nodes.get("cancel-me");
   assert.deepEqual(restored?.cancellation, { intent: true, surface: "pane-1", pids: [123, 456], proven: false });
+  const app = { paneId: "pane-1", shellPid: 123, coreId: "core", corePid: 700, coreStart: "101", bootId: "boot" };
+  appendLineageEvent(root.rootDir, "cancel-app:cancel-me", "cancel_app_identity", "cancel-me", { app });
+  assert.deepEqual(reduceLineage(root.rootDir).nodes.get("cancel-me")?.cancellation?.app, app);
   appendLineageEvent(root.rootDir, "cancel-proven:cancel-me", "cancel_proven", "cancel-me", { surface: "pane-1", pids: [123, 456] });
   assert.equal(reduceLineage(root.rootDir).nodes.get("cancel-me")?.cancellation?.proven, true);
 });
