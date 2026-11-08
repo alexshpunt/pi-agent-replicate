@@ -57,6 +57,8 @@ Old pending `settled` inbox entries are acknowledged without being sent. This pr
 
 Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. A delivered child leaves the widget immediately; a rejected Herdr close retries a few times with backoff and then stops with a delivery-log record. Its result is not sent again.
 
+In Herdr App, cancellation persists the Core and shell incarnation before parking or killing the exact child terminal. A changed owner, Core or foreground process prevents termination. A confirmed cancellation can resume cleanup after a lost reply; failed source work remains in its checkout. A moved child is retired by its recorded shell identity before its original replica workspace is cleaned.
+
 Replicas do not automatically restart after process loss or inactivity. Their parent receives a failure with available answer/error facts and can create a fresh copy. Normal settlement reports only after session work drains. Ten continuous seconds with Pi idle and no pending messages, movement or undrained descendants retry a missed completion. A saved settlement checkpoint survives reload; without settlement evidence, this safety net reports failure and preserves the answers. Active requests, tools, retries and compaction do not count as stopped time.
 
 Retained non-replica recovery is bounded to three attempts across crash and stale causes. An exhausted child is not killed, resumed or re-delivered on later watchdog passes.
