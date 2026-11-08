@@ -1,12 +1,14 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendLineageInbox, discoverLineageRoots, pendingLineageInboxes, registerLineage } from "../pi-extension/subagents/lineage.ts";
 import { childSessionLocation, parentSessionLocation, publishSessionLocation, readSessionBinding, registerSessionLineage, seedSessionBinding, sessionLocationAlive, beginChildSessionMove, sessionServerAlive, writeBindingFile } from "../pi-extension/subagents/session-binding.ts";
 import { waitForCompletion } from "../pi-extension/subagents/completion.ts";
 import { sessionOwnsPane } from "../pi-extension/subagents/session-binding.ts";
+import { captureLaunchPaneOwnership, launchOwnsPane } from "../pi-extension/subagents/session-binding.ts";
+import { bindSessionRuntime } from "../pi-extension/subagents/session-binding.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -23,6 +25,29 @@ function fixture() {
 	return { root, storeDir, source, moved, destinationDir, lineage };
 }
 
+test("binds terminal ownership to a live process incarnation", () => {
+	const owner = captureLaunchPaneOwnership("t1", process.pid);
+	assert.ok(owner);
+	assert.equal(launchOwnsPane(owner, "t1", process.pid), true);
+	assert.equal(launchOwnsPane({ ...owner, shellStart: "different" }, "t1", process.pid), false);
+	assert.equal(launchOwnsPane(owner, "another-terminal", process.pid), false);
+});
+test("publishes the owned App terminal as the session location", { skip: process.platform === "win32" }, () => {
+	const f = fixture(), previous = { ...process.env };
+	try {
+		seedSessionBinding(f.source, { version: 1, storeDir: f.storeDir });
+		const cli = join(f.root, "hc");
+		writeFileSync(cli, `#!/bin/sh\nprintf '%s\\n' '{"address":"t7","state":"live","pid":${process.pid},"labels":{"herdr.space":"s1","herdr.tab":"b1"}}'\n`); chmodSync(cli, 0o755);
+		process.env.PATH = `${f.root}:${previous.PATH}`;
+		process.env.HC_TERMINAL_ID = "t7"; process.env.HC_SESSION = "test";
+		delete process.env.HERDR_PANE_ID; delete process.env.PI_TELEPORT_APP_CONTEXT;
+		const ctx = { cwd: f.root, sessionManager: { getSessionFile: () => f.source, getSessionId: () => "parent" } };
+		bindSessionRuntime({ appendEntry() {} } as any, ctx as any);
+		const location = parentSessionLocation(f.storeDir, "parent");
+		assert.equal(location?.paneId, "t7"); assert.equal(location?.tabId, "b1"); assert.equal(location?.workspaceId, "s1");
+		assert.equal(location?.shellPid, process.pid);
+	} finally { for (const key of ["PATH", "HC_TERMINAL_ID", "HC_SESSION", "HERDR_PANE_ID", "PI_TELEPORT_APP_CONTEXT"]) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } }
+});
 test("discovers all owned roots after the session moves outside its original directory", () => {
 	const f = fixture();
 	seedSessionBinding(f.source, { version: 1, storeDir: f.storeDir });

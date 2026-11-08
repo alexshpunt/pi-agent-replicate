@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -12,13 +12,35 @@ function fixture() {
 	const repo = join(dir, "repo"), store = join(dir, "store");
 	mkdirSync(repo); mkdirSync(store);
 	const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
-	git("init", "-q"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+	git("init", "-q"); git("config", "core.autocrlf", "false"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
 	writeFileSync(join(repo, "one.txt"), "base one\n"); writeFileSync(join(repo, "two.txt"), "base two\n");
 	writeFileSync(join(repo, ".gitignore"), "ignored\n"); git("add", "."); git("commit", "-qm", "base");
 	const index = () => readFileSync(join(repo, git("rev-parse", "--git-path", "index")));
 	return { dir, repo, store, git, index };
 }
 
+it("joins independent changes with Git that lacks tree merge support", { skip: process.platform === "win32" }, () => {
+	const f = fixture(), path = process.env.PATH;
+	try {
+		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+		const bin = join(f.dir, "bin"); mkdirSync(bin);
+		writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ "$1" = merge-tree ] && [ "$2" = -h ]; then printf '%s\\n' 'usage: git merge-tree <base-tree> <branch1> <branch2>' >&2; exit 129; fi\ncase "$*" in *--write-tree*|*--merge-base=*) exit 129;; esac\nexec '${realGit}' "$@"\n`); chmodSync(join(bin, "git"), 0o755);
+		const worktreesBefore = f.git("worktree", "list", "--porcelain");
+		const base = snapshotSource(f.repo, f.store);
+		writeFileSync(join(f.repo, "two.txt"), "child change\n");
+		const child = snapshotSource(f.repo, f.store);
+		writeFileSync(join(f.repo, "two.txt"), "base two\n");
+		writeFileSync(join(f.repo, "one.txt"), "parent change\n");
+		process.env.PATH = `${bin}:${path}`;
+		const plan = planSourceJoin(f.repo, base.commit, child.commit, f.store);
+		assert.equal(plan.status, "ready");
+		if (plan.status !== "ready") assert.fail("expected a clean merge");
+		applySourceJoin(plan);
+		assert.equal(readFileSync(join(f.repo, "one.txt"), "utf8"), "parent change\n");
+		assert.equal(readFileSync(join(f.repo, "two.txt"), "utf8"), "child change\n");
+		assert.equal(f.git("worktree", "list", "--porcelain"), worktreesBefore);
+	} finally { if (path === undefined) delete process.env.PATH; else process.env.PATH = path; rmSync(f.dir, { recursive: true, force: true }); }
+});
 it("finds the main Herdr allocation anchor while snapshotting a linked child's own files", () => {
 	const f = fixture(), child = join(f.dir, "child");
 	try {
