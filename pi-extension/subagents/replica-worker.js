@@ -2,9 +2,11 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { checkpointReplicaCompletion, cleanupReplicaWork, joinReplicaWork, readReplicaWork } from "./replica-work.js";
 import { materializeReplicationHistory } from "./replica-history.js";
-import { childSessionLocation, parentSessionLocation, sessionLocationAlive, sessionOwnsPane } from "./session-binding.js";
+import { childSessionLocation, parentSessionLocation, sessionLocationAlive, sessionOwnsPane, writeBindingFile } from "./session-binding.js";
+import { getAppContext } from "./app-context.js";
+import { appRetireOperations, retireAppTerminal } from "./app-retire.js";
 import { closeHerdrSurface, getHerdrPaneProcessInfo } from "./herdr.js";
-import { withLineageMutationGate } from "./lineage.js";
+import { reduceLineage, withLineageMutationGate } from "./lineage.js";
 function sameParent(file, expected) {
     const record = readReplicaWork(file);
     const current = parentSessionLocation(dirname(dirname(file)), record.parentSessionId);
@@ -16,17 +18,29 @@ function execute(request) {
     return withLineageMutationGate(request.file + ".artifacts", () => {
         if (request.operation === "cleanup") {
             const record = readReplicaWork(request.file);
+            const cancellation = request.child && reduceLineage(request.child.rootDir).nodes.get(request.child.nodeId)?.cancellation;
             if ((record.worktree?.paneId ?? record.sharedPane) && request.surface !== (record.worktree?.paneId ?? record.sharedPane) && request.child) {
                 const location = childSessionLocation(request.child.rootDir, request.child.nodeId);
-                if (location && sessionLocationAlive(location))
-                    return { cleaned: false };
-                const info = getHerdrPaneProcessInfo(request.surface);
-                if (location && sessionOwnsPane(location, request.surface, info.shellPid)) {
-                    closeHerdrSurface(request.surface);
-                    return { cleaned: false };
+                if (location && sessionLocationAlive(location)) return { cleaned: false };
+                if (record.backend === "app") {
+                    const context = process.env.HERDR_ENV === "1" ? undefined : getAppContext();
+                    const saved = record.appMovedRetirement ?? (cancellation?.proven && cancellation.app?.paneId === request.surface ? cancellation.app : undefined);
+                    const shellPid = saved?.shellPid ?? location?.shellPid;
+                    if (!context || !location || !shellPid || location.paneId !== request.surface) return { cleaned: false };
+                    const ops = appRetireOperations(context, request.surface, () => sessionOwnsPane(location, request.surface, shellPid), value => {
+                        writeBindingFile(request.file, { ...readReplicaWork(request.file), appMovedRetirement: value });
+                    });
+                    if (!retireAppTerminal(request.surface, shellPid, saved, ops)) return { cleaned: false };
+                } else {
+                    const info = getHerdrPaneProcessInfo(request.surface);
+                    if (location && sessionOwnsPane(location, request.surface, info.shellPid)) {
+                        closeHerdrSurface(request.surface);
+                        return { cleaned: false };
+                    }
                 }
             }
-            return { cleaned: cleanupReplicaWork(request.file, request.parentCwd) };
+            const original = record.worktree?.paneId ?? record.sharedPane;
+            return { cleaned: cleanupReplicaWork(request.file, request.parentCwd, cancellation?.proven && cancellation.app?.paneId === original ? cancellation.app : undefined) };
         }
         const saved = readReplicaWork(request.file);
         const completion = { ...request.completion };

@@ -6,6 +6,10 @@ import { closeHerdrSurface, getHerdrPaneProcessInfo, listHerdrWorktrees } from "
 import { applySourceJoin, planSourceJoin, snapshotSource, type SourceJoinReady, type SourceSnapshot } from "./source-state.ts";
 import type { WorktreeLaunch } from "./launch.ts";
 import { processIncarnationAlive, withLineageMutationGate, type ProcessIncarnation } from "./lineage.ts";
+import { getAppContext, type AppContext } from "./app-context.ts";
+import { appSpaces } from "./app-operations.ts";
+import { appRetireOperations, retireAppTerminal, type AppRetirement } from "./app-retire.ts";
+import { appWorkspaceRetired, prepareAppCheckoutRemoval, type AppWorktreeMove } from "./app-cleanup.ts";
 
 /** Durable terminal task facts, separate from the later integration outcome. */
 export interface ReplicaCompletion {
@@ -27,6 +31,10 @@ export interface ReplicaWork {
 	id: string;
 	parentSessionId: string;
 	mode?: "worktree" | "shared";
+	backend?: "app";
+	appRetirement?: AppRetirement;
+	appMovedRetirement?: AppRetirement;
+	appWorktreeMove?: AppWorktreeMove;
 	/** Launch directory and pane for shared replicas. */
 	sharedCwd?: string;
 	sharedPane?: string;
@@ -89,7 +97,7 @@ export function createSharedReplicaWork(file: string, id: string, parentSessionI
 export function attachSharedReplicaPane(file: string, pane: string, sessionFile?: string): void {
 	const record = readReplicaWork(file);
 	if (record.mode !== "shared" || (record.sharedPane && record.sharedPane !== pane)) throw new Error("Invalid shared replica pane.");
-	writeBindingFile(file, { ...record, sharedPane: pane, ...(sessionFile ? { sessionFile } : {}) });
+	writeBindingFile(file, { ...record, sharedPane: pane, ...(process.env.HERDR_ENV !== "1" && process.env.HC_TERMINAL_ID ? { backend: "app" } : {}), ...(sessionFile ? { sessionFile } : {}) });
 }
 
 /** Reserve the latest settled attempt for its exact immediate parent. */
@@ -165,7 +173,7 @@ export function replicaLaunchFailureReported(record: ReplicaWork, entries: reado
 /** Bind allocated worktree and session before the child process can start. */
 export function attachReplicaWork(file: string, worktree: WorktreeLaunch, sessionFile?: string): void {
 	const record = readReplicaWork(file);
-	writeBindingFile(file, { ...record, worktree, ...(sessionFile ? { sessionFile } : {}) });
+	writeBindingFile(file, { ...record, worktree, ...(process.env.HERDR_ENV !== "1" && process.env.HC_TERMINAL_ID ? { backend: "app" } : {}), ...(sessionFile ? { sessionFile } : {}) });
 }
 
 /** Save launch ownership before the child can fail during extension loading. */
@@ -198,8 +206,9 @@ export function checkpointReplicaCompletion(file: string, cwd: string, sessionFi
 	const sessionCheckpoint = join(sessionDir, "session.jsonl");
 	try {
 		writeFileSync(sessionCheckpoint, readFileSync(sessionFile), { mode: 0o600 });
-		for (const path of [sessionCheckpoint, sessionDir]) {
-			const fd = openSync(path, "r");
+		// Windows flushes writable files but not directory handles.
+		for (const path of process.platform === "win32" ? [sessionCheckpoint] : [sessionCheckpoint, sessionDir]) {
+			const fd = openSync(path, process.platform === "win32" ? "r+" : "r");
 			try { fsyncSync(fd); } finally { closeSync(fd); }
 		}
 		record = { ...record, sessionCheckpoint };
@@ -264,10 +273,82 @@ export function joinReplicaWork(file: string, parentCwd: string, parentActive: (
 	return record;
 }
 
+function appCheckoutHasProcesses(path: string): boolean {
+	if (process.platform === "win32") return false; // Windows checks this atomically by moving the directory.
+	for (const pid of readdirSync("/proc").filter(entry => /^\d+$/.test(entry))) {
+		let cwd: string;
+		try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { continue; }
+		if (cwd === path || cwd === `${path} (deleted)` || cwd.startsWith(path + "/")) return true;
+	}
+	return false;
+}
+
+/** Retire only the captured App shell; preserve any checkout containing later work. */
+function cleanupAppReplicaWork(file: string, parentCwd: string, initial: ReplicaWork, context: AppContext, cancellation?: AppRetirement): boolean {
+	let record = initial;
+	const worktree = record.worktree;
+	const pane = record.mode === "shared" ? record.sharedPane : worktree?.paneId;
+	if (!pane) return !worktree;
+	if (record.worktreeLocation && sessionLocationAlive(record.worktreeLocation)) return false;
+	const retirement = record.appRetirement ?? cancellation;
+	const shellPid = retirement?.shellPid ?? record.launchPane?.shellPid ?? record.worktreeLocation?.shellPid;
+	if (!shellPid) return false;
+	const removing = !!worktree && record.integration.status === "applied";
+	if (removing) {
+		if (!record.checkpoint || !record.sessionCheckpoint || !existsSync(record.sessionCheckpoint)) return false;
+		if (existsSync(worktree.path)) {
+			const current = snapshotSource(worktree.path, join(file + ".artifacts", "cleanup-before-move"));
+			if (current.tree !== record.checkpoint.tree || current.head !== record.checkpoint.head || current.indexHash !== record.checkpoint.indexHash) return false;
+		}
+		const space = appSpaces(context).find(item => item.id === worktree.workspaceId);
+		if (space?.tabs.some(tab => tab.terminals.some(item => item.terminal !== pane))) return false;
+	}
+	const owns = () => record.worktreeLocation
+		? sessionOwnsPane(record.worktreeLocation, pane, shellPid) && (!record.launchPane || launchOwnsPane(record.launchPane, pane, shellPid))
+		: !!record.launchPane && launchOwnsPane(record.launchPane, pane, shellPid);
+	const saveRetirement = (value: AppRetirement) => { record = { ...record, appRetirement: value }; writeBindingFile(file, record); };
+	if (!retireAppTerminal(pane, shellPid, retirement, appRetireOperations(context, pane, owns, saveRetirement))) return false;
+	if (!removing || !worktree) { writeBindingFile(file, { ...record, cleaned: true }); return true; }
+	// App's terminal list omits mod panes. A surviving workspace is still
+	// user-owned even when it contains no terminals.
+	if (!appWorkspaceRetired(appSpaces(context), worktree.workspaceId)) return false;
+	if (existsSync(worktree.path) && appCheckoutHasProcesses(worktree.path)) return false;
+	const path = prepareAppCheckoutRemoval(parentCwd, record.appWorktreeMove?.original ?? worktree.path, worktree.branch, record.appWorktreeMove, value => {
+		record = { ...record, appWorktreeMove: value }; writeBindingFile(file, record);
+	});
+	if (path === undefined) return false;
+	if (path !== null) {
+		if (record.worktree!.path !== path) { record = { ...record, worktree: { ...record.worktree!, path } }; writeBindingFile(file, record); }
+		if (appCheckoutHasProcesses(path)) return false;
+		const checkpoint = snapshotSource(path, join(file + ".artifacts", "cleanup"));
+		if (checkpoint.tree !== record.checkpoint!.tree || checkpoint.head !== record.checkpoint!.head || checkpoint.indexHash !== record.checkpoint!.indexHash) return false;
+		let removalPath = path;
+		if (process.platform === "win32") {
+			// A previously quarantined checkout may have acquired a new cwd user
+			// while cleanup was interrupted. Rename again before Git deletes files.
+			const moved = prepareAppCheckoutRemoval(parentCwd, path, worktree.branch, undefined, value => {
+				record = { ...record, appWorktreeMove: value }; writeBindingFile(file, record);
+			});
+			if (!moved) return false;
+			removalPath = moved;
+			record = { ...record, worktree: { ...record.worktree!, path: moved } }; writeBindingFile(file, record);
+			const afterMove = snapshotSource(moved, join(file + ".artifacts", "cleanup-final"));
+			if (afterMove.tree !== record.checkpoint!.tree || afterMove.head !== record.checkpoint!.head || afterMove.indexHash !== record.checkpoint!.indexHash) return false;
+		}
+		execFileSync("git", ["worktree", "remove", "--force", removalPath], { cwd: parentCwd, encoding: "utf8" });
+		if (existsSync(removalPath)) throw new Error("Replica worktree cleanup could not be verified.");
+	}
+	writeBindingFile(file, { ...record, cleaned: true });
+	return true;
+}
 /** Close an owned settled pane; remove its checkout only after safe integration. */
-export function cleanupReplicaWork(file: string, parentCwd: string): boolean {
+export function cleanupReplicaWork(file: string, parentCwd: string, cancellation?: AppRetirement): boolean {
 	const record = readReplicaWork(file), worktree = record.worktree;
 	if (record.cleaned) return true;
+	if (record.backend === "app") {
+		const context = process.env.HERDR_ENV === "1" ? undefined : getAppContext();
+		return context ? cleanupAppReplicaWork(file, parentCwd, record, context, cancellation) : false;
+	}
 	if (record.mode === "shared") {
 		if (!record.sharedPane) return true;
 		if (record.worktreeLocation && sessionLocationAlive(record.worktreeLocation)) return false;

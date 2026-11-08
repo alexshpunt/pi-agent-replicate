@@ -43,6 +43,8 @@ import { runReplicaBackground } from "./replica-background.ts";
 import { reserveReplicaBranch } from "./replica-branch.ts";
 import { getHerdrCurrentPaneTitle, readHerdrScreenAsync } from "./herdr.ts";
 import { replicaWorkFile, createReplicaWork, createSharedReplicaWork, readReplicaWork, saveReplicaRuntime, failReplicaLaunch, replicaLaunchFailureReported, captureReplicaWorkLocation, type ReplicaCompletion } from "./replica-work.ts";
+import { getAppContext } from "./app-context.ts";
+import { appRetireOperations, retireAppTerminal } from "./app-retire.ts";
 import { bindSessionRuntime, beginChildSessionMove, readSessionBinding, childSessionLocation, parentSessionLocation, sessionBindingStore, sessionOwnsPane, sessionLocationAlive, sessionServerAlive, launchOwnsPane, type LaunchPaneOwnership } from "./session-binding.ts";
 
 import { waitForDeliveryDrain } from "./delivery-drain.ts";
@@ -2072,23 +2074,47 @@ async function attemptPendingCancellation(running: RunningSubagent): Promise<boo
     const state = reduceLineage(lineage.rootDir);
     const node = state.nodes.get(running.id);
     if (!node?.cancellation?.intent || node.terminal) return false;
+    const surface = node.cancellation.surface ?? running.surface;
+    const appMode = process.env.HERDR_ENV !== "1" && !!process.env.HC_TERMINAL_ID;
+    let app: ReturnType<typeof getAppContext>;
+    try { app = appMode ? getAppContext() : undefined; } catch { return false; }
+    if (appMode && !app) return false;
     let pids = node.cancellation.pids;
     if (pids.length === 0) {
       let info: { pids: number[] };
-      try { info = getPaneProcessInfo(node.cancellation.surface ?? running.surface); } catch { return false; }
+      try { info = getPaneProcessInfo(surface); } catch { return false; }
       if (info.pids.length === 0) return false;
-      if (!appendLineageEvent(lineage.rootDir, `cancel-identity:${running.id}`, "cancel_identity", running.id, { surface: node.cancellation.surface ?? running.surface, pids: info.pids })) return false;
+      if (app) {
+        const location = childSessionLocation(lineage.rootDir, running.id);
+        if (surface !== running.surface || !childPaneOwned(running) || !location || !sessionLocationAlive(location) || !info.pids.includes(location.pid)) return false;
+      }
+      if (!appendLineageEvent(lineage.rootDir, `cancel-identity:${running.id}`, "cancel_identity", running.id, { surface, pids: info.pids })) return false;
       pids = info.pids;
-    } else {
+    } else if (!app) {
       try {
-        const current = getPaneProcessInfo(node.cancellation.surface ?? running.surface);
+        const current = getPaneProcessInfo(surface);
         if (current.pids.length > 0 && !sameProcessIdentity(pids, current.pids)) return false;
       } catch {
         // The pane may already be gone; the persisted PID identity remains the
         // only safe identity to prove has exited.
       }
     }
-    try { closePane(node.cancellation.surface ?? running.surface); } catch {}
+    if (app) {
+      const saved = node.cancellation.app;
+      const shellPid = saved?.shellPid ?? running.launchPane?.shellPid ?? childSessionLocation(lineage.rootDir, running.id)?.shellPid;
+      if (!shellPid || surface !== running.surface) return false;
+      try {
+        const operations = appRetireOperations(app, surface, () => {
+          const location = childSessionLocation(lineage.rootDir, running.id);
+          return !!location && pids.includes(location.pid) && sessionLocationAlive(location) && childPaneOwned(running);
+        }, value => {
+          if (!appendLineageEvent(lineage.rootDir, `cancel-app:${running.id}`, "cancel_app_identity", running.id, { app: value })) throw new Error("Unable to persist App cancellation identity");
+        });
+        if (!retireAppTerminal(surface, shellPid, saved, operations, { cancelPids: pids })) return false;
+      } catch { return false; }
+    } else {
+      try { closePane(surface); } catch {}
+    }
     let gone: boolean;
     try { gone = await waitForPaneAbsence(node.cancellation.surface ?? running.surface, { timeoutMs: 5_000, intervalMs: 50 }); } catch { gone = false; }
     let survivors: number[];

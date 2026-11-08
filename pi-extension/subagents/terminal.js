@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { windowsScriptInvocation } from "./windows-launch.js";
 import { closeHerdrSurface, createHerdrSurface, createHerdrSurfaceInWorkspace, createHerdrSurfaceSplit, createHerdrWorktree, getHerdrPaneProcessInfo, getHerdrSurfaceTabId, rememberHerdrSurfaceTab, waitForHerdrPiReady, waitForHerdrShellReady, isHerdrAvailable, isProcessAlive, readHerdrScreen, readHerdrScreenAsync, inspectHerdrPane, renameHerdrTab, renameHerdrWorkspace, sendHerdrCommand, sendHerdrEscape, waitForHerdrPaneAbsence, waitForProcessesExit, } from "./herdr.js";
 const SETUP_HINT = "Start pi inside herdr (`herdr`, then run `pi`).";
 export function isTerminalAvailable() {
@@ -62,14 +63,14 @@ export function interruptPane(paneId) {
 }
 export function runScriptInPane(paneId, command, options) {
     const scriptPath = options?.scriptPath ??
-        join(tmpdir(), "pi-herdr-subagent-scripts", `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`);
+        join(tmpdir(), "pi-herdr-subagent-scripts", `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.${process.platform === "win32" ? "ps1" : "sh"}`);
     mkdirSync(dirname(scriptPath), { recursive: true });
-    const scriptLines = ["#!/bin/bash"];
+    const scriptLines = process.platform === "win32" ? [] : ["#!/bin/bash"];
     if (options?.scriptPreamble)
         scriptLines.push(options.scriptPreamble.trimEnd());
     scriptLines.push(command);
-    writeFileSync(scriptPath, `${scriptLines.join("\n")}\n`, { mode: 0o755 });
-    runInPane(paneId, `bash ${shellQuote(scriptPath)}`);
+    writeFileSync(scriptPath, `${process.platform === "win32" ? "\uFEFF" : ""}${scriptLines.join("\n")}\n`, { mode: 0o755 });
+    runInPane(paneId, process.platform === "win32" ? windowsScriptInvocation(scriptPath) : `bash ${shellQuote(scriptPath)}`);
     return scriptPath;
 }
 export function readPane(paneId, lines = 50) {

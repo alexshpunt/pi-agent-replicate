@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { windowsScriptInvocation } from "./windows-launch.ts";
 import {
 	closeHerdrSurface,
 	createHerdrSurface,
@@ -128,17 +129,17 @@ export function runScriptInPane(
 		join(
 			tmpdir(),
 			"pi-herdr-subagent-scripts",
-			`cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`,
+			`cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.${process.platform === "win32" ? "ps1" : "sh"}`,
 		);
 	mkdirSync(dirname(scriptPath), { recursive: true });
 
-	const scriptLines = ["#!/bin/bash"];
+	const scriptLines = process.platform === "win32" ? [] : ["#!/bin/bash"];
 	if (options?.scriptPreamble)
 		scriptLines.push(options.scriptPreamble.trimEnd());
 	scriptLines.push(command);
-	writeFileSync(scriptPath, `${scriptLines.join("\n")}\n`, { mode: 0o755 });
+	writeFileSync(scriptPath, `${process.platform === "win32" ? "\uFEFF" : ""}${scriptLines.join("\n")}\n`, { mode: 0o755 });
 
-	runInPane(paneId, `bash ${shellQuote(scriptPath)}`);
+	runInPane(paneId, process.platform === "win32" ? windowsScriptInvocation(scriptPath) : `bash ${shellQuote(scriptPath)}`);
 	return scriptPath;
 }
 

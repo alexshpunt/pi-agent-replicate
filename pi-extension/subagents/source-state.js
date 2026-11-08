@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { writeBindingFile } from "./session-binding.js";
 function gitEnvironment(extra = {}) {
     const env = { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...extra };
@@ -39,7 +40,7 @@ export function sourceRepositoryAnchor(cwd) {
     const anchor = first[0].slice("worktree ".length);
     if (realpathSync(git(anchor, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim()) !== realpathSync(git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim()))
         throw new Error("Replica repository anchor mismatch.");
-    return anchor;
+    return realpathSync(anchor);
 }
 /** Capture tracked working content and nonignored new files through a private index. */
 export function snapshotSource(cwd, storeDir) {
@@ -84,19 +85,67 @@ export function snapshotSource(cwd, storeDir) {
         rmSync(`${privateIndex}.lock`, { force: true });
     }
 }
+/** Older Git versions need an isolated checkout to perform a full merge. */
+function mergeInTemporaryWorktree(repoDir, left, right) {
+    const root = mkdtempSync(join(tmpdir(), "pi-replica-merge-")), checkout = join(root, "worktree");
+    const hooks = `core.hooksPath=${join(root, "no-hooks")}`;
+    let added = false;
+    try {
+        git(repoDir, ["-c", hooks, "worktree", "add", "--detach", "--no-checkout", checkout, left]);
+        added = true;
+        git(checkout, ["-c", hooks, "reset", "--hard", left]);
+        const result = spawnSync("git", ["-c", hooks, "-c", "user.name=Pi replica host", "-c", "user.email=replica@localhost", "merge", "--no-commit", "--no-ff", "--no-edit", right], {
+            cwd: checkout, env: gitEnvironment({ GIT_MERGE_AUTOEDIT: "no" }), encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+        });
+        if (result.error)
+            throw result.error;
+        if (result.status !== 0) {
+            const conflicts = git(checkout, ["diff", "--name-only", "--diff-filter=U"]);
+            if (result.status === 1 && conflicts.trim())
+                return { status: "conflict", details: result.stdout + result.stderr };
+            throw new Error(`Git could not inspect the replica join: ${result.stderr || result.stdout}`);
+        }
+        return { status: "ready", tree: git(checkout, ["write-tree"]).trim() };
+    }
+    finally {
+        // Never remove anything except the unique checkout created by this call.
+        if (added)
+            git(repoDir, ["worktree", "remove", "--force", checkout]);
+        if (added || !existsSync(checkout))
+            rmSync(root, { recursive: true, force: true });
+    }
+}
 /** Compute child delta against the exact fork basis without changing any parent files. */
 export function planSourceJoin(cwd, baseCommit, childCommit, storeDir) {
     const before = snapshotSource(cwd, storeDir);
-    const result = spawnSync("git", ["merge-tree", "--write-tree", `--merge-base=${baseCommit}`, before.commit, childCommit], {
-        cwd: before.repoDir, env: gitEnvironment(), encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
-    });
-    if (result.error)
-        throw result.error;
-    if (result.status === 1)
-        return { status: "conflict", details: result.stdout };
-    if (result.status !== 0)
-        throw new Error(`Git could not inspect the replica join: ${result.stderr || result.stdout}`);
-    const mergedTree = result.stdout.trim();
+    // Give both sides the exact fork commit as their sole parent so ordinary
+    // merge-base discovery produces the intended three-way merge.
+    const childTree = git(before.repoDir, ["rev-parse", "--verify", `${childCommit}^{tree}`]).trim();
+    const identity = { GIT_AUTHOR_NAME: "Pi replica host", GIT_AUTHOR_EMAIL: "replica@localhost", GIT_COMMITTER_NAME: "Pi replica host", GIT_COMMITTER_EMAIL: "replica@localhost" };
+    const left = git(before.repoDir, ["commit-tree", before.tree, "-p", baseCommit], identity, "Replica join parent\n").trim();
+    const right = git(before.repoDir, ["commit-tree", childTree, "-p", baseCommit], identity, "Replica join child\n").trim();
+    const help = spawnSync("git", ["merge-tree", "-h"], { cwd: before.repoDir, env: gitEnvironment({ LC_ALL: "C" }), encoding: "utf8" });
+    if (help.error)
+        throw help.error;
+    let mergedTree;
+    if (`${help.stdout || ""}\n${help.stderr || ""}`.includes("--write-tree")) {
+        const result = spawnSync("git", ["merge-tree", "--write-tree", left, right], {
+            cwd: before.repoDir, env: gitEnvironment(), encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+        });
+        if (result.error)
+            throw result.error;
+        if (result.status === 1)
+            return { status: "conflict", details: result.stdout };
+        if (result.status !== 0)
+            throw new Error(`Git could not inspect the replica join: ${result.stderr || result.stdout}`);
+        mergedTree = result.stdout.trim();
+    }
+    else {
+        const result = mergeInTemporaryWorktree(before.repoDir, left, right);
+        if (result.status === "conflict")
+            return result;
+        mergedTree = result.tree;
+    }
     if (!/^[a-f0-9]{40,64}$/.test(mergedTree))
         throw new Error("Git returned an invalid merged tree.");
     const paths = git(before.repoDir, ["diff", "--no-renames", "--name-only", "-z", before.tree, mergedTree]).split("\0").filter(Boolean);
@@ -154,7 +203,7 @@ export function applySourceJoin(plan, validateParent = () => { }) {
     for (const path of plan.paths) {
         const absolute = join(current.repoDir, path);
         if (existsSync(absolute) && lstatSync(absolute).isFile()) {
-            const fd = openSync(absolute, "r");
+            const fd = openSync(absolute, process.platform === "win32" ? "r+" : "r");
             try {
                 fsyncSync(fd);
             }
@@ -167,7 +216,8 @@ export function applySourceJoin(plan, validateParent = () => { }) {
                 directories.add(directory);
         }
     }
-    for (const directory of directories) {
+    // Windows cannot flush directory handles; each changed file was flushed above.
+    for (const directory of process.platform === "win32" ? [] : directories) {
         const fd = openSync(directory, "r");
         try {
             fsyncSync(fd);

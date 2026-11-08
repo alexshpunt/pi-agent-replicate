@@ -15,6 +15,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readSessionBinding, readSessionHeader, sessionBindingStore, sessionLineageRoots } from "./session-binding.ts";
 import type { WorktreeLaunch } from "./launch.ts";
+import type { AppRetirement } from "./app-retire.ts";
 import { readExecutionOwner, type ExecutionOwner } from "./execution-owner.ts";
 
 /** Durable launch registration and recursive ownership projection. */
@@ -68,6 +69,7 @@ export interface LineageNodeState {
     intent: boolean;
     surface?: string;
     pids: number[];
+    app?: AppRetirement;
     proven: boolean;
   };
 }
@@ -233,6 +235,7 @@ const eventRank: Record<string, number> = {
   launch_metadata: 1,
   cancel_intent: 2,
   cancel_identity: 3,
+  cancel_app_identity: 3,
   cancel_proven: 4,
   settled_delivered: 5,
   terminal: 6,
@@ -300,13 +303,17 @@ export function reduceLineage(rootDir: string): LineageState {
         ["path", "workspaceId", "paneId", "branch", "baseRef", "baseSha", "manifestFile"].every((key) => typeof (event.worktree as Record<string, unknown>)[key] === "string")) {
         node.worktree = event.worktree as WorktreeLaunch;
       }
-    } else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
-      const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
+    } else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_app_identity" || event.type === "cancel_proven") {
+      const prior: NonNullable<LineageNodeState["cancellation"]> = node.cancellation ?? { intent: false, pids: [], proven: false };
       prior.intent = true;
       if (typeof event.surface === "string") prior.surface = event.surface;
       if (Array.isArray(event.pids)) {
         const pids = event.pids.filter((pid): pid is number => Number.isInteger(pid) && pid > 0);
         if (pids.length > 0) prior.pids = [...new Set(pids)];
+      }
+      if (event.type === "cancel_app_identity" && event.app && typeof event.app === "object") {
+        const app = event.app as Partial<AppRetirement>;
+        if ([app.paneId, app.coreId, app.coreStart, app.bootId].every(value => typeof value === "string" && value.length > 0) && Number.isSafeInteger(app.shellPid) && Number(app.shellPid) > 0 && Number.isSafeInteger(app.corePid) && Number(app.corePid) > 0) prior.app = app as AppRetirement;
       }
       if (event.type === "cancel_proven") prior.proven = true;
       node.cancellation = prior;
