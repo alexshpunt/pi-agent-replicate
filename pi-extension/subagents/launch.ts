@@ -7,7 +7,7 @@ import {
 	renameSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -53,6 +53,7 @@ import type { ReplicationSnapshot } from "./replication.ts";
 import type { ExecutionOwner } from "./execution-owner.ts";
 import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.ts";
 import { sourceRepositoryAnchor } from "./source-state.ts";
+import { windowsLaunchScript } from "./windows-launch.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -404,7 +405,7 @@ function resolveLaunchRequest(request: FreshPiLaunchRequest): ResolvedLaunch {
 			? agentDir
 			: (request.parent.invocationCwd ?? request.parent.cwd);
 	const sourceCwd = rawCwd
-		? rawCwd.startsWith("/")
+		? isAbsolute(rawCwd)
 			? rawCwd
 			: join(cwdBase, rawCwd)
 		: request.parent.cwd;
@@ -617,13 +618,53 @@ function prepareTaskArtifacts(
 	return { ...session, taskArg, systemPromptFile, replicationPromptFile };
 }
 
+function buildWindowsPiCommand(resolved: ResolvedLaunch, artifacts: PreparedArtifacts): string {
+	const { request } = resolved;
+	const script = process.argv[1];
+	if (!script || !existsSync(script)) throw new Error("Cannot locate the current Pi executable for a Windows child.");
+	const executable = process.execPath;
+	const args = [...process.execArgv, script];
+	args.push("--session", artifacts.sessionFile);
+	if (!request.replication) args.push("-e", join(SUBAGENTS_DIR, "subagent-done.ts"));
+	if (process.env.HERDR_ENV === "1" && existsSync(join(homedir(), ".pi/agent/extensions/herdr-agent-state.ts"))) args.push("-e", join(homedir(), ".pi/agent/extensions/herdr-agent-state.ts"));
+	args.push("--model", request.runtimePlan.model, "--thinking", request.runtimePlan.thinking);
+	if (request.replication) args.push(...request.replication.extensionArgs, "-e", join(SUBAGENTS_DIR, "subagent-done.ts"));
+	if (artifacts.systemPromptFile) args.push(request.behavior.systemPromptMode === "replace" ? "--system-prompt" : "--append-system-prompt", artifacts.systemPromptFile);
+	const tools = buildSubagentToolAllowlist(request.behavior.tools, request.behavior.autoExit, request.behavior.includeControlTools ?? true);
+	if (tools) args.push("--tools", tools);
+	args.push(artifacts.taskArg);
+	const env: Record<string, string> = {};
+	if (process.env.PI_TELEPORT_APP_CONTEXT) env.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
+	if (process.env.PI_HERDR_APP_CLI) env.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+	if (!request.replication) Object.assign(env, { PI_SUBAGENT_REPLICATION: "", PI_SUBAGENT_REPLICA_WORK_FILE: "", PI_SUBAGENT_REPLICATION_PROMPT_FILE: "" });
+	else {
+		Object.assign(env, { PI_SUBAGENT_REPLICATION: "1", PI_DENY_TOOLS: "", PI_SUBAGENT_AGENT: "", PI_SUBAGENT_REPLICATION_PROMPT_FILE: artifacts.replicationPromptFile! });
+		if (request.replication.recordFile) env.PI_SUBAGENT_REPLICA_WORK_FILE = request.replication.recordFile;
+	}
+	for (const [key, value] of Object.entries(request.environment ?? {})) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = value;
+	if (resolved.lineage) Object.assign(env, lineageEnvironment(resolved.lineage));
+	if (artifacts.localAgentDir || process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = artifacts.localAgentDir || process.env.PI_CODING_AGENT_DIR!;
+	if (request.behavior.deniedTools.length) env.PI_DENY_TOOLS = request.behavior.deniedTools.join(",");
+	Object.assign(env, {
+		PI_SUBAGENT_NAME: request.name, PI_SUBAGENT_SKILLS: normalizeSkillNames(request.behavior.skills ?? "").join(","),
+		PI_SUBAGENT_AUTO_EXIT: request.behavior.autoExit ? "1" : "0", PI_SUBAGENT_SESSION: artifacts.sessionFile,
+		PI_SUBAGENT_ID: resolved.id, PI_SUBAGENT_ACTIVITY_FILE: artifacts.activityFile,
+		PI_SUBAGENT_SETTLED_EVENTS_FILE: artifacts.settledEventsFile, PI_SUBAGENT_SURFACE: artifacts.surface,
+	});
+	if (request.agent) env.PI_SUBAGENT_AGENT = request.agent;
+	return windowsLaunchScript({ cwd: artifacts.targetCwd, executable, args, env, launcherPidFromShell: !!resolved.lineage });
+}
 function buildPiCommand(
 	resolved: ResolvedLaunch,
 	artifacts: PreparedArtifacts,
 ): string {
+	if (process.platform === "win32") return buildWindowsPiCommand(resolved, artifacts);
 	const { request } = resolved;
+	const app = process.env.HERDR_ENV !== "1" && !!process.env.HC_TERMINAL_ID;
+	const script = process.argv[1];
+	if (app && (!script || !existsSync(script))) throw new Error("Cannot locate the current Pi executable for an App child.");
 	const parts = [
-		"pi",
+		...(app ? [process.execPath, ...process.execArgv, script!].map(shellQuote) : ["pi"]),
 		"--session",
 		shellQuote(artifacts.sessionFile),
 		...(!request.replication ? ["-e", shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts"))] : []),
@@ -653,6 +694,8 @@ function buildPiCommand(
 	parts.push(shellQuote(artifacts.taskArg));
 
 	const env: string[] = [];
+	if (process.env.PI_TELEPORT_APP_CONTEXT) env.push(`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`);
+	if (process.env.PI_HERDR_APP_CLI) env.push(`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`);
 	if (!request.replication) env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
 	if (request.replication) {
 		env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile!)}`);
@@ -709,7 +752,7 @@ function startPiProcess(
 	const launchScriptFile = join(
 		resolved.artifactDir,
 		"subagent-scripts",
-		`${safeName(resolved.request.name) || "subagent"}-${resolved.id}.sh`,
+		`${safeName(resolved.request.name) || "subagent"}-${resolved.id}.${process.platform === "win32" ? "ps1" : "sh"}`,
 	);
 	if (artifacts.worktree) {
 		persistWorktreeResult(artifacts.worktree, "running");
@@ -849,6 +892,8 @@ async function launchResumedPiSubagent(
 			},
 		});
 		const env = [
+			...(process.env.PI_TELEPORT_APP_CONTEXT ? [`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`] : []),
+			...(process.env.PI_HERDR_APP_CLI ? [`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`] : []),
 			...(process.env.PI_CODING_AGENT_DIR
 				? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
 				: []),
@@ -863,9 +908,12 @@ async function launchResumedPiSubagent(
 			`PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS=${shellQuote(JSON.stringify(sessionBaseline.assistantEntryIds))}`,
 			"PI_SUBAGENT_RESUME=1",
 		];
+		const app = process.env.HERDR_ENV !== "1" && !!process.env.HC_TERMINAL_ID;
+		const currentPi = process.argv[1];
+		if (app && (!currentPi || !existsSync(currentPi))) throw new Error("Cannot locate the current Pi executable for an App child.");
 		const command = [
 			...env,
-			"pi",
+			...(app ? [process.execPath, ...process.execArgv, currentPi!].map(shellQuote) : ["pi"]),
 			"--session",
 			shellQuote(request.sessionFile),
 			...(JSON.parse(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION_EXTENSIONS ?? "[]") as string[]).map(shellQuote),
@@ -873,14 +921,31 @@ async function launchResumedPiSubagent(
 			shellQuote(join(SUBAGENTS_DIR, "subagent-done.ts")),
 			...(messageFile ? [shellQuote(`@${messageFile}`)] : []),
 		].join(" ");
+		let launchCommand = `${command}; echo '__SUBAGENT_DONE_'$?'__'`;
+		if (process.platform === "win32") {
+			const script = process.argv[1];
+			if (!script || !existsSync(script)) throw new Error("Cannot locate the current Pi executable for a Windows child.");
+			const args = [...process.execArgv, script];
+			args.push("--session", request.sessionFile, ...(JSON.parse(priorBinding?.child?.environment.PI_SUBAGENT_REPLICATION_EXTENSIONS ?? "[]") as string[]), "-e", join(SUBAGENTS_DIR, "subagent-done.ts"));
+			if (messageFile) args.push(`@${messageFile}`);
+			const windowsEnv: Record<string, string> = {
+				...lineageEnvironment(lineage), PI_SUBAGENT_NAME: request.name, PI_SUBAGENT_SESSION: request.sessionFile,
+				PI_SUBAGENT_ID: id, PI_SUBAGENT_ACTIVITY_FILE: activityFile, PI_SUBAGENT_SETTLED_EVENTS_FILE: settledEventsFile,
+				PI_SUBAGENT_AUTO_EXIT: autoExit ? "1" : "0", PI_SUBAGENT_RESUME_BASELINE_ASSISTANTS: JSON.stringify(sessionBaseline.assistantEntryIds), PI_SUBAGENT_RESUME: "1",
+			};
+			if (process.env.PI_CODING_AGENT_DIR) windowsEnv.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+			if (process.env.PI_TELEPORT_APP_CONTEXT) windowsEnv.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
+			if (process.env.PI_HERDR_APP_CLI) windowsEnv.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+			launchCommand = windowsLaunchScript({ cwd: request.workspace?.cwd ?? process.cwd(), executable: process.execPath, args, env: windowsEnv, launcherPidFromShell: true });
+		}
 		const launchScriptFile = operations.runScript(
 			surface,
-			`${command}; echo '__SUBAGENT_DONE_'$?'__'`,
+			launchCommand,
 			{
 				scriptPath: join(
 					artifactDir,
 					"subagent-scripts",
-					`${safeName(request.name) || "resume"}-resume-${Date.now()}.sh`,
+					`${safeName(request.name) || "resume"}-resume-${Date.now()}.${process.platform === "win32" ? "ps1" : "sh"}`,
 				),
 				scriptPreamble: [
 					`# Subagent resume script for ${request.name}`,

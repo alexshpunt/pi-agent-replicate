@@ -142,6 +142,7 @@ const eventRank = {
     launch_metadata: 1,
     cancel_intent: 2,
     cancel_identity: 3,
+    cancel_app_identity: 3,
     cancel_proven: 4,
     settled_delivered: 5,
     terminal: 6,
@@ -237,7 +238,7 @@ export function reduceLineage(rootDir) {
                 node.worktree = event.worktree;
             }
         }
-        else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_proven") {
+        else if (event.type === "cancel_intent" || event.type === "cancel_identity" || event.type === "cancel_app_identity" || event.type === "cancel_proven") {
             const prior = node.cancellation ?? { intent: false, pids: [], proven: false };
             prior.intent = true;
             if (typeof event.surface === "string")
@@ -246,6 +247,10 @@ export function reduceLineage(rootDir) {
                 const pids = event.pids.filter((pid) => Number.isInteger(pid) && pid > 0);
                 if (pids.length > 0)
                     prior.pids = [...new Set(pids)];
+            }
+            if (event.type === "cancel_app_identity" && event.app && typeof event.app === "object") {
+                const app = event.app;
+                if ([app.paneId, app.coreId, app.coreStart, app.bootId].every(value => typeof value === "string" && value.length > 0) && Number.isSafeInteger(app.shellPid) && Number(app.shellPid) > 0 && Number.isSafeInteger(app.corePid) && Number(app.corePid) > 0) prior.app = app;
             }
             if (event.type === "cancel_proven")
                 prior.proven = true;

@@ -1,10 +1,13 @@
 import { appendFileSync, closeSync, fsyncSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, fstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import type { LineageRegistration } from "./lineage.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getPaneProcessInfo } from "./terminal.ts";
+import { getAppContext } from "./app-context.ts";
+import { appProcessInfo } from "./app-core.ts";
 
 export const SESSION_BINDING_TYPE = "subagent-session-binding";
 
@@ -19,24 +22,30 @@ export function bindSessionRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Ses
 		binding = { version: 1, sessionId, storeDir: sessionBindingStore() };
 		pi.appendEntry(SESSION_BINDING_TYPE, binding);
 	}
+	let app: ReturnType<typeof getAppContext>;
+	try { if (!process.env.HERDR_PANE_ID) app = getAppContext(); } catch { /* Unverified App context cannot own a pane. */ }
 	if (binding.child) {
 		for (const [key, value] of Object.entries(binding.child.environment)) {
 			if ((key.startsWith("PI_SUBAGENT_") || key === "PI_DENY_TOOLS") && typeof value === "string") process.env[key] = value;
 		}
 		process.env.PI_SUBAGENT_SESSION = sessionFile;
 		process.env.PI_SUBAGENT_LAUNCHER_PID = String(process.ppid);
-		process.env.PI_SUBAGENT_SURFACE = process.env.HERDR_PANE_ID;
+		const surface = process.env.HERDR_PANE_ID || app?.paneId;
+		if (surface) process.env.PI_SUBAGENT_SURFACE = surface; else delete process.env.PI_SUBAGENT_SURFACE;
 	}
 	let shellPid: number | undefined;
-	try { if (process.env.HERDR_PANE_ID) shellPid = getPaneProcessInfo(process.env.HERDR_PANE_ID).shellPid; } catch { /* No verified pane means no destructive cleanup. */ }
+	try {
+		if (process.env.HERDR_PANE_ID) shellPid = getPaneProcessInfo(process.env.HERDR_PANE_ID).shellPid;
+		else if (app) shellPid = appProcessInfo(app, app.paneId).shellPid;
+	} catch { /* No verified pane means no destructive cleanup. */ }
+	const serverPid = shellPid ? parentPid(shellPid) : undefined;
 	publishSessionLocation(binding, {
 		shellPid, shellStart: shellPid ? startTime(shellPid) : undefined,
-		serverPid: shellPid ? parentPid(shellPid) : undefined,
-		serverStart: shellPid && parentPid(shellPid) ? startTime(parentPid(shellPid)!) : undefined,
+		serverPid, serverStart: serverPid ? startTime(serverPid) : undefined,
 		sessionFile, cwd: ctx.cwd,
-		paneId: process.env.HERDR_PANE_ID,
-		tabId: process.env.HERDR_TAB_ID,
-		workspaceId: process.env.HERDR_WORKSPACE_ID,
+		paneId: app ? app.paneId : process.env.HERDR_PANE_ID,
+		tabId: app ? app.tabId : process.env.HERDR_TAB_ID,
+		workspaceId: app ? app.workspaceId : process.env.HERDR_WORKSPACE_ID,
 	});
 	return binding;
 }
@@ -91,8 +100,11 @@ export function writeBindingFile(path: string, value: unknown): void {
 		closeSync(fd);
 		fd = undefined;
 		renameSync(temporary, path);
-		const directory = openSync(dirname(path), "r");
-		try { fsyncSync(directory); } finally { closeSync(directory); }
+		// Windows cannot flush a directory handle. The file itself was flushed before rename.
+		if (process.platform !== "win32") {
+			const directory = openSync(dirname(path), "r");
+			try { fsyncSync(directory); } finally { closeSync(directory); }
+		}
 	} finally {
 		if (fd !== undefined) closeSync(fd);
 		try { unlinkSync(temporary); } catch { /* Already published or not created. */ }
@@ -248,18 +260,27 @@ export function seedSessionBinding(sessionFile: string, binding: Omit<SessionBin
 	if (header.type !== "session" || typeof header.id !== "string") throw new Error("Cannot bind a child without a session header");
 	const data: SessionBinding = { ...binding, sessionId: header.id };
 	appendFileSync(sessionFile, JSON.stringify({ type: "custom", id: randomUUID(), parentId: rows.at(-1)?.id ?? null, timestamp: new Date().toISOString(), customType: SESSION_BINDING_TYPE, data }) + "\n");
-	const fd = openSync(sessionFile, "r");
+	const fd = openSync(sessionFile, process.platform === "win32" ? "r+" : "r");
 	try { fsyncSync(fd); } finally { closeSync(fd); }
 	return data;
 }
 
+function windowsProcessValue(pid: number, expression: string): string | undefined {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+	try {
+		const output = execFileSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", expression.replaceAll("%PID%", String(pid))], { encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+		return /^\d+$/.test(output) ? output : undefined;
+	} catch { return undefined; }
+}
 function parentPid(pid: number): number | undefined {
+	if (process.platform === "win32") return Number(windowsProcessValue(pid, "(Get-CimInstance Win32_Process -Filter 'ProcessId = %PID%' -ErrorAction Stop).ParentProcessId")) || undefined;
 	try {
 		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 		return Number(stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[1]) || undefined;
 	} catch { return undefined; }
 }
 function startTime(pid: number): string | undefined {
+	if (process.platform === "win32") return windowsProcessValue(pid, "(Get-Process -Id %PID% -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc()");
 	try {
 		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 		return stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
@@ -271,7 +292,9 @@ export function captureLaunchPaneOwnership(paneId: string, shellPid: number | un
 	if (!shellPid || !Number.isInteger(shellPid) || shellPid <= 0) return undefined;
 	try {
 		const shellStart = startTime(shellPid);
-		const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+		// Windows process creation time is an absolute FILETIME, so pairing it
+		// with the machine name distinguishes incarnations across restarts too.
+		const bootId = process.platform === "win32" ? `win32:${hostname()}` : readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
 		return shellStart && bootId ? { paneId, shellPid, shellStart, bootId } : undefined;
 	} catch { return undefined; }
 }

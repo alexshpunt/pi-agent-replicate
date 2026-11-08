@@ -1,8 +1,15 @@
 import { execFile, execSync, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { getAppContext } from "./app-context.js";
+import { appProcessInfo, appProcessInfoAsync, inspectAppTerminal, readAppTerminal, runAppCore, sendAppCommand, sendAppEscape } from "./app-core.js";
+import { createAppTab } from "./app-operations.js";
+import { AppWorktreeCreateError, createAppWorktree } from "./app-worktree.js";
 const execFileAsync = promisify(execFile);
 const commandAvailability = new Map();
 const surfaceTabs = new Map();
+function appContext() {
+    return process.env.HERDR_ENV === "1" ? undefined : getAppContext();
+}
 function hasCommand(command) {
     if (commandAvailability.has(command)) {
         return commandAvailability.get(command);
@@ -35,8 +42,24 @@ function hasCommand(command) {
     commandAvailability.set(command, available);
     return available;
 }
+let verifiedAppEnvironment;
 export function isHerdrAvailable() {
-    return process.env.HERDR_ENV === "1" && hasCommand("herdr");
+    if (process.env.HERDR_ENV === "1")
+        return hasCommand("herdr");
+    if (!process.env.HC_TERMINAL_ID)
+        return false;
+    const key = JSON.stringify([process.env.HC_TERMINAL_ID, process.env.HC_SESSION, process.env.HC_SOCKET, process.env.HC_TERMINAL_SOCKET, process.env.XDG_STATE_HOME, process.env.XDG_CONFIG_HOME, process.env.XDG_RUNTIME_DIR, process.env.PI_TELEPORT_APP_CONTEXT]);
+    if (verifiedAppEnvironment === key)
+        return true;
+    try {
+        if (!getAppContext())
+            return false;
+        verifiedAppEnvironment = key;
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
 function parseHerdrJson(value) {
     try {
@@ -182,6 +205,12 @@ function buildWorktreeCreateArgs(name, cwd, branch, base) {
     ];
 }
 export function createHerdrSurfaceInWorkspace(name, cwd, workspaceId) {
+    const app = appContext();
+    if (app) {
+        const created = createAppTab(app, workspaceId, cwd, name);
+        rememberHerdrSurfaceTab(created.paneId, created.tabId);
+        return created.paneId;
+    }
     const output = herdrExec(buildTabCreateArgs(name, cwd, workspaceId));
     const { paneId, tabId } = extractHerdrTabSurface(output, "tab create");
     rememberHerdrSurfaceTab(paneId, tabId);
@@ -194,6 +223,9 @@ export function createHerdrSurfaceInWorkspace(name, cwd, workspaceId) {
     return paneId;
 }
 export function createHerdrSurface(name) {
+    const app = appContext();
+    if (app)
+        return createHerdrSurfaceInWorkspace(name, process.cwd(), app.workspaceId);
     // Create a new tab per subagent so parallel spawns each get a full tab
     // instead of ever-narrower splits of the parent pane. Target the current
     // workspace explicitly because Herdr's implicit default may be another space.
@@ -266,6 +298,19 @@ function recoverHerdrWorktree(cwd, branch) {
     };
 }
 export function createHerdrWorktree(name, cwd, branch, base) {
+    const app = appContext();
+    if (app) {
+        try {
+            const created = createAppWorktree(app, name, cwd, branch, base);
+            rememberHerdrSurfaceTab(created.paneId, created.tabId);
+            return created;
+        }
+        catch (error) {
+            if (error instanceof AppWorktreeCreateError)
+                throw new HerdrWorktreeCreateError(error.message, error.worktree);
+            throw error;
+        }
+    }
     const output = herdrExec(buildWorktreeCreateArgs(name, cwd, branch, base));
     try {
         return extractHerdrWorktree(output);
@@ -308,6 +353,9 @@ export function createHerdrSurfaceSplit(name, direction) {
     return paneId;
 }
 export function readHerdrScreen(surface, lines = 50) {
+    const app = appContext();
+    if (app)
+        return runAppCore(app, ["read", "--lines", String(lines), surface]);
     // `visible` is reliable for freshly created panes where herdr's `recent`
     // scrollback may not be populated yet.
     return herdrExec([
@@ -321,6 +369,9 @@ export function readHerdrScreen(surface, lines = 50) {
     ]);
 }
 export async function readHerdrScreenAsync(surface, lines = 50, source = "visible") {
+    const app = appContext();
+    if (app)
+        return readAppTerminal(app, surface, lines);
     return herdrExecAsync([
         "pane",
         "read",
@@ -391,6 +442,15 @@ function parsePaneGetError(error) {
  * - unavailable: server command failed; caller should keep polling
  */
 export async function inspectHerdrPane(surface) {
+    let app;
+    try {
+        app = appContext();
+    }
+    catch (error) {
+        return { kind: "unavailable", error: error instanceof Error ? error.message : String(error) };
+    }
+    if (app)
+        return inspectAppTerminal(app, surface);
     try {
         return parsePaneGetOutput(await herdrExecAsync(["pane", "get", surface]), surface);
     }
@@ -446,10 +506,19 @@ export function parsePaneProcessInfo(output, paneId) {
         foregroundProcesses,
     };
 }
+function appPaneProcessInfo(info) {
+    return { paneId: info.paneId, shellPid: info.shellPid, foregroundProcessGroupId: info.shellOwnsForeground ? info.shellPid : info.foregroundProcessGroupId, pids: [...new Set([info.shellPid, ...info.foregroundProcesses.map(item => item.pid)])], foregroundProcesses: info.foregroundProcesses.map(item => ({ ...item, argv0: item.argv[0], name: item.argv[0]?.split(/[\\/]/).pop() })) };
+}
 export function getHerdrPaneProcessInfo(surface) {
+    const app = appContext();
+    if (app)
+        return appPaneProcessInfo(appProcessInfo(app, surface));
     return parsePaneProcessInfo(herdrExec(["pane", "process-info", "--pane", surface]), surface);
 }
 async function getHerdrPaneProcessInfoAsync(surface) {
+    const app = appContext();
+    if (app)
+        return appPaneProcessInfo(await appProcessInfoAsync(app, surface));
     return parsePaneProcessInfo(await herdrExecAsync(["pane", "process-info", "--pane", surface]), surface);
 }
 function isHerdrShellReady(info) {
@@ -457,7 +526,7 @@ function isHerdrShellReady(info) {
 }
 function isExpectedPiProcess(process, sessionFile, cwd) {
     const sessionIndex = process.argv?.indexOf("--session") ?? -1;
-    return ((process.name === "pi" || process.argv0?.split("/").pop() === "pi") &&
+    return ((process.name === "pi" || process.argv0?.split(/[\\/]/).pop() === "pi" || !!process.argv?.slice(0, 3).some(arg => arg.split(/[\\/]/).pop() === "pi" || /(?:^|[\\/])pi-coding-agent[\\/].*[\\/]cli\.js$/i.test(arg))) &&
         sessionIndex >= 0 &&
         process.argv?.[sessionIndex + 1] === sessionFile &&
         process.cwd === cwd);
@@ -545,11 +614,17 @@ export async function waitForHerdrPaneAbsence(surface, options = {}) {
     return finalInspection.kind === "missing";
 }
 export function sendHerdrCommand(surface, command) {
+    const app = appContext();
+    if (app)
+        return sendAppCommand(app, surface, command);
     // pane run sends the text and Enter in a single socket request, avoiding
     // a race where Enter could arrive before the text is fully processed.
     herdrExec(["pane", "run", surface, command]);
 }
 export function sendHerdrEscape(surface) {
+    const app = appContext();
+    if (app)
+        return sendAppEscape(app, surface);
     herdrExec(["pane", "send-keys", surface, "Escape"]);
 }
 function hasHerdrErrorCode(error, codes) {

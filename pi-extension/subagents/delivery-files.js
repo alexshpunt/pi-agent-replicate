@@ -1,6 +1,9 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, writeSync, } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 function fsyncDirectory(path) {
+    // Windows cannot flush directory handles; the result file itself is flushed.
+    if (process.platform === "win32")
+        return;
     const fd = openSync(path, "r");
     try {
         fsyncSync(fd);
