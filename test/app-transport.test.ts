@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
-import { runApp } from "../pi-extension/subagents/app-transport.ts";
+import { AppCliNotFoundError, runApp, UnknownAppOutcome } from "../pi-extension/subagents/app-transport.ts";
 
 test("routes App commands to the captured local core, not the caller's terminal", { skip: process.platform === "win32" }, () => {
   const dir = mkdtempSync(join(tmpdir(), "replicate-app-transport-"));
@@ -20,6 +20,29 @@ test("routes App commands to the captured local core, not the caller's terminal"
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+
+test("reports a missing App program as a definite failure that names the fix", () => {
+  const dir = mkdtempSync(join(tmpdir(), "replicate-app-missing-"));
+  try {
+    const missing = join(dir, "no-such-app");
+    const context = { paneId: "t7", tabId: "b1", workspaceId: "s1", session: "owned", appMachine: "", appCli: missing };
+    assert.throws(() => runApp(context, ["ls"]), (error: Error) => error instanceof AppCliNotFoundError && !(error instanceof UnknownAppOutcome) && error.message.includes(missing) && error.message.includes("PI_HERDR_APP_CLI"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("finds the App program through HERDR_APP_BIN when the context names none", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "replicate-app-bin-"));
+  const saved = { cli: process.env.PI_HERDR_APP_CLI, bin: process.env.HERDR_APP_BIN };
+  try {
+    const cli = join(dir, "app");
+    writeFileSync(cli, `#!/bin/sh\nprintf '{"argument":"%s"}\\n' "$1"\n`); chmodSync(cli, 0o755);
+    delete process.env.PI_HERDR_APP_CLI; process.env.HERDR_APP_BIN = cli;
+    assert.deepEqual(runApp({ paneId: "t7", tabId: "b1", workspaceId: "s1", session: "owned" }, ["ls"]), { argument: "ls" });
+  } finally {
+    for (const [key, value] of [["PI_HERDR_APP_CLI", saved.cli], ["HERDR_APP_BIN", saved.bin]] as const) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("routes App commands through the saved SSH desktop connection", { skip: process.platform === "win32" }, () => {
   const dir = mkdtempSync(join(tmpdir(), "replicate-app-ssh-"));

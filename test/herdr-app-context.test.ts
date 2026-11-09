@@ -22,6 +22,10 @@ test("validates the current App terminal on its own core connection", { skip: pr
     assert.equal(getAppContext({ ...env, PI_TELEPORT_APP_CONTEXT: routeFile })?.appSsh?.target, "test-host");
     writeFileSync(routeFile, JSON.stringify({ backend: "app", session: "other", appMachine: "test-machine", appSsh: { target: "test-host" } }));
     assert.throws(() => getAppContext({ ...env, PI_TELEPORT_APP_CONTEXT: routeFile }));
+    assert.equal(context.appMachine, undefined, "the machine is learned from the App's listing, not guessed");
+    assert.equal(getAppContext({ ...env, PI_HERDR_APP_MACHINE: " laptop " })?.appMachine, "laptop");
+    assert.equal(getAppContext({ ...env, PI_HERDR_APP_MACHINE: "" })?.appMachine, "");
+    assert.throws(() => getAppContext({ ...env, PI_HERDR_APP_MACHINE: "laptop/t7" }));
     assert.throws(() => getAppContext({ ...env, HC_TERMINAL_SOCKET: "/tmp/wrong" }));
     assert.throws(() => getAppContext({ ...env, HC_TERMINAL_ID: "not-owned" }));
   } finally { rmSync(dir, { recursive: true, force: true }); }
