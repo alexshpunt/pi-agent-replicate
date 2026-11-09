@@ -13,6 +13,13 @@ export function getAppContext(env = process.env) {
         stateHome: env.XDG_STATE_HOME, configHome: env.XDG_CONFIG_HOME, runtimeDir: env.XDG_RUNTIME_DIR,
         appHome: env.HERDR_APP_HOME, appCli: env.PI_HERDR_APP_CLI,
     };
+    // An explicit machine name ("" for the App's own machine) skips detection from the App's listing.
+    if (env.PI_HERDR_APP_MACHINE !== undefined) {
+        const machine = env.PI_HERDR_APP_MACHINE.trim();
+        if (machine.includes("/"))
+            throw new Error("PI_HERDR_APP_MACHINE must be a machine name, not a handle.");
+        context.appMachine = machine;
+    }
     if (env.PI_TELEPORT_APP_CONTEXT) {
         const saved = JSON.parse(readFileSync(env.PI_TELEPORT_APP_CONTEXT, "utf8"));
         const controller = saved.appRoute && [saved.appRoute.socket, saved.appRoute.token, saved.appRoute.operationId].every((v) => typeof v === "string" && v.length > 0);

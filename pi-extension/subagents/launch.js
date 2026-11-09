@@ -13,6 +13,7 @@ import { createSubagentPane, createSubagentPaneInWorkspace, closePane, getPaneTa
 import { readSessionBinding, registerSessionLineage, seedSessionBinding, sessionBindingStore, captureLaunchPaneOwnership } from "./session-binding.js";
 import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.js";
 import { sourceRepositoryAnchor } from "./source-state.js";
+import { forwardedAppEnvironment } from "./app-binary.js";
 import { windowsLaunchScript } from "./windows-launch.js";
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const defaultOperations = {
@@ -398,8 +399,7 @@ function buildWindowsPiCommand(resolved, artifacts) {
     const env = {};
     if (process.env.PI_TELEPORT_APP_CONTEXT)
         env.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
-    if (process.env.PI_HERDR_APP_CLI)
-        env.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+    Object.assign(env, forwardedAppEnvironment());
     if (!request.replication)
         Object.assign(env, { PI_SUBAGENT_REPLICATION: "", PI_SUBAGENT_REPLICA_WORK_FILE: "", PI_SUBAGENT_REPLICATION_PROMPT_FILE: "" });
     else {
@@ -461,8 +461,7 @@ function buildPiCommand(resolved, artifacts) {
     const env = [];
     if (process.env.PI_TELEPORT_APP_CONTEXT)
         env.push(`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`);
-    if (process.env.PI_HERDR_APP_CLI)
-        env.push(`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`);
+    env.push(...Object.entries(forwardedAppEnvironment()).map(([key, value]) => `${key}=${shellQuote(value)}`));
     if (!request.replication)
         env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
     if (request.replication) {
@@ -629,7 +628,7 @@ async function launchResumedPiSubagent(request, operations) {
         });
         const env = [
             ...(process.env.PI_TELEPORT_APP_CONTEXT ? [`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`] : []),
-            ...(process.env.PI_HERDR_APP_CLI ? [`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`] : []),
+            ...Object.entries(forwardedAppEnvironment()).map(([key, value]) => `${key}=${shellQuote(value)}`),
             ...(process.env.PI_CODING_AGENT_DIR
                 ? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
                 : []),
@@ -676,8 +675,7 @@ async function launchResumedPiSubagent(request, operations) {
                 windowsEnv.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
             if (process.env.PI_TELEPORT_APP_CONTEXT)
                 windowsEnv.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
-            if (process.env.PI_HERDR_APP_CLI)
-                windowsEnv.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+            Object.assign(windowsEnv, forwardedAppEnvironment());
             launchCommand = windowsLaunchScript({ cwd: request.workspace?.cwd ?? process.cwd(), executable: process.execPath, args, env: windowsEnv, launcherPidFromShell: true });
         }
         const launchScriptFile = operations.runScript(surface, launchCommand, {

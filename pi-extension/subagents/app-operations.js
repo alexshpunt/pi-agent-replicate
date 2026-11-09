@@ -1,13 +1,46 @@
 import { runApp } from "./app-transport.js";
+/**
+ * The machine name under which the App lists this core's terminals, or "" for the App's own
+ * machine. A WSL core shown by the Windows App is such a machine ("<name>/<id>" handles). A
+ * saved Teleport route or PI_HERDR_APP_MACHINE sets it; otherwise the App's listing tells, by the
+ * terminal, tab and space this terminal is known by, and the answer is kept on the context.
+ */
+export function appMachine(context) {
+    if (context.appMachine !== undefined)
+        return context.appMachine;
+    const result = runApp(context, ["ls"]);
+    if (!Array.isArray(result.spaces))
+        throw new Error("App returned no spaces.");
+    const machines = new Set();
+    for (const space of result.spaces) {
+        const machine = typeof space?.machine === "string" ? space.machine : "";
+        const qualify = (id) => machine ? `${machine}/${id}` : id;
+        if (space?.id !== qualify(context.workspaceId) || !Array.isArray(space.tabs))
+            continue;
+        for (const tab of space.tabs) {
+            if (tab?.id !== qualify(context.tabId) || !Array.isArray(tab.terminals))
+                continue;
+            if (tab.terminals.some((pane) => pane?.terminal === qualify(context.paneId)))
+                machines.add(machine);
+        }
+    }
+    if (machines.size !== 1) {
+        throw new Error(`The Herdr App ${machines.size ? "lists this terminal on several machines" : "does not list this terminal"}. Set PI_HERDR_APP_MACHINE to its machine name, or to an empty value for the App's own machine.`);
+    }
+    context.appMachine = [...machines][0];
+    return context.appMachine;
+}
 function uiId(context, id) {
     if (!id || id.includes("/"))
         throw new Error("Expected an unqualified core handle.");
-    return context.appMachine ? `${context.appMachine}/${id}` : id;
+    const machine = appMachine(context);
+    return machine ? `${machine}/${id}` : id;
 }
 function coreId(context, value) {
     if (typeof value !== "string")
         throw new Error("App returned no native handle.");
-    const prefix = context.appMachine ? `${context.appMachine}/` : "";
+    const machine = appMachine(context);
+    const prefix = machine ? `${machine}/` : "";
     if (!value.startsWith(prefix))
         throw new Error("App returned a handle for another machine.");
     const id = value.slice(prefix.length);
@@ -26,13 +59,14 @@ export function createAppTab(context, workspaceId, cwd, name) {
     return result;
 }
 export function createAppWorkspace(context, cwd, name) {
-    return createItem(context, "space.new", { folder: cwd, name, tab: name, machine: context.appMachine || "" });
+    return createItem(context, "space.new", { folder: cwd, name, tab: name, machine: appMachine(context) });
 }
 export function appSpaces(context) {
     const result = runApp(context, ["ls"]);
     if (!Array.isArray(result.spaces))
         throw new Error("App returned no spaces.");
-    return result.spaces.filter((space) => context.appMachine ? space.machine === context.appMachine : !space.machine).map((space) => ({
+    const machine = appMachine(context);
+    return result.spaces.filter((space) => machine ? space.machine === machine : !space.machine).map((space) => ({
         id: coreId(context, space.id), ...(typeof space.name === "string" ? { name: space.name } : {}),
         ...(typeof space.folder === "string" ? { folder: space.folder } : {}),
         tabs: space.tabs.map((tab) => ({

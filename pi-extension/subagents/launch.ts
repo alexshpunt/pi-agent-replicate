@@ -53,6 +53,7 @@ import type { ReplicationSnapshot } from "./replication.ts";
 import type { ExecutionOwner } from "./execution-owner.ts";
 import { attachReplicaWork, attachSharedReplicaPane, captureReplicaLaunchPane, cleanupReplicaWork, failReplicaLaunch } from "./replica-work.ts";
 import { sourceRepositoryAnchor } from "./source-state.ts";
+import { forwardedAppEnvironment } from "./app-binary.ts";
 import { windowsLaunchScript } from "./windows-launch.ts";
 
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -635,7 +636,7 @@ function buildWindowsPiCommand(resolved: ResolvedLaunch, artifacts: PreparedArti
 	args.push(artifacts.taskArg);
 	const env: Record<string, string> = {};
 	if (process.env.PI_TELEPORT_APP_CONTEXT) env.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
-	if (process.env.PI_HERDR_APP_CLI) env.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+	Object.assign(env, forwardedAppEnvironment());
 	if (!request.replication) Object.assign(env, { PI_SUBAGENT_REPLICATION: "", PI_SUBAGENT_REPLICA_WORK_FILE: "", PI_SUBAGENT_REPLICATION_PROMPT_FILE: "" });
 	else {
 		Object.assign(env, { PI_SUBAGENT_REPLICATION: "1", PI_DENY_TOOLS: "", PI_SUBAGENT_AGENT: "", PI_SUBAGENT_REPLICATION_PROMPT_FILE: artifacts.replicationPromptFile! });
@@ -695,7 +696,7 @@ function buildPiCommand(
 
 	const env: string[] = [];
 	if (process.env.PI_TELEPORT_APP_CONTEXT) env.push(`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`);
-	if (process.env.PI_HERDR_APP_CLI) env.push(`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`);
+	env.push(...Object.entries(forwardedAppEnvironment()).map(([key, value]) => `${key}=${shellQuote(value)}`));
 	if (!request.replication) env.push("PI_SUBAGENT_REPLICATION=''", "PI_SUBAGENT_REPLICA_WORK_FILE=''", "PI_SUBAGENT_REPLICATION_PROMPT_FILE=''");
 	if (request.replication) {
 		env.push("PI_SUBAGENT_REPLICATION=1", "PI_DENY_TOOLS=''", "PI_SUBAGENT_AGENT=''", `PI_SUBAGENT_REPLICATION_PROMPT_FILE=${shellQuote(artifacts.replicationPromptFile!)}`);
@@ -893,7 +894,7 @@ async function launchResumedPiSubagent(
 		});
 		const env = [
 			...(process.env.PI_TELEPORT_APP_CONTEXT ? [`PI_TELEPORT_APP_CONTEXT=${shellQuote(process.env.PI_TELEPORT_APP_CONTEXT)}`] : []),
-			...(process.env.PI_HERDR_APP_CLI ? [`PI_HERDR_APP_CLI=${shellQuote(process.env.PI_HERDR_APP_CLI)}`] : []),
+			...Object.entries(forwardedAppEnvironment()).map(([key, value]) => `${key}=${shellQuote(value)}`),
 			...(process.env.PI_CODING_AGENT_DIR
 				? [`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`]
 				: []),
@@ -935,7 +936,7 @@ async function launchResumedPiSubagent(
 			};
 			if (process.env.PI_CODING_AGENT_DIR) windowsEnv.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 			if (process.env.PI_TELEPORT_APP_CONTEXT) windowsEnv.PI_TELEPORT_APP_CONTEXT = process.env.PI_TELEPORT_APP_CONTEXT;
-			if (process.env.PI_HERDR_APP_CLI) windowsEnv.PI_HERDR_APP_CLI = process.env.PI_HERDR_APP_CLI;
+			Object.assign(windowsEnv, forwardedAppEnvironment());
 			launchCommand = windowsLaunchScript({ cwd: request.workspace?.cwd ?? process.cwd(), executable: process.execPath, args, env: windowsEnv, launcherPidFromShell: true });
 		}
 		const launchScriptFile = operations.runScript(
