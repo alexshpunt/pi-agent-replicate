@@ -25,6 +25,12 @@ pi install npm:pi-agent-replicate
 
 Start Pi inside Herdr, then restart Pi or run `/reload`.
 
+### Herdr App
+
+Copies also work in terminals of the Herdr App (the window plus `herdr-core`), including a WSL terminal shown by the Windows app. Replicate finds the app's command-line program on its own: `PI_HERDR_APP_CLI`, then `HERDR_APP_BIN`, then `herdr-app` on `PATH`, then the Windows installer's folder (from WSL it asks Windows for that folder and translates the path). If it cannot, set `PI_HERDR_APP_CLI` to the full path of `herdr-app` or `herdr-app.exe`.
+
+The app names a WSL or remote core's terminals `<machine>/<id>`. Replicate learns the machine name from the app's own listing. If the listing is ambiguous or does not show the terminal, set `PI_HERDR_APP_MACHINE` to the machine name, or to an empty value for the app's own machine. Copies inherit these three variables.
+
 ## How it works
 
 The extension adds one tool, `replicate`. The agent calls it with a task-specific name and a bounded assignment:
