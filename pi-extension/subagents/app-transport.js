@@ -1,7 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveAppCli } from "./app-binary.js";
 import { appCoreEnvironment } from "./app-core.js";
 export class UnknownAppOutcome extends Error {
+}
+/** The App command could not be started at all, so nothing was applied. */
+export class AppCliNotFoundError extends Error {
+    constructor(command) {
+        super(`The Herdr App command "${command}" was not found. Install Herdr App, or set PI_HERDR_APP_CLI to the full path of its herdr-app executable.`);
+    }
 }
 export class AppCommandError extends Error {
     reply;
@@ -56,10 +63,21 @@ catch(error){if(error.stdout)process.stdout.write(error.stdout);if(error.stderr)
             output = execFileSync("ssh", ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ForwardAgent=no", "-o", "ConnectTimeout=10", route.target, `node -e "eval(Buffer.from('${encoded}','base64').toString())"`], { encoding: "utf8", timeout: 60_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         }
         else {
-            output = execFileSync(context.appCli || (process.platform === "win32" ? "herdr-app.exe" : "herdr-app"), args, { encoding: "utf8", env, timeout: 40_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+            const appCli = resolveAppCli(context.appCli);
+            try {
+                output = execFileSync(appCli, args, { encoding: "utf8", env, timeout: 40_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+            }
+            catch (error) {
+                // A program that could not start ran nothing, so this failure is definite.
+                if (error.code === "ENOENT")
+                    throw new AppCliNotFoundError(appCli);
+                throw error;
+            }
         }
     }
     catch (error) {
+        if (error instanceof AppCliNotFoundError)
+            throw error;
         const stdout = error.stdout?.toString();
         if (!stdout?.trim())
             throw new UnknownAppOutcome(`The App command has no confirmed receipt: ${String(error)}`);
