@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Type, type Static } from "@sinclair/typebox";
 export { materializeReplicationHistory } from "./replica-history.ts";
 import type { SessionEntry, ReplicationContextMessage } from "./session.ts";
+import type { ReplicaWork } from "./replica-work.ts";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -16,7 +17,7 @@ export const ReplicateParams = Type.Object({
 export type ReplicateRequest = Static<typeof ReplicateParams>;
 
 /** Register the single fresh-copy tool without model-facing continuation controls. */
-export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext, toolCallId: string) => Promise<{ id: string; name: string; sessionFile: string }>): void {
+export function registerReplicateTool(pi: ExtensionAPI, launch: (params: ReplicateRequest, ctx: ExtensionContext, toolCallId: string) => Promise<{ id: string; name: string; sessionFile: string; worktreePath?: string; branch?: string }>): void {
 	pi.registerTool({
 		name: "replicate", label: "Replicate",
 		description: "Run a clearly defined part of your task in parallel with another copy of yourself while you continue a different part. The copy's result returns automatically to this session.",
@@ -37,11 +38,20 @@ export function registerReplicateTool(pi: ExtensionAPI, launch: (params: Replica
 			if (typeof params.task !== "string" || !params.task.trim()) throw new Error("Replication needs a nonempty task.");
 			const child = await launch(params, ctx, toolCallId);
 			return {
-				content: [{ type: "text", text: `${child.name} started. Its result will arrive here automatically.` }],
+				content: [{ type: "text", text: replicationStarted(child, ctx.cwd) }],
 				details: { ...child, status: "running" },
 			};
 		},
 	});
+}
+
+/** Name where the copy works, so its result can be traced back to a location. */
+function replicationStarted(child: { name: string; worktreePath?: string; branch?: string }, cwd: string | undefined): string {
+	if (child.worktreePath) {
+		const branch = child.branch ? ` on branch ${child.branch}` : "";
+		return `${child.name} started in its own worktree ${child.worktreePath}${branch}. Its result will arrive here automatically; when it succeeds, its changes are applied to your working directory.`;
+	}
+	return `${child.name} started${cwd ? ` in your directory ${cwd}` : ""}. Its result will arrive here automatically.`;
 }
 
 /** Add the immediate parent's readable origin to the caller's task name. */
@@ -86,14 +96,36 @@ export function replicationExtensionArgs(argv: readonly string[], cwd: string): 
 	}
 	return args;
 }
-/** Give the parallel copy only its bounded assignment and result requirement. */
-export function replicationAssignment(task: string): string {
+/** Give the parallel copy its bounded assignment, where its changes go and its result requirement. */
+export function replicationAssignment(task: string, mode: "worktree" | "shared"): string {
 	return [
 		"You are a parallel copy of the agent working on this task.",
 		"Complete only the assignment below.",
+		mode === "worktree"
+			? "You work in your own copy of the files. When you finish successfully, your changes, committed or not, are applied to the original agent's working directory automatically; do not copy them there yourself."
+			: "You work in the original agent's directory, and it sees your changes immediately.",
 		"Return a clear summary of the result and any unresolved issues.",
 		"",
 		"Your assignment:",
 		task,
 	].join("\n");
+}
+
+const reportedPathLimit = 20;
+/** Tell the parent where the copy's changes are now, so it never looks for them in a removed checkout. */
+export function replicaWorkReport(work: Pick<ReplicaWork, "mode" | "integration" | "joinPlan" | "worktree">, failed: boolean): string {
+	if (work.mode === "shared") return failed ? "The copy worked in the shared directory; partial changes may already be present." : "";
+	const kept = work.worktree ? ` Its work, including uncommitted changes, is kept in ${work.worktree.path} on branch ${work.worktree.branch}.` : "";
+	switch (work.integration.status) {
+		case "applied": {
+			const paths = work.joinPlan?.paths;
+			if (!paths) return "Its changes were applied to your working directory and are not committed.";
+			if (!paths.length) return "It had no file changes to apply to your working directory.";
+			const more = paths.length - reportedPathLimit;
+			return `Its changes were applied to your working directory and are not committed: ${paths.slice(0, reportedPathLimit).join(", ")}${more > 0 ? `, and ${more} more` : ""}.`;
+		}
+		case "conflict": return `The copy finished, but its changes conflict with your current work and were not included.${kept}`;
+		case "not-attempted": return `The copy's unfinished work was not included in your work.${kept}`;
+		default: return `The copy finished, but its changes could not be safely included in your work.${kept}`;
+	}
 }
