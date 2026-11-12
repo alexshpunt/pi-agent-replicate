@@ -491,7 +491,7 @@ describe("TS-02 result file contents", () => {
 });
 
 describe("TS-05 result files and Pi session discovery coexistence", () => {
-	/** Pi 0.84.4 does not re-export session discovery through its package exports map. */
+	/** Pi does not re-export session discovery through its package exports map. */
 	async function loadFindMostRecentSession(): Promise<
 		(sessionDir: string, cwd?: string) => string | null
 	> {
