@@ -9,7 +9,7 @@ test("retires only the verified shell and resumes after an interrupted kill", ()
   const operations = {
     coreIdentity: () => ({ id: "private-core", pid: 700, start: "123", bootId: "boot" }),
     terminal: () => removed ? undefined : ({ state: live ? "live" : "finished", pid: 900 }),
-    foreground: () => ({ shellPid: 900, shellOwnsForeground: true, foregroundProcesses: [{ pid: 900, cwd: "/x", argv: ["sh"] }] }),
+    foreground: () => ({ paneId: "t4", shellPid: 900, shellOwnsForeground: true, foregroundProcesses: [{ pid: 900, cwd: "/x", argv: ["sh"] }] }),
     isVisible: () => visible,
     park: () => { calls.push("park"); visible = false; },
     kill: () => { calls.push("kill"); live = false; if (crash) { crash = false; throw new Error("lost reply"); } },
@@ -32,7 +32,7 @@ test("cancellation retires only the captured active processes and survives a los
   const ops = {
     coreIdentity: () => ({ id: "core", pid: 100, start: "101", bootId: "boot" }),
     terminal: () => state === "missing" ? undefined : { state, pid: 900 },
-    foreground: () => ({ shellPid: 900, shellOwnsForeground: false, foregroundProcesses: [{ pid: foreign ? 903 : 902, cwd: "/x", argv: ["pi"] }] }),
+    foreground: () => ({ paneId: "t4", shellPid: 900, shellOwnsForeground: false, foregroundProcesses: [{ pid: foreign ? 903 : 902, cwd: "/x", argv: ["pi"] }] }),
     isVisible: () => visible,
     park: () => { calls.push("park"); visible = false; },
     kill: () => { calls.push("kill"); state = "finished"; throw new Error("lost reply"); },

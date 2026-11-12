@@ -523,7 +523,9 @@ function installChildLifecycle(pi: ExtensionAPI, initialContext: ExtensionContex
 
   on("before_agent_start", (event, ctx) => {
     settledChildResultId =
-      settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
+      ("prompt" in event
+        ? settledChildIdFromPrompt(event.prompt)
+        : settledChildIdFromMessage(event.message)) ?? settledChildResultId;
     if (replication) { closureVersion++; clearStop(); interruptRequested = false; }
     // Each run needs fresh agent_end evidence; never reuse a prior clean turn.
     latestAgentEndMessages = undefined;
