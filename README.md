@@ -23,7 +23,7 @@ Each copy starts with the current conversation, system prompt, model, thinking l
 pi install npm:pi-agent-replicate
 ```
 
-Start Pi inside Herdr, then restart Pi or run `/reload`.
+Start Pi inside Herdr, then restart Pi or run `/reload`. This release is tested with Pi 1.5.2.
 
 ### Herdr App
 
