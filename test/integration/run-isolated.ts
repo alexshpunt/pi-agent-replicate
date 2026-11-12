@@ -19,7 +19,7 @@ import {
   watch,
   type FSWatcher,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -302,6 +302,11 @@ environment.PI_CODING_AGENT_DIR = join(runDir, "agent");
 environment.PI_INTEGRATION_HERDR_AGENT_DIR = environment.PI_CODING_AGENT_DIR;
 mkdirSync(environment.PI_CODING_AGENT_DIR, { recursive: true });
 
+// Every parent session starts `pi` from PATH, and children reuse the parent's
+// executable. Put the pinned devDependency first so `npm run test:integration`
+// and a direct runner call test the same Pi, whatever Pi is installed globally.
+environment.PATH = [join(projectRoot, "node_modules", ".bin"), environment.PATH].filter(Boolean).join(delimiter);
+
 environment.PI_INTEGRATION_HERDR_SOCKET = socket;
 environment.PI_INTEGRATION_HERDR_RUN_DIR = runDir;
 environment.PI_INTEGRATION_HERDR_WORKTREE_DIR = worktreeDir;
@@ -407,9 +412,17 @@ try {
     trackProcess(server);
     serverIdentity = captureProcessIdentity(server, "Herdr server");
   } else {
+    const manifest = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
+    const testedPi = manifest.devDependencies["@earendil-works/pi-coding-agent"];
+    const piVersion = spawnSync("pi", ["--version"], { encoding: "utf8", env: environment }).stdout?.trim();
+    if (piVersion !== testedPi) {
+      throw new Error(
+        `The suite runs Pi ${testedPi} from devDependencies, but \`pi --version\` reports ${piVersion || "nothing"}. Run npm install.`,
+      );
+    }
     const evidence = {
-      piVersion: spawnSync("pi", ["--version"], { encoding: "utf8" }).stdout.trim(),
-      subagentsVersion: JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8")).version,
+      piVersion,
+      subagentsVersion: manifest.version,
       subagentsSource: spawnSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim(),
       uncommitted: Boolean(spawnSync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim()),
       ide: { loaded: false, latestSource: process.env.PI_INTEGRATION_IDE_SOURCE_COMMIT ?? null },
