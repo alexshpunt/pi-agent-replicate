@@ -1,5 +1,6 @@
 .pi/
 test/
+tsconfig.json
 .agents/
 .lpt/
 .mesh/
