@@ -13,7 +13,7 @@ test("settled App replica retires its own terminal and removes only the joined c
   const root = mkdtempSync(join(tmpdir(), "replicate-app-cleanup-")), repo = join(root, "repo"), checkout = join(root, "checkout"), store = join(root, "store");
   mkdirSync(repo); mkdirSync(store);
   const saved = { ...process.env };
-  Object.assign(process.env, { HC_SESSION: randomUUID().slice(0, 8), XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_RUNTIME_DIR: join(root, "runtime") });
+  Object.assign(process.env, { HC_SESSION: randomUUID().slice(0, 8), XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_RUNTIME_DIR: join(root, "runtime"), PI_HERDR_APP_MACHINE: "" });
   for (const key of ["HERDR_ENV", "HC_TERMINAL_ID", "HC_SOCKET", "HC_TERMINAL_SOCKET", "HC_SCOPE", "PI_TELEPORT_APP_CONTEXT"]) delete process.env[key];
   const hc = (...args: string[]) => JSON.parse(execFileSync("hc", args, { encoding: "utf8", timeout: 15000 }));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
