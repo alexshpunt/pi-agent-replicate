@@ -4,7 +4,7 @@
 
 ## Shipped surface
 
-The experimental model-facing surface is exactly one tool: `replicate({ name, task })`. Its schema never gains continuation parameters. One invocation creates one fresh copy in a pane, using a dedicated worktree by default or the parent directory when configured for the project. A user command selects the directory mode. The package ships no bundled roles, review workflows or orchestration skills.
+The experimental model-facing surface is exactly one tool: `replicate({ name, task })`. Its schema never gains continuation parameters. One invocation creates one fresh copy in a pane, using a dedicated worktree by default or the parent directory when configured for the project. A user command selects the directory mode for the project or globally; the project setting takes precedence. The package ships no bundled roles, review workflows or orchestration skills.
 
 The old model-facing role, completion and help tools are removed. The internal launcher and package-root tree API remain available for callers that need custom roles, bare children or managed worktrees. Their contracts are separate from replication.
 

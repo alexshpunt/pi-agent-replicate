@@ -62,6 +62,14 @@ Shared copies work in the parent's current directory, including ignored files an
 
 Use `/replica-directory worktree` to switch back, or `/replica-directory` to choose interactively. The setting is saved in `.pi/replicate.json` in the current project directory and applies to new copies only.
 
+To use shared mode in every project, add `--global`:
+
+```text
+/replica-directory --global shared
+```
+
+The global setting is saved in `replicate.json` in the Pi agent directory (`~/.pi/agent` by default, or `PI_CODING_AGENT_DIR`). A project's own `.pi/replicate.json` takes precedence over it; without either file, copies use worktrees.
+
 ## When a copy stops
 
 A completed copy returns its summary automatically. If it fails, is interrupted or loses its process, the parent receives a failure and any available answer information. Copies do not restart automatically; the parent can create a fresh copy if needed. In worktree mode, failed or conflicted work remains available for recovery; in shared mode, changes may already be in the shared directory.
