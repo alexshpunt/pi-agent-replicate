@@ -14,7 +14,7 @@ test("recognizes an owned Herdr App terminal without the legacy Herdr environmen
     chmodSync(hc, 0o755);
     const module = resolve("pi-extension/subagents/herdr.ts");
     const code = `import {isHerdrAvailable} from ${JSON.stringify(module)}; console.log(JSON.stringify(isHerdrAvailable()));`;
-    const env = { ...process.env, HC_TERMINAL_ID: "t7", PATH: `${dir}:${process.env.PATH}` };
+    const env: NodeJS.ProcessEnv = { ...process.env, HC_TERMINAL_ID: "t7", PATH: `${dir}:${process.env.PATH}` };
     delete env.HERDR_ENV;
     delete env.PI_TELEPORT_APP_CONTEXT;
     delete env.HC_SOCKET;
