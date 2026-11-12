@@ -20,7 +20,7 @@ for (const backend of getAvailableBackends()) describe(`shared replica (${backen
  let env: TestEnv;
  beforeEach(() => { env = createTestEnv(backend, { replication: true }); });
  afterEach(async () => { await cleanupTestEnv(env); });
- for (const [outcome, answer] of [["success", "REPLICATION_SUMMARY"], ["failure", "EMPTY_COMPLETION"], ["recovery", "REPLICATION_SUMMARY"]]) {
+ for (const [outcome, answer] of [["success", "REPLICATION_SUMMARY"], ["failure", "EMPTY_COMPLETION"], ["recovery", "REPLICATION_SUMMARY"], ["global", "REPLICATION_SUMMARY"]]) {
   it(`uses the parent's files and delivers ${outcome} without a worktree`, async () => {
    const session = join(env.dir, "parent.jsonl"), capability = join(env.dir, "capability.ts");
    const ready = join(env.dir, ".pi", "agent", "probe-ready"), gate = ready + "-gate";
@@ -30,10 +30,11 @@ for (const backend of getAvailableBackends()) describe(`shared replica (${backen
    const parent = createTrackedSurface(env, "shared-parent"); await waitForPaneReady(parent);
    startPi(parent, env.dir, "Return exactly ORIGINAL_READY", { extraArgs: `--session ${shellQuote(session)} -e ${shellQuote(capability)}` });
    await until(() => entries(session).some(x => x.message?.role === "assistant"), "parent ready");
-   runInPane(parent, "/replica-directory shared");
-   const settings = join(env.dir, ".pi", "replicate.json");
+   runInPane(parent, outcome === "global" ? "/replica-directory --global shared" : "/replica-directory shared");
+   const settings = outcome === "global" ? join(env.dir, ".pi", "agent", "replicate.json") : join(env.dir, ".pi", "replicate.json");
    await until(() => existsSync(settings), "command persisted setting");
    assert.equal(JSON.parse(readFileSync(settings, "utf8")).directoryMode, "shared");
+   if (outcome === "global") assert.equal(existsSync(join(env.dir, ".pi", "replicate.json")), false);
    const branches = execFileSync("git", ["branch", "--list"], { cwd: env.dir, encoding: "utf8" });
    const trees = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: env.dir, encoding: "utf8" });
    runInPane(parent, `Call the replicate tool once with task: "Use replication_probe then Return exactly ${answer}"`);
