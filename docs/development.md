@@ -4,12 +4,14 @@
 npm test
 npm run lint
 npm pack --dry-run
-npx tsc --noEmit index.ts
+npm run typecheck
 node --check index.js
 git diff --check
 ```
 
 `npm test` loads `test/no-app-terminal.ts` first. It removes the Herdr App terminal variables (`HC_*`) and the App routing settings from the environment, so the unit tests give the same results in a Herdr App terminal as anywhere else. A test of App behavior sets the App environment it needs itself.
+
+`npm run typecheck` runs `tsc -p tsconfig.json`. The config covers `index.ts`, `pi-extension` and `test`, loads the Node types and checks in strict mode, so editors use it for `test/` too. Install the pinned TypeScript with `npm ci` first. Don't run `tsc index.ts`: it ignores the config and fails on `.ts` import paths.
 
 The isolated runner tests the Pi that `devDependencies` pin, from `node_modules/.bin`, whether you call it through npm or directly. It prints that version as `piVersion` and stops if `pi --version` does not match the pinned version, which happens when `node_modules` is stale. To test another Pi version, change the three `@earendil-works/pi-*` devDependencies and the tested version in `README.md`, then run `npm install`.
 

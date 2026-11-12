@@ -22,6 +22,6 @@ TypeScript modules under `pi-extension/subagents` that have JavaScript mirrors m
 
 ## Checks
 
-- If `index.ts`, `index.js` or `index.d.ts` changes, run `npx tsc --noEmit index.ts` and `node --check index.js`.
+- Run `npm run typecheck` (`tsc -p tsconfig.json`, which covers `index.ts`, `pi-extension` and `test`) after any TypeScript change. If `index.ts`, `index.js` or `index.d.ts` changes, also run `node --check index.js`.
 - Inspect package contents with `npm pack --dry-run`.
 - Run lifecycle and Herdr cases through `test/integration/run-isolated.ts` with an explicit file list (see `README.md`). Never point tests at the user's persistent Herdr server.
