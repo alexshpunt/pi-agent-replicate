@@ -433,7 +433,9 @@ function installChildLifecycle(pi, initialContext) {
     });
     on("before_agent_start", (event, ctx) => {
         settledChildResultId =
-            settledChildIdFromPrompt(event.prompt) ?? settledChildResultId;
+            ("prompt" in event
+                ? settledChildIdFromPrompt(event.prompt)
+                : settledChildIdFromMessage(event.message)) ?? settledChildResultId;
         if (replication) {
             closureVersion++;
             clearStop();
