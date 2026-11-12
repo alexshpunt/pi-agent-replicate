@@ -35,7 +35,7 @@ import { acknowledgeExitSidecar, acknowledgePingSidecar, waitForCompletion } fro
 import { materializeResultFile } from "./delivery-files.ts";
 import { frameDeliveryPayload, type DeliveryStatus } from "./delivery-payload.ts";
 import subagentLifecycle, { hasChildLifecycle } from "./subagent-done.ts";
-import { registerReplicateTool, replicationName, replicationAssignment, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
+import { registerReplicateTool, replicationName, replicationAssignment, replicaWorkReport, replicationExtensionArgs, replicationContextMessages } from "./replication.ts";
 import { readReplicaDirectoryMode, registerReplicaDirectoryCommand } from "./replica-directory-settings.ts";
 import { snapshotSource } from "./source-state.ts";
 import { linkedOutputDetails, readExecutionOwner, trackExecutionOwners, type ExecutionOwner } from "./execution-owner.ts";
@@ -922,13 +922,7 @@ async function completeReplicaInBackground(running: RunningSubagent, completion:
     ? `Textual answer history: ${saved.historyPath}`
     : `Textual answer history unavailable: ${saved.historyError ?? "No saved history."}`;
   let summary = failed ? [`Replica failed: ${saved.errorMessage ?? saved.error ?? "Replica failed."}`, saved.summary.trim(), history].filter(Boolean).join("\n\n") : saved.summary;
-  const report = work.mode === "shared" ? (failed ? "The copy worked in the shared directory; partial changes may already be present." : "")
-    : work.integration.status === "applied" ? ""
-    : work.integration.status === "conflict"
-      ? "The copy finished, but its changes conflict with your current work and were not included."
-      : work.integration.status === "not-attempted"
-        ? "The copy's unfinished work was not included in your work."
-        : "The copy finished, but its changes could not be safely included in your work.";
+  const report = replicaWorkReport(work, failed);
   if (report) summary += `\n\n${report}`;
   running.pendingReplicaResult = undefined;
   queueTerminalDelivery(running, terminalAssistantIdentityFor(running), () => {
@@ -3218,7 +3212,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			saveReplicaRuntime(recordFile, inherited);
 			const plan = resolveRuntimePlan({}, { provider: inherited.provider, modelId: inherited.modelId, thinking: inherited.thinking as ThinkingLevel }, wrapPiModelRegistry(ctx.modelRegistry));
 			const child = await launchPiSubagent({
-				kind: "fresh", id, name, task: replicationAssignment(params.task), executionOwner,
+				kind: "fresh", id, name, task: replicationAssignment(params.task, mode), executionOwner,
 				fork: true, replication: { ...snapshot, recordFile }, runtimePlan: plan,
 				...(source ? { worktree: { branch: await reserveReplicaBranch(ctx.cwd, name, source.commit), base: source.commit } } : {}),
 				parent: { cwd: ctx.cwd, invocationCwd: ctx.cwd, sessionFile: file, sessionId: ctx.sessionManager.getSessionId(), sessionDir: ctx.sessionManager.getSessionDir(), agentDir: getAgentConfigDir() },
@@ -3228,7 +3222,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 			startWidgetRefresh();
 			startStatusRefresh(pi);
 			startRecoveredWatcher(child);
-			return { id, name, sessionFile: child.sessionFile, worktreePath: child.worktree?.path };
+			return { id, name, sessionFile: child.sessionFile, worktreePath: child.worktree?.path, branch: child.worktree?.branch };
 		} catch (error) {
 			if (existsSync(recordFile)) {
 				failReplicaLaunch(recordFile, error, toolCallId);

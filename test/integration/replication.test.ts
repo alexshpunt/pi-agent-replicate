@@ -403,6 +403,14 @@ export default function(pi){
 			await waitUntil(() => entries(parentFile).filter((row) => row.customType === "subagent_result").length === 2, "both sibling results must join");
 			for (const result of entries(parentFile).filter((row) => row.customType === "subagent_result")) assert.equal(result.details.integration.status, "applied");
 			for (const id of ids) assert.equal(readFileSync(join(env.dir, id + ".txt"), "utf8"), id);
+			// Each result names the uncommitted files it added, so the parent never looks for them in the removed checkout.
+			const appliedFiles = entries(parentFile).filter((row) => row.customType === "subagent_result")
+				.map((row) => /Its changes were applied to your working directory and are not committed: (\S+)\.txt\./.exec(row.content)?.[1]);
+			assert.deepEqual(appliedFiles.sort(), [...ids].sort());
+			for (const launch of entries(parentFile).filter((row) => row.message?.role === "toolResult" && row.message.toolName === "replicate")) {
+				const { worktreePath, branch } = launch.message.details;
+				assert.ok(launch.message.content.some((part: any) => part.text?.includes(`started in its own worktree ${worktreePath} on branch ${branch}.`)), JSON.stringify(launch.message.content));
+			}
 			assert.equal(readFileSync(join(env.dir, "parent.txt"), "utf8"), "parent working");
 			assert.deepEqual(readFileSync(join(env.dir, ".git", "index")), index);
 			for (const result of entries(parentFile).filter((row) => row.customType === "subagent_result")) {
@@ -431,6 +439,7 @@ export default function(pi){
 			const result = entries(parentFile).find((row) => row.customType === "subagent_result");
 			assert.match(result.content, /CONFLICT_TASK_FINISHED/);
 			assert.equal(result.details.integration.status, "conflict");
+			assert.ok(result.content.includes(`Its work, including uncommitted changes, is kept in ${result.details.worktreePath} on branch replica/`), result.content);
 			assert.equal(Object.hasOwn(result.details, "recoveryAvailable"), false);
 			assert.equal(Object.hasOwn(result.details, "continuationId"), false);
 			assert.equal(readFileSync(join(env.dir, "collision.txt"), "utf8"), "parent working\n");
@@ -517,6 +526,8 @@ export default function(pi){
 			await assertReplicaSurfaceClosed(results[0]);
 			const sourceDir = outcome === "applied" ? env.dir : results[0].details.worktreePath;
 			assert.equal(readFileSync(join(sourceDir, "visual-change.txt"), "utf8"), "VISUAL_CHILD_EDIT");
+			if (outcome === "applied") assert.match(results[0].content, /Its changes were applied to your working directory and are not committed: visual-change\.txt\./);
+			else assert.ok(results[0].content.includes(`Its work, including uncommitted changes, is kept in ${sourceDir} on branch replica/`), results[0].content);
 			const delivered = await waitForScreen(parent, outcome === "applied" ? /REPLICATION_SUMMARY/ : /no required summary/, 20_000);
 			writeFileSync(join(inspection, "delivered.txt"), delivered);
 			writeFileSync(join(inspection, "result.json"), JSON.stringify(results[0]));

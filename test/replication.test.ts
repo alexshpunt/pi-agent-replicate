@@ -6,7 +6,7 @@ import { it } from "node:test";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { seedReplicationSessionFile } from "../pi-extension/subagents/session.ts";
 import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
-import { materializeReplicationHistory, registerReplicateTool, replicationName } from "../pi-extension/subagents/replication.ts";
+import { materializeReplicationHistory, registerReplicateTool, replicationAssignment, replicationName, replicaWorkReport } from "../pi-extension/subagents/replication.ts";
 import { getHerdrCurrentPaneTitle } from "../pi-extension/subagents/herdr.ts";
 import subagentsExtension from "../pi-extension/subagents/index.ts";
 import subagentDoneExtension from "../pi-extension/subagents/subagent-done.ts";
@@ -110,6 +110,45 @@ it("rejects missing or non-kebab-case names before launching", async () => {
 		await assert.rejects(surface.definition().execute("call", { name, task: "review" }, undefined, undefined, ctx), /kebab-case name/);
 	}
 	assert.equal(surface.launches.length, 0);
+});
+
+it("names where a launched copy works", async () => {
+	let tool: any;
+	const children = [
+		{ id: "a", name: "isolated", sessionFile: "/a", worktreePath: "/repo-worktrees/isolated", branch: "replica/origin/isolated" },
+		{ id: "b", name: "shared", sessionFile: "/b" },
+	];
+	registerReplicateTool({ registerTool: (value: any) => { tool = value; }, on() {} } as any, async () => children.shift()!);
+	const ctx: any = { cwd: "/repo", sessionManager: { getSessionId: () => "parent" } };
+	const isolated = await tool.execute("one", { name: "isolated", task: "work" }, undefined, undefined, ctx);
+	assert.equal(isolated.content[0].text, "isolated started in its own worktree /repo-worktrees/isolated on branch replica/origin/isolated. Its result will arrive here automatically; when it succeeds, its changes are applied to your working directory.");
+	const shared = await tool.execute("two", { name: "shared", task: "work" }, undefined, undefined, ctx);
+	assert.equal(shared.content[0].text, "shared started in your directory /repo. Its result will arrive here automatically.");
+});
+
+it("tells an isolated copy that its uncommitted changes join the original automatically", () => {
+	assert.match(replicationAssignment("Fix the parser.", "worktree"), /your changes, committed or not, are applied to the original agent's working directory automatically; do not copy them there yourself\.\n[^\n]+\n\nYour assignment:\nFix the parser\.$/);
+	const shared = replicationAssignment("Fix the parser.", "shared");
+	assert.match(shared, /You work in the original agent's directory, and it sees your changes immediately\./);
+	assert.doesNotMatch(shared, /applied to the original/);
+});
+
+it("reports where the copy's changes are after each integration outcome", () => {
+	const worktree = { path: "/repo-worktrees/fix", branch: "replica/origin/fix" } as any;
+	const kept = " Its work, including uncommitted changes, is kept in /repo-worktrees/fix on branch replica/origin/fix.";
+	const plan = (paths: string[]) => ({ paths }) as any;
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "applied" }, joinPlan: plan(["a.txt", "src/b.ts"]) }, false),
+		"Its changes were applied to your working directory and are not committed: a.txt, src/b.ts.");
+	const many = Array.from({ length: 23 }, (_, index) => `f${index}.txt`);
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "applied" }, joinPlan: plan(many) }, false),
+		`Its changes were applied to your working directory and are not committed: ${many.slice(0, 20).join(", ")}, and 3 more.`);
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "applied" }, joinPlan: plan([]) }, false), "It had no file changes to apply to your working directory.");
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "conflict" } }, false), `The copy finished, but its changes conflict with your current work and were not included.${kept}`);
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "not-attempted" } }, true), `The copy's unfinished work was not included in your work.${kept}`);
+	assert.equal(replicaWorkReport({ worktree, integration: { status: "blocked" } }, false), `The copy finished, but its changes could not be safely included in your work.${kept}`);
+	assert.equal(replicaWorkReport({ integration: { status: "blocked" } }, false), "The copy finished, but its changes could not be safely included in your work.");
+	assert.equal(replicaWorkReport({ mode: "shared", integration: { status: "shared" } }, false), "");
+	assert.equal(replicaWorkReport({ mode: "shared", integration: { status: "not-attempted" } }, true), "The copy worked in the shared directory; partial changes may already be present.");
 });
 
 it("passes valid caller names unchanged to launch", async () => {
