@@ -48,7 +48,7 @@ Use replication when there are genuinely independent tasks to do in parallel, no
 
 ## Where copies work
 
-By default, each copy works in a separate Git worktree. It starts with a snapshot of the parent's tracked changes and non-ignored new files. Ignored files, dependencies and build outputs are not copied. On success, the host attempts to apply the copy's changes to the parent without changing its HEAD or staging. A conflict or failure leaves the copy's work available for review rather than applying partial changes. A clean join does not guarantee the combined code is correct.
+By default, each copy works in a separate Git worktree. It starts with a snapshot of the parent's tracked changes and non-ignored new files. Ignored files, dependencies and build outputs are not copied. On success, the host attempts to apply the copy's changes, committed or not, to the parent without changing its HEAD or staging. The result then lists the applied files: they are uncommitted changes in the parent's working directory, and the copy's worktree is removed. A conflict or failure leaves the copy's work in its worktree rather than applying partial changes, and the result names that worktree and its branch. A clean join does not guarantee the combined code is correct.
 
 Worktree mode requires a non-bare Git checkout with a commit. Snapshots do not support unresolved index conflicts, sparse or assume-unchanged index entries, submodules or nested Git repositories. Worktrees isolate files, not shared processes, ports or databases.
 
@@ -72,7 +72,7 @@ The global setting is saved in `replicate.json` in the Pi agent directory (`~/.p
 
 ## When a copy stops
 
-A completed copy returns its summary automatically. If it fails, is interrupted or loses its process, the parent receives a failure and any available answer information. Copies do not restart automatically; the parent can create a fresh copy if needed. In worktree mode, failed or conflicted work remains available for recovery; in shared mode, changes may already be in the shared directory.
+A completed copy returns its summary automatically. If it fails, is interrupted or loses its process, the parent receives a failure and any available answer information. Copies do not restart automatically; the parent can create a fresh copy if needed. In worktree mode, failed or conflicted work remains available for recovery in the worktree the result names; in shared mode, changes may already be in the shared directory.
 
 ## More information
 
