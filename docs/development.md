@@ -9,13 +9,15 @@ node --check index.js
 git diff --check
 ```
 
+The isolated runner tests the Pi that `devDependencies` pin, from `node_modules/.bin`, whether you call it through npm or directly. It prints that version as `piVersion` and stops if `pi --version` does not match the pinned version, which happens when `node_modules` is stale. To test another Pi version, change the three `@earendil-works/pi-*` devDependencies and the tested version in `README.md`, then run `npm install`.
+
 Run selected isolated real-Pi and Herdr cases from inside Herdr:
 
 ```bash
 npm run test:integration -- test/integration/replication.test.ts
 ```
 
-For a manual TUI check with a deterministic provider, set `PI_INTEGRATION_TUI_DIR` to a fresh ignored directory and `PI_INTEGRATION_IDE_ENTRY` to the current IDE source entry. Run only this case with the intended Pi binary on `PATH`:
+For a manual TUI check with a deterministic provider, set `PI_INTEGRATION_TUI_DIR` to a fresh ignored directory and `PI_INTEGRATION_IDE_ENTRY` to the current IDE source entry. Run only this case:
 
 ```bash
 node --experimental-strip-types test/integration/run-isolated.ts \
