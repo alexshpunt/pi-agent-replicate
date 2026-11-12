@@ -493,21 +493,26 @@ describe("public subagent tree package boundary", () => {
 		);
 	});
 
-	it("declares the tested Pi 0.84 compatibility line", () => {
+	it("pins one tested Pi version and leaves the host peers open", () => {
 		const manifest = JSON.parse(
 			readFileSync(join(root, "package.json"), "utf8"),
-		) as { peerDependencies?: Record<string, string> };
+		) as { peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+		const tested = manifest.devDependencies?.["@earendil-works/pi-coding-agent"];
+		assert.match(tested ?? "", /^\d+\.\d+\.\d+$/, "the tested Pi must be an exact version");
 		for (const dependency of [
 			"@earendil-works/pi-ai",
 			"@earendil-works/pi-coding-agent",
 			"@earendil-works/pi-tui",
 		]) {
-			assert.equal(
-				manifest.peerDependencies?.[dependency],
-				">=0.84.4 <0.85.0",
-				`${dependency} must stay on the tested Pi compatibility line`,
-			);
+			// Pi supplies these packages to extensions and asks for "*" peers.
+			assert.equal(manifest.peerDependencies?.[dependency], "*", `${dependency} peer range`);
+			assert.equal(manifest.devDependencies?.[dependency], tested, `${dependency} must match the tested Pi`);
 		}
+		assert.match(
+			readFileSync(join(root, "README.md"), "utf8"),
+			new RegExp(`tested with Pi ${tested!.replaceAll(".", "\\.")}\\.`),
+			"README must name the tested Pi version",
+		);
 	});
 
 	it("keeps runtime files while excluding local coordination evidence", () => {
