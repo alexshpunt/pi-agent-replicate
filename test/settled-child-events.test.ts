@@ -390,6 +390,6 @@ describe("settled outcome classification", () => {
     assert.equal(classifyAutoExitOutcome([error()]), "error");
     assert.equal(classifyAutoExitOutcome([aborted()]), "unexpected-abort");
     assert.equal(classifyAutoExitOutcome([{ role: "user", content: [{ type: "text", text: "retry" }] }]), null);
-    assert.equal(newestAssistantEntry([{ role: "assistant", ...clean() }])?.empty, false);
+    assert.equal(newestAssistantEntry([clean()])?.empty, false);
   });
 });

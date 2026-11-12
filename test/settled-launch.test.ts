@@ -59,8 +59,8 @@ describe("settled launch baseline", () => {
 					modelId: "worker",
 					model: "fake/worker",
 					thinking: "off",
-					modelSource: "request",
-					thinkingSource: "request",
+					modelSource: "agent",
+					thinkingSource: "agent",
 				},
 				behavior: {
 					deniedTools: [],
@@ -116,7 +116,7 @@ describe("settled launch baseline", () => {
 				name: "Resume child",
 				sessionFile,
 				message: "Continue now.",
-				parent: { sessionId: "parent", sessionDir },
+				parent: { sessionId: "parent", sessionFile: join(root, "parent.jsonl"), sessionDir },
 			};
 			const operations: PiLaunchOperations = {
 				createPane: () => "pane-resume",
