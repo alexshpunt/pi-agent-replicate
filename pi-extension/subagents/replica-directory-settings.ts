@@ -24,12 +24,12 @@ function readModeFile(file: string): ReplicaDirectoryMode | undefined {
 	return value.directoryMode;
 }
 
-/** Resolve the mode for new replicas: the project setting, then the global setting, then worktree. */
+/** Resolve the mode for new replicas: the project setting, then the global setting, then the shared directory. */
 export function resolveReplicaDirectoryMode(cwd: string): ReplicaDirectorySetting {
 	const project = readModeFile(fileFor("project", cwd));
 	if (project) return { mode: project, source: "project" };
 	const global = readModeFile(fileFor("global", cwd));
-	return global ? { mode: global, source: "global" } : { mode: "worktree", source: "default" };
+	return global ? { mode: global, source: "global" } : { mode: "shared", source: "default" };
 }
 
 export function readReplicaDirectoryMode(cwd: string): ReplicaDirectoryMode {
