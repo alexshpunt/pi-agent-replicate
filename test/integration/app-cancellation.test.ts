@@ -23,6 +23,7 @@ test("cancelling a live App replica retires its terminal without touching its pa
   git("init", "-q"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
   writeFileSync(join(repo, "file"), "base\n"); git("add", "file"); git("commit", "-qm", "base");
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+  writeFileSync(join(agent, "replicate.json"), JSON.stringify({ directoryMode: "worktree" }));
   writeFileSync(join(agent, "models.json"), JSON.stringify({ providers: { "pi-integration": { baseUrl: TEST_PROVIDER_URL, api: "openai-completions", apiKey: "test", compat: { supportsDeveloperRole: false, supportsReasoningEffort: false, supportsUsageInStreaming: false }, models: [{ id: "test", name: "Fixture", reasoning: true, input: ["text"], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
   const parent = JSON.parse(run(app, "do", "space.new", JSON.stringify({ name: "cancel-parent", folder: repo, machine: "" })));
   try {

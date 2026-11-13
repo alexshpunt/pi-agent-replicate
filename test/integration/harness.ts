@@ -233,7 +233,7 @@ function bindTestWorkspace(workspaceId: string): void {
  * Create an isolated test environment with test agent definitions.
  * The temp dir has `.pi/agents/` containing copies of all test agents.
  */
-export function createTestEnv(backend: MuxBackend, options: { replication?: boolean } = {}): TestEnv {
+export function createTestEnv(backend: MuxBackend, options: { replication?: boolean; replicaDirectory?: "worktree" | "default" } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), "pi-integ-"));
   const agentsDir = join(dir, ".pi", "agents");
   const agentDir = join(dir, ".pi", "agent");
@@ -321,6 +321,9 @@ export function createTestEnv(backend: MuxBackend, options: { replication?: bool
 
   if (options.replication) {
     writeFileSync(join(dir, '.gitignore'), '.pi/agent/\n*.jsonl\n*.lineage.json\n');
+    // Most replication suites cover worktree isolation and join, so they pin it as a
+    // tracked project setting that nested worktree copies also inherit.
+    if (options.replicaDirectory !== "default") writeFileSync(join(dir, '.pi', 'replicate.json'), JSON.stringify({ directoryMode: "worktree" }) + '\n');
     execFileSync('git', ['init', '-q', dir]);
     execFileSync('git', ['-C', dir, 'config', 'user.name', 'Integration test']);
     execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.invalid']);
