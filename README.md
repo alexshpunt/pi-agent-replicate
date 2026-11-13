@@ -44,35 +44,37 @@ replicate({
 
 The name uses lowercase kebab-case. The copy works in its own Pi session and can create copies of its own. When its work and any child work finish, the result returns to the original agent automatically. The original can continue independent work or end its turn while it waits; it does not need to poll.
 
-Use replication when there are genuinely independent tasks to do in parallel, not simply to hand off a task and wait. Copies inherit the conversation and tools, but their subsequent conversations are separate.
+Use replication for substantial, self-contained blocks of a task that need no result from each other, while the original agent works on a different block. Small changes and work the original would only wait for stay with the original agent. Copies inherit the conversation and tools, but their subsequent conversations are separate.
 
 ## Where copies work
 
-By default, each copy works in a separate Git worktree. It starts with a snapshot of the parent's tracked changes and non-ignored new files. Ignored files, dependencies and build outputs are not copied. On success, the host attempts to apply the copy's changes, committed or not, to the parent without changing its HEAD or staging. The result then lists the applied files: they are uncommitted changes in the parent's working directory, and the copy's worktree is removed. A conflict or failure leaves the copy's work in its worktree rather than applying partial changes, and the result names that worktree and its branch. A clean join does not guarantee the combined code is correct.
+By default, copies work in the parent's current directory, including ignored files and dependencies. They do not create a worktree or branch, and there is no snapshot or automatic join. Changes are visible immediately and can remain even if a copy fails.
+
+Because copies edit the same directory at the same time, the original agent gives each copy that changes files its own area, such as a module or a set of files. Each copy is told to change only its area, leave other changes alone, report failing checks caused by code outside its area, avoid Git operations and list the files it changed. Only the original agent commits: after the copies return, it checks the combined result and commits it. Read-only work, such as research or review, needs no separate area.
+
+When copies need isolated files, switch to worktree mode:
+
+```text
+/replica-directory worktree
+```
+
+In worktree mode, each copy works in a separate Git worktree. It starts with a snapshot of the parent's tracked changes and non-ignored new files. Ignored files, dependencies and build outputs are not copied. On success, the host attempts to apply the copy's changes, committed or not, to the parent without changing its HEAD or staging. The result then lists the applied files: they are uncommitted changes in the parent's working directory, and the copy's worktree is removed. A conflict or failure leaves the copy's work in its worktree rather than applying partial changes, and the result names that worktree and its branch. A clean join does not guarantee the combined code is correct.
 
 Worktree mode requires a non-bare Git checkout with a commit. Snapshots do not support unresolved index conflicts, sparse or assume-unchanged index entries, submodules or nested Git repositories. Worktrees isolate files, not shared processes, ports or databases.
 
-When copies need the same directory, switch to shared mode:
+Use `/replica-directory shared` to switch back, or `/replica-directory` to choose interactively. The setting is saved in `.pi/replicate.json` in the current project directory and applies to new copies only.
+
+To use worktree mode in every project, add `--global`:
 
 ```text
-/replica-directory shared
+/replica-directory --global worktree
 ```
 
-Shared copies work in the parent's current directory, including ignored files and dependencies. They do not create a worktree or branch, and there is no snapshot or automatic join. Changes are visible immediately and can remain even if a copy fails. Coordinate assignments: parallel edits to the same files can overwrite each other, and there is no automatic rollback.
-
-Use `/replica-directory worktree` to switch back, or `/replica-directory` to choose interactively. The setting is saved in `.pi/replicate.json` in the current project directory and applies to new copies only.
-
-To use shared mode in every project, add `--global`:
-
-```text
-/replica-directory --global shared
-```
-
-The global setting is saved in `replicate.json` in the Pi agent directory (`~/.pi/agent` by default, or `PI_CODING_AGENT_DIR`). A project's own `.pi/replicate.json` takes precedence over it; without either file, copies use worktrees.
+The global setting is saved in `replicate.json` in the Pi agent directory (`~/.pi/agent` by default, or `PI_CODING_AGENT_DIR`). A project's own `.pi/replicate.json` takes precedence over it; without either file, copies use the shared directory.
 
 ## When a copy stops
 
-A completed copy returns its summary automatically. If it fails, is interrupted or loses its process, the parent receives a failure and any available answer information. Copies do not restart automatically; the parent can create a fresh copy if needed. In worktree mode, failed or conflicted work remains available for recovery in the worktree the result names; in shared mode, changes may already be in the shared directory.
+A completed copy returns its summary automatically. If it fails, is interrupted or loses its process, the parent receives a failure and any available answer information. Copies do not restart automatically; the parent can create a fresh copy if needed. In shared mode, changes may already be in the shared directory; in worktree mode, failed or conflicted work remains available for recovery in the worktree the result names.
 
 ## More information
 

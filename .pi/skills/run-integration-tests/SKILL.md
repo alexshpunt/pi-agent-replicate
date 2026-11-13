@@ -5,7 +5,7 @@ description: Run the integration test suite and verify all sessions end-to-end. 
 
 # Run integration tests
 
-Run this workflow from inside herdr. This project supports no other terminal backend.
+Run this workflow from inside herdr. This project supports no other terminal backend. Integration runs, including a single file, happen on ZinPC, never on zinlaptop; follow the heavy-work skill for the checkout and the job.
 
 ## Preflight
 
