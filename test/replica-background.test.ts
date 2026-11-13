@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 import { runReplicaBackground } from "../pi-extension/subagents/replica-background.ts";
-import { createReplicaWork, readReplicaWork } from "../pi-extension/subagents/replica-work.ts";
+import { attachSharedReplicaPane, createReplicaWork, createSharedReplicaWork, readReplicaWork } from "../pi-extension/subagents/replica-work.ts";
 import { snapshotSource } from "../pi-extension/subagents/source-state.ts";
 import { processIncarnationAlive } from "../pi-extension/subagents/lineage.ts";
-import { seedSessionBinding } from "../pi-extension/subagents/session-binding.ts";
+import { seedSessionBinding, writeBindingFile } from "../pi-extension/subagents/session-binding.ts";
 
 it("does not keep durable ownership alive for a zombie PID", { skip: process.platform !== "linux", timeout: 5000 }, async () => {
 	const owner = spawn("python3", ["-c", "import os,sys\npid=os.fork()\nif pid==0: os._exit(0)\nprint(pid,flush=True)\nsys.stdin.read()\nos.waitpid(pid,0)"], { stdio: ["pipe", "pipe", "pipe"] });
@@ -25,6 +25,41 @@ it("does not keep durable ownership alive for a zombie PID", { skip: process.pla
 		}
 		assert.equal(processIncarnationAlive({ pid }, { pid: process.pid }), false);
 	} finally { owner.stdin.end(); await exited; }
+});
+
+it("cleans a settled replica's pane once its process exits after delivery", { skip: process.platform !== "linux", timeout: 10_000 }, async () => {
+	const directory = mkdtempSync(join(tmpdir(), "replica-exit-cleanup-"));
+	const store = join(directory, "store"), bin = join(directory, "bin"), file = join(store, "attempt.json");
+	mkdirSync(store); mkdirSync(bin);
+	// Herdr already closed the pane together with the exited shell.
+	writeFileSync(join(bin, "herdr"), `#!/bin/sh\necho '{"error":{"code":"pane_not_found"}}' >&2\nexit 1\n`, { mode: 0o700 });
+	// The result is saved and delivered while the replica's Pi is still shutting down.
+	const replica = spawn("sleep", ["30"], { stdio: "ignore" });
+	const exited = new Promise<void>(resolve => replica.once("exit", () => resolve()));
+	const saved = { PATH: process.env.PATH, HERDR_ENV: process.env.HERDR_ENV };
+	try {
+		process.env.PATH = `${bin}:${process.env.PATH}`;
+		process.env.HERDR_ENV = "1";
+		createSharedReplicaWork(file, "attempt", "parent", directory);
+		attachSharedReplicaPane(file, "w1:p1");
+		const stat = readFileSync(`/proc/${replica.pid}/stat`, "utf8");
+		const processStart = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
+		writeBindingFile(file, { ...readReplicaWork(file), worktreeLocation: { version: 1, sessionId: "child", sessionFile: join(directory, "child.jsonl"), pid: replica.pid!, processStart, paneId: "w1:p1", cwd: directory } });
+		let stoppedAt = 0;
+		const stop = setTimeout(() => { stoppedAt = Date.now(); replica.kill("SIGKILL"); }, 500);
+		const { cleaned } = await runReplicaBackground({ operation: "cleanup", file, parentCwd: directory, surface: "w1:p1" });
+		clearTimeout(stop);
+		assert.ok(stoppedAt > 0, "cleanup must not finish while the replica process is alive");
+		assert.equal(cleaned, true, "an exit right after delivery must not wait for a backoff retry");
+		assert.equal(readReplicaWork(file).cleaned, true);
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		replica.kill("SIGKILL"); await exited;
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 it("waits without blocking and recovers a completion gate after its owner dies", { timeout: 30_000 }, async () => {
