@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
+// Load the extension at module level, as the other suites do: its cold load takes seconds
+// under the parallel `npm test` run and must not count against a case's timeout.
+import extension from "../pi-extension/subagents/index.ts";
 import { acknowledgeReportedLaunchFailure, appendLineageEvent, hasLineageEvent, reduceLineage, registerLineage } from "../pi-extension/subagents/lineage.ts";
+import { registerSessionLineage, seedSessionBinding, writeBindingFile } from "../pi-extension/subagents/session-binding.ts";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "reported-replica-launch-"));
@@ -41,9 +45,6 @@ it("keeps a failed acknowledgement retryable and records cleanup before delivery
 });
 
 it("restores a metadata-incomplete failed replica without resending its native error", { timeout: 6000 }, async () => {
-  const { default: extension } = await import("../pi-extension/subagents/index.ts");
-  const { seedSessionBinding, registerSessionLineage, writeBindingFile } = await import("../pi-extension/subagents/session-binding.ts");
-  const { writeFileSync } = await import("node:fs");
   const f = fixture(), parentFile = f.node.parentSessionFile!, storeDir = join(f.dir, "store"), workFile = join(f.dir, "failed.json");
   const handlers = new Map<string, Function[]>(), messages: unknown[] = [];
   const ctx: any = { cwd: f.dir, hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
