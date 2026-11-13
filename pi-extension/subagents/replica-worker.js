@@ -14,6 +14,31 @@ function sameParent(file, expected) {
         current.processStart === expected.processStart && current.cwd === expected.cwd &&
         current.sessionFile === expected.sessionFile && sessionLocationAlive(current);
 }
+/** Longest wait for a settled replica's Pi to finish shutting down. */
+const REPLICA_EXIT_WAIT_MS = 10_000;
+/**
+ * The parent delivers a replica's result as soon as it is saved, while that
+ * replica's Pi is still shutting down. Cleanup needs the exit; wait for it here,
+ * outside the durable gate, so a normal shutdown does not become a refused
+ * cleanup that only the slow backoff retry repeats.
+ */
+async function waitForReplicaExit(request) {
+    if (request.operation !== "cleanup")
+        return;
+    const deadline = Date.now() + REPLICA_EXIT_WAIT_MS;
+    for (;;) {
+        let locations;
+        try {
+            locations = [readReplicaWork(request.file).worktreeLocation, request.child && childSessionLocation(request.child.rootDir, request.child.nodeId)];
+        }
+        catch {
+            return;
+        } // Cleanup itself reports an unreadable record.
+        if (!locations.some(location => location && sessionLocationAlive(location)) || Date.now() >= deadline)
+            return;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+}
 function execute(request) {
     return withLineageMutationGate(request.file + ".artifacts", () => {
         if (request.operation === "cleanup") {
@@ -69,6 +94,7 @@ function execute(request) {
 }
 process.once("message", async (request) => {
     let response;
+    await waitForReplicaExit(request);
     for (;;) {
         try {
             response = { result: execute(request) };
