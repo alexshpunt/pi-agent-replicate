@@ -17,7 +17,7 @@ Read [`RELEASING.md`](../../../RELEASING.md) before you act. It is the canonical
 ## Verify the release candidate
 
 1. Run `npm ci`.
-2. Run `npm run lint`, `npm test`, `npm pack --dry-run`, and `git diff --check`.
+2. Run `npm run lint`, `npm run typecheck`, `npm test`, `npm pack --dry-run`, and `git diff --check`.
 3. Load and follow [`../run-integration-tests/SKILL.md`](../run-integration-tests/SKILL.md). Run its deterministic Herdr suite. Do not treat skipped Herdr tests as passing evidence.
 4. Inspect the package preview. It must include `CHANGELOG.md`, the package-root API, and `pi-extension/subagents/`. It must exclude plans, journals, sessions, prototypes, generated evidence, and local configuration.
 
