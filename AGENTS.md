@@ -18,7 +18,7 @@ Keep exactly one model-facing tool, `replicate`, with only `name` and `task` in 
 - `pi-extension/subagents/completion.ts`, `session.ts`, `subagent-done.ts`: completion evidence.
 - `index.ts`, `index.js`, `index.d.ts`: package-root API. Edit all three together.
 
-TypeScript modules under `pi-extension/subagents` that have JavaScript mirrors must stay aligned.
+TypeScript modules under `pi-extension/subagents` that have JavaScript mirrors must stay aligned. The background host worker (`replica-background.ts` forks `replica-worker.js`) runs the JavaScript mirrors, so debug logging or a fix added only to the `.ts` files has no effect there.
 
 ## Checks
 
