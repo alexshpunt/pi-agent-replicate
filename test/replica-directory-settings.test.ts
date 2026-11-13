@@ -29,28 +29,28 @@ function setup() {
   return { a, b, command, ctx, notes };
 }
 
-it("persists a directory mode per project and defaults to worktree", async () => {
+it("persists a directory mode per project and defaults to the shared directory", async () => {
   const { a, b, command, ctx } = setup();
-  assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "worktree", source: "default" });
+  assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "shared", source: "default" });
+  await command.handler("worktree", ctx(a));
+  assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "worktree", source: "project" });
+  assert.equal(readReplicaDirectoryMode(b), "shared");
   await command.handler("shared", ctx(a));
   assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "shared", source: "project" });
-  assert.equal(readReplicaDirectoryMode(b), "worktree");
-  await command.handler("worktree", ctx(a));
-  assert.equal(readReplicaDirectoryMode(a), "worktree");
   await command.handler("invalid", ctx(a));
-  assert.equal(readReplicaDirectoryMode(a), "worktree");
+  assert.equal(readReplicaDirectoryMode(a), "shared");
   writeFileSync(join(a, ".pi", "replicate.json"), "invalid json");
   assert.throws(() => readReplicaDirectoryMode(a));
 });
 
 it("applies a global mode to projects without their own setting", async () => {
   const { a, b, command, ctx, notes } = setup();
-  await command.handler("worktree", ctx(a));
-  await command.handler("--global shared", ctx(b));
-  assert.equal(JSON.parse(readFileSync(join(agentDir, "replicate.json"), "utf8")).directoryMode, "shared");
-  assert.deepEqual(resolveReplicaDirectoryMode(b), { mode: "shared", source: "global" });
-  assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "worktree", source: "project" });
-  await command.handler("--global shared", ctx(a));
+  await command.handler("shared", ctx(a));
+  await command.handler("--global worktree", ctx(b));
+  assert.equal(JSON.parse(readFileSync(join(agentDir, "replicate.json"), "utf8")).directoryMode, "worktree");
+  assert.deepEqual(resolveReplicaDirectoryMode(b), { mode: "worktree", source: "global" });
+  assert.deepEqual(resolveReplicaDirectoryMode(a), { mode: "shared", source: "project" });
+  await command.handler("--global worktree", ctx(a));
   assert.match(notes.at(-1)!, /this project overrides it/);
   await command.handler("shared --global extra", ctx(a));
   assert.match(notes.at(-1)!, /--global/);
