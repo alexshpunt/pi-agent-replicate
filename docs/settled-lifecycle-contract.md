@@ -55,7 +55,7 @@ The stable terminal delivery ID is the child ID prefixed with `terminal:`. Deliv
 
 Old pending `settled` inbox entries are acknowledged without being sent. This prevents an upgrade or restored session from exposing an intermediate response after the terminal-only rule is active.
 
-Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. A delivered child leaves the widget immediately; a rejected Herdr close retries a few times with backoff and then stops with a delivery-log record. Its result is not sent again.
+Cleanup is separate from delivery. An ordinary child pane closes after delivery. A worktree child keeps its review workspace. A delivered child leaves the widget immediately; a rejected Herdr close retries a few times with backoff and then stops with a delivery-log record. Its result is not sent again. A replica's result is delivered as soon as it is saved, while its Pi may still be shutting down; its cleanup first waits up to 10 seconds for that process to exit, so a normal shutdown does not fall into the backoff.
 
 In Herdr App, cancellation persists the Core and shell incarnation before parking or killing the exact child terminal. A changed owner, Core or foreground process prevents termination. A confirmed cancellation can resume cleanup after a lost reply; failed source work remains in its checkout. A moved child is retired by its recorded shell identity before its original replica workspace is cleaned.
 
