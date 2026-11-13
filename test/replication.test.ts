@@ -104,6 +104,14 @@ it("keeps name and task as its only parameters after delivered results and sessi
 	}
 });
 
+it("asks the original for parallel blocks with separate areas and keeps commits with it", () => {
+	const guidelines = toolSurface().definition().promptGuidelines.join("\n");
+	assert.match(guidelines, /substantial, self-contained block[^\n]*needs no result from another block/);
+	assert.match(guidelines, /Give each copy that changes files its own area[^\n]*name it in the task/);
+	assert.match(guidelines, /If your next action after launching a copy would be to wait for it, do the work yourself instead\./);
+	assert.match(guidelines, /Do not commit while copies run\. After they return, check the combined result and commit it yourself\./);
+});
+
 it("rejects missing or non-kebab-case names before launching", async () => {
 	const surface = toolSurface(), ctx = surface.context("original");
 	for (const name of [undefined, "", "Check-tests", "check tests", "check_tests", "check--tests", "-check", "check-", "проверка", "check\nname", "check\n", "check\r\n"]) {
@@ -129,8 +137,17 @@ it("names where a launched copy works", async () => {
 it("tells an isolated copy that its uncommitted changes join the original automatically", () => {
 	assert.match(replicationAssignment("Fix the parser.", "worktree"), /your changes, committed or not, are applied to the original agent's working directory automatically; do not copy them there yourself\.\n[^\n]+\n\nYour assignment:\nFix the parser\.$/);
 	const shared = replicationAssignment("Fix the parser.", "shared");
-	assert.match(shared, /You work in the original agent's directory, and it sees your changes immediately\./);
+	assert.match(shared, /You work in the original agent's directory, and it sees your changes immediately\. Other copies may change other parts of it at the same time\./);
 	assert.doesNotMatch(shared, /applied to the original/);
+});
+
+it("keeps a shared copy inside its area and away from Git", () => {
+	const shared = replicationAssignment("Fix the parser.", "shared");
+	assert.match(shared, /Change only the files your assignment covers\. Do not fix, revert or reformat changes outside it/);
+	assert.match(shared, /Do not commit or change Git state[^\n]*The original agent commits the combined result; this overrides any instruction to commit your work\./);
+	assert.match(shared, /report it in your summary instead of fixing it/);
+	assert.match(shared, /the files you changed and any unresolved issues\.\n\nYour assignment:\nFix the parser\.$/);
+	assert.doesNotMatch(replicationAssignment("Fix the parser.", "worktree"), /Do not commit|files you changed/);
 });
 
 it("reports where the copy's changes are after each integration outcome", () => {

@@ -1,6 +1,6 @@
 # Worktree subagents
 
-The retained package-root API and internal launcher support opt-in isolated Git worktrees. This document describes those retained paths only. The model-facing `replicate` tool defaults to a source-snapshot worktree with automatic host-owned join and successful cleanup; it also supports a shared-directory mode. See the README for that separate contract.
+The retained package-root API and internal launcher support opt-in isolated Git worktrees. This document describes those retained paths only. The model-facing `replicate` tool works in the parent's directory by default; its opt-in worktree mode uses a source-snapshot worktree with automatic host-owned join and successful cleanup. See the README for that separate contract.
 
 For example, a tree consumer can launch:
 
